@@ -192,13 +192,10 @@ class Updater {
     final path = status.value.filePath;
     final info = status.value.info;
     if (path == null) return;
-    final ok = await NativeBridge.installApk(path);
-    if (!ok) {
+    final err = await NativeBridge.installApk(path);
+    if (err != null) {
       status.value = UpdateStatus(UpdatePhase.error,
-          info: info,
-          filePath: path,
-          error: "Couldn't open the installer. Make sure \"Allow installs\" "
-              "is granted, then try again.");
+          info: info, filePath: path, error: "Couldn't open the installer: $err");
     }
   }
 

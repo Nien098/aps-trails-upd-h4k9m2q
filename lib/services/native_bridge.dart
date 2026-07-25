@@ -85,14 +85,17 @@ class NativeBridge {
 
   /// Launches the system package installer on a downloaded APK. Always shows
   /// Android's own install-confirmation screen — no app can install silently.
-  /// Returns false if launching the installer itself failed (e.g. a bad
-  /// FileProvider path) — there's no signal for what happens after it opens.
-  static Future<bool> installApk(String path) async {
+  /// Returns null on success, or the native exception's message if launching
+  /// the installer itself failed (e.g. a bad FileProvider path) — there's no
+  /// signal for what happens after it successfully opens.
+  static Future<String?> installApk(String path) async {
     try {
       await _ch.invokeMethod('installApk', {'path': path});
-      return true;
-    } catch (_) {
-      return false;
+      return null;
+    } on PlatformException catch (e) {
+      return e.message ?? e.code;
+    } catch (e) {
+      return e.toString();
     }
   }
 

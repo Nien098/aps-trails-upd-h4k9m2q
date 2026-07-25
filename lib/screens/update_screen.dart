@@ -29,9 +29,12 @@ class _UpdateScreenState extends State<UpdateScreen> with WidgetsBindingObserver
       }
     });
     _refreshCanInstall();
-    if (Updater.instance.status.value.phase == UpdatePhase.idle) {
-      Updater.instance.check();
-    }
+    // Always re-check on open, not just when nothing has checked yet this
+    // session — Updater is a process-wide singleton, so without this, a
+    // second visit to this screen (app still running from an earlier check)
+    // would just keep showing whatever stale phase/version the first check
+    // left behind, even if a newer release has since been published.
+    Updater.instance.check();
   }
 
   @override
@@ -125,7 +128,7 @@ class _UpdateScreenState extends State<UpdateScreen> with WidgetsBindingObserver
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Update available: ${info.versionName}',
+            Text('Update available: ${info.versionName}+${info.buildNumber}',
                 style:
                     const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
             const SizedBox(height: 6),
@@ -164,7 +167,10 @@ class _UpdateScreenState extends State<UpdateScreen> with WidgetsBindingObserver
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Update ${status.info?.versionName ?? ''} ready to install',
+            Text(
+                'Update ${status.info?.versionName ?? ''}'
+                '${status.info != null ? '+${status.info!.buildNumber}' : ''} '
+                'ready to install',
                 style: const TextStyle(fontSize: 18)),
             const SizedBox(height: 12),
             if (_canInstall == false) ...[

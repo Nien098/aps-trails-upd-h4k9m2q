@@ -566,17 +566,20 @@ class _UpdateBanner extends StatelessWidget {
     return ValueListenableBuilder<UpdateStatus>(
       valueListenable: Updater.instance.status,
       builder: (context, status, _) {
+        final v = status.info == null
+            ? ''
+            : '${status.info!.versionName}+${status.info!.buildNumber}';
         final String? text;
         switch (status.phase) {
           case UpdatePhase.available:
-            text = 'Update available: ${status.info?.versionName} — tap to download';
+            text = 'Update available: $v — tap to download';
           case UpdatePhase.downloading:
             final pct = status.total > 0
                 ? ' (${(100 * status.received / status.total).round()}%)'
                 : '';
             text = 'Downloading update$pct…';
           case UpdatePhase.downloaded:
-            text = 'Update ${status.info?.versionName} ready — tap to install';
+            text = 'Update $v ready — tap to install';
           default:
             text = null;
         }
