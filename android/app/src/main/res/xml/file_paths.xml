@@ -1,12 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Exposes app-private storage to the FileProvider declared in
-     AndroidManifest.xml, for the downloaded update APK. Covers every root
-     path_provider's getApplicationDocumentsDirectory() could plausibly
-     resolve to (its exact Android mapping isn't worth pinning down more
-     precisely than that) — safe to be broad since this provider is
-     exported="false" and only ever reached via URIs we grant ourselves. -->
+     AndroidManifest.xml, for the downloaded update APK.
+
+     Confirmed via a real device error (2026-07): path_provider's
+     getApplicationDocumentsDirectory() on Android saves to an "app_flutter/"
+     folder that is a SIBLING of files/, cache/, and the external-files dir —
+     not contained in any of them, so no combination of files-path/cache-path
+     /external-files-path can ever cover it. root-path (device filesystem
+     root) is the only tag general enough to reach it. Safe to be this broad
+     since the provider is exported="false" and only ever reached via URIs we
+     grant ourselves, never browsable by other apps. -->
 <paths>
-    <files-path name="files_root" path="."/>
-    <cache-path name="cache_root" path="."/>
-    <external-files-path name="external_root" path="."/>
+    <root-path name="app_root" path="."/>
 </paths>
