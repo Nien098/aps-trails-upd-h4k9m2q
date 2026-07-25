@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Exposes <app-docs>/updates/ (where Updater.download() saves the APK) to
+     the FileProvider declared in AndroidManifest.xml. -->
+<paths>
+    <files-path name="updates" path="updates/"/>
+</paths>

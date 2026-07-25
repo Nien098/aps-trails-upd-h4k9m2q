@@ -1,0 +1,151 @@
+# Project Overview
+- **APS Trails** (package `trailguide`, app-facing name "APS Trails"): offline-first Android hiking trail app.
+- Users: author's parents (mom: low-vision, Guide-mode/TTS-first, wants Runkeeper-grade fitness stats; dad: authors/maps trails), and author's brother (Indonesia, has data, uses online region-download).
+- Distribution: sideload only, no Play Store, no CI, no automated tests. Signed release APK shared via WhatsApp/Drive.
+- Stage: feature-complete core app + fitness suite + region download (verified on real device) + a new safety/background-tracking feature (built, **unverified on device**) + a fall-detection feature (designed, **zero code written**).
+
+# Tech Stack
+- Flutter/Dart, min via `flutter.minSdkVersion`/`compileSdkVersion` (Flutter-managed, currently modern/34+).
+- `maplibre_gl ^0.26.2` (+ `maplibre_gl_platform_interface`) — MapLibre Native vector maps.
+- Protomaps PMTiles format (offline `.pmtiles` + online v4 vector tiles via API key).
+- `sqflite`, `path_provider`, `path`, `geolocator ^14`, `flutter_tts`, `vibration`, `wakelock_plus`, `share_plus`, `shared_preferences`, `permission_handler ^11.3.1` (new this session).
+- Kotlin native layer (`android/app/src/main/kotlin/com/trailguide/trailguide/`): `MainActivity.kt`, `TrackingService.kt` (new).
+- Current version: `pubspec.yaml` → `1.5.0+10`. **Rule: bump the `+N` build number before every rebuild** (see Important Decisions).
+
+# Architecture
+- **Map pipeline**: one shared `assets/style/style.json` template (`__DOC__`/`__REGION__` placeholders) drives both the bundled offline basemap and any downloaded region — same schema (landcover/landuse/water/buildings/roads/places) so every feature (routing, auto-follow, styling) works identically regardless of basemap source.
+- **Bundled basemap**: `southwest_bc.pmtiles` (~196MB), shipped as 14 asset chunks, concatenated to app documents dir on first launch (`offline_map.dart`).
+- **Downloaded regions**: online Protomaps v4 tiles → custom Dart-written PMTiles v3 archive (`pmtiles_writer.dart`) saved to `<docs>/map/<id>.pmtiles`. Verified byte-compatible with the same style/routing pipeline (real-device test in Jakarta: render + auto-generate + manual mapping all worked).
+- **Region model**: `Region.mapAsset` distinguishes bundled (`kMapAsset`) vs. downloaded (own id); `userRegions` persisted to `<docs>/user_regions.json`, merged with bundled `kRegions` via `allRegions()`.
+- **Routing/graph** (`trail_router.dart`): builds a graph from `queryRenderedFeaturesInRect` over `['trails','sidewalks','roads-fill']` — **viewport-limited**, must pan camera into view before querying. Dijkstra + temp-node splicing. Powers: author auto-follow/connect-the-dots/delete-rejoin, auto-generate (out-and-back/loop), and record-trail path cleanup/snap.
+- **Cue system** (`cue_gen.dart`): `suggestCues()` = pure geometric turn detection (bearing delta, no map data needed) — works on drawn or recorded paths. `orderCuesAlongPath()` sorts by walking-order projection so out-and-back/loop cues fire correctly without double-firing. Dual-action cues (`returnEnabled`) let one marker carry both outbound+return directions.
+- **Activity/fitness pipeline**: `Activity` (with `List<TrackPoint>` incl. optional elevation) → sqflite `activities` table (DB v7). Guide/Record screens compute distance (jitter-filtered), elevation gain (smoothed+hysteresis), duration, moving time. `Settings` holds all formatters + calorie estimate. History/Stats/TrailProgress screens consume the same `Activity` records (app-recorded + Runkeeper-imported alike).
+- **Safety pipeline (new)**: `StillnessWatchdog` (Dart state machine) fed GPS positions → nudge → SMS via `NativeBridge` (MethodChannel `trailguide/native`) → `MainActivity.kt` → `SmsManager` with delivery-confirmation `BroadcastReceiver`. Background survival via `TrackingService.kt`, a do-nothing foreground service that just keeps the process alive.
+
+# File/Directory Knowledge
+**Project root**: `F:\ClaudeAI\Projects\TrailGuide`
+
+`lib/`
+- `main.dart` — loads `Settings`, `loadUserRegions()`, runs app.
+- `config.dart` — Protomaps API key (`kProtomapsKey = '2cb9eb6ae263fc16'`), tile URL builders, `kRegionMinZoom/MaxZoom` (10–15).
+- `models/region.dart` — `Region` (+ `kRegions` bundled list, `userRegions`, JSON persistence, `allRegions()`).
+- `models/trail.dart` — `Trail`, `Cue`, `CueType`; backup JSON (de)serialization.
+- `models/activity.dart` — `Activity`, `TrackPoint` (position+tSec+optional ele).
+- `services/offline_map.dart` — style.json templating; baked-basemap copy; online style for download screen.
+- `services/pmtiles_writer.dart` — PMTiles v3 writer (Hilbert tile IDs, varint directories, 127-byte header). **Verified working.**
+- `services/region_downloader.dart` — tile enumeration, size estimate (sampling), batched download.
+- `services/trail_router.dart` — routing graph, Dijkstra, auto-generate, snap-to-network.
+- `services/trail_store.dart` — sqflite, DB v7 (`trails` + `activities` tables), migrations.
+- `services/cue_gen.dart` — turn-cue suggestion + walking-order sort.
+- `services/geo.dart` — distance/length/simplify (Douglas-Peucker)/`nearestPointOnPath` helpers.
+- `services/settings.dart` — **all** app settings (units, weight, safety config) + formatters.
+- `services/trail_share.dart` — single-trail export/import via file.
+- `services/import_fit.dart` — Runkeeper CSV (bulk, no track) + GPX (single activity, full track) import.
+- `services/backup.dart` — full `.tgbackup` export/merge-restore (trails+activities+settings+regions; NOT map tiles).
+- `services/native_bridge.dart` **(new)** — Dart↔Kotlin bridge: tracking service start/stop, SMS send, battery-optimization check/request.
+- `services/stillness_watchdog.dart` **(new)** — fall-adjacent stillness detection state machine.
+- `screens/home_screen.dart` — trail list, region picker, new-trail menu (draw/record), map-areas download sheet, backup/restore, Settings entry point.
+- `screens/author_screen.dart` — manual editor: draw/cue modes, auto-generate (slider-based length), long-press-to-move cues (snap-to-path default, free-placement toggle), live trail length.
+- `screens/guide_screen.dart` — walking mode: cues, off-route, live stats, **stillness alert wired in**.
+- `screens/record_trail_screen.dart` — GPS record-a-trail: records raw path, Douglas-Peucker + router-snap cleanup on Stop, **stillness alert wired in**.
+- `screens/activity_detail_screen.dart` — walk detail: stat grid, route map, elevation/pace graphs (hand-drawn), splits.
+- `screens/history_screen.dart` — all walks, all-time/7-day totals, weight editor.
+- `screens/stats_screen.dart` — Trends & Records: period toggle, 8-week bar/line charts, lifetime averages, personal records.
+- `screens/trail_progress_screen.dart` — per-trail walk history/route-matching ("X% faster than your first walk here").
+- `screens/download_region_screen.dart` — online map framing + download flow.
+- `screens/settings_screen.dart` **(new)** — safety-alert config (toggle/contact/timers/test-SMS) + battery-optimization status/fix.
+- `widgets/base_map.dart` — MapLibreMap wrapper (long-click support added earlier).
+- `widgets/mini_charts.dart` — `AreaLineChart`/`BarChartMini`, CustomPainter, no chart library.
+- `widgets/big_action_card.dart` **(new)** — shared banner widget, extracted from `guide_screen.dart`'s old private `_BigCard`; used by both walk screens for cue/off-route/stillness cards.
+
+`android/app/src/main/kotlin/com/trailguide/trailguide/`
+- `MainActivity.kt` — import-file channel (`trailguide/import`, unchanged) + `trailguide/native` channel: `startTracking`/`stopTracking`/`sendSms`/`isIgnoringBatteryOptimizations`/`requestIgnoreBatteryOptimizations`/`showNudgeNotification`/`cancelNudgeNotification`. Caches its `FlutterEngine` in `FlutterEngineCache` (key `trailguide_main_engine`) so `StillnessAckReceiver` can reach it.
+- `TrackingService.kt` — minimal foreground service (`FOREGROUND_SERVICE_TYPE_LOCATION`), does no work itself, just keeps the process alive.
+- `StillnessAckReceiver.kt` **(new)** — `BroadcastReceiver` behind the nudge notification's "I'm OK" action; cancels the notification and invokes `acknowledgeStillness` on the cached engine's `trailguide/native` channel (native→Dart direction, handled by `NativeBridge.init()`'s `setMethodCallHandler`).
+
+`android/app/src/main/AndroidManifest.xml` — new permissions: `ACCESS_BACKGROUND_LOCATION`, `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_LOCATION`, `POST_NOTIFICATIONS`, `SEND_SMS`; new `<service>` declaration for `TrackingService`.
+
+Signing: `android/app/aps-trails.keystore` + `android/key.properties` (both gitignored — read `key.properties` directly for credentials, do not duplicate them in docs).
+
+# Current State
+**Completed**: offline map (bundled + downloaded regions), author mode (draw/cue/auto-generate/auto-follow/move-cue), guide mode (TTS/vibration/off-route/stats), record-trail-by-walking, full fitness suite (History/Stats/TrailProgress/ActivityDetail), Runkeeper CSV+GPX import, full backup/restore, release signing/sideload.
+
+**Built and VERIFIED on device (2026-07-23, v1.5.0+8)**: stillness-detection nudge→SMS timing, in both Guide and Record modes — fires within ~10s of the configured threshold. Found and fixed a real bug in the process (see Work Completed #12).
+
+**Still UNVERIFIED on device**: background/screen-off tracking survival (foreground service) specifically with the screen locked/app backgrounded (all testing so far has been foreground, screen-on), and battery-optimization/OEM-kill behavior.
+
+**Designed, zero code**: sudden-fall (accelerometer) detection feature — see Immediate Next Steps.
+
+# Work Completed In This Session
+1. **Region download feature** (Protomaps API key wired in) — `config.dart`, `pmtiles_writer.dart`, `region_downloader.dart`, `download_region_screen.dart`, `Region.mapAsset`/`userRegions` persistence, `offline_map.dart` per-region style caching. **Verified working** via real Jakarta test.
+2. **Backup/restore** — `backup.dart`, home-screen `.tgbackup` share + merge-restore-on-open.
+3. **Segmented-button label wrap fix** (`showSelectedIcon: false` across all `SegmentedButton`s).
+4. **Center-on-me** buttons added to both Author (new 🎯 FAB) and Guide (existing recenter now jumps immediately) modes.
+5. **Record-by-walking feature** (`record_trail_screen.dart` new file) — GPS-records a walk, auto-builds a `Trail` with Douglas-Peucker-simplified + router-snapped path and auto-generated cues; entry point added to Home's "New trail" sheet.
+6. **APK versioning bug found & fixed**: `pubspec.yaml` version was stuck at `1.0.0+1` for ~10 rebuilds — same versionCode+signature caused some Android installers to silently "Open" instead of "Install," so several feature rebuilds never reached the test device. Fixed by bumping every rebuild since; **must continue this discipline**.
+7. **Cue drag-to-move rework**: native MapLibre `draggable` circles caused duplicate "ghost" circles on drag (buggy/unreliable, also broken on reloaded trails) — **reverted entirely**. Replaced with long-press-to-select (highlights gold) → tap-map-to-place, snapping onto the drawn path by default, with a "Free placement" toggle for exact placement. Long-press semantics now branch by mode (Cue mode = move a cue; Draw mode = delete an anchor, unchanged).
+8. **Walked-trail cleanup**: `geo.dart` gained `simplifyPath` (Douglas-Peucker) and `nearestPointOnPath`; used both in `record_trail_screen.dart` (noise removal + router-snap) and `author_screen.dart` (cue snap-to-path).
+9. **Auto-generate UI**: replaced fixed Short/Medium/Long chips with a slider (0.5–15km) + live unit-aware readout + zone labels; fixed the generator not respecting the km/mi toggle.
+10. **Fitness/stats suite** (large, multi-turn): distance+elevation tracking, units toggle, History screen, Trends & Records (`stats_screen.dart`), per-trail Progress/route-matching, elevation profile + pace graphs (`mini_charts.dart`), Runkeeper CSV/GPX import (`import_fit.dart`), various nav-bar padding fixes across all new scrolling screens.
+11. **Background tracking + stillness safety alert** (this session's final major addition, detailed under Architecture) — `TrackingService.kt`, `MainActivity.kt` native channel additions, `stillness_watchdog.dart`, `native_bridge.dart`, `settings_screen.dart`, `big_action_card.dart` extraction, wiring into both `guide_screen.dart` and `record_trail_screen.dart`. New manifest permissions + `permission_handler` dependency. **APK builds clean (exit 0), but zero on-device verification yet.**
+12. **Stillness-timing bug found + fixed on real device (v1.5.0+7→+8).** User tested with nudge/escalate both set to 2 min, phone stationary on a table: Guide mode never nudged after 4+ minutes; Record mode eventually did but late. Root cause: `StillnessWatchdog`'s phase-escalation check only ran inside `update()` (i.e. only when a new GPS fix arrived) — but a stationary phone with a *good* lock is exactly the case where Android's `distanceFilter:3` location stream correctly stops emitting fixes, so the elapsed-time check silently never re-ran. Added a debug overlay (Settings → Safety & battery → "Show stillness debug overlay") showing live `phase/still/fix-age/accuracy/anchor-resets`, which is what surfaced the smoking gun (`still:184s` but `fix:154s ago`). Fixed by giving `StillnessWatchdog` its own internal `Timer.periodic(10s)` that re-runs the same check independent of fix arrival. Retested: both Guide and Record mode now nudge at ~131s for a 2-min (120s) threshold — the ~10s overshoot is the expected worst-case poll-interval lag. **Nudge/SMS timing is now verified working in both modes.**
+13. **Second stillness bug found + fixed (v1.5.0+8→+9): anchor never reset while genuinely moving.** User reported the still-timer kept climbing even while GPS fixes showed real movement (distance stat increasing). Root cause: `_anchor` only reset on a fix landing >20m in a *straight line* from it — so pacing, looping, or zigzagging within a 20m radius (plausible while placing cues, or in a winding residential grid) never crossed that threshold even though real distance was being covered. Fixed by also tracking cumulative walked distance since the anchor was set (reusing the same 2.5–100m jitter/bad-fix filter the distance stat already uses) and resetting the anchor on either signal. Debug overlay gained a `walked:Xm` field to show this live. **Also tightened `_maxDetourFactor` in `trail_router.dart` from 6.0→2.5** — same session, user reported a recorded trail's auto-cleanup snapping onto a nearby loop/cul-de-sac instead of the real walked path in a dense street grid; this is a mitigation (the underlying shortest-path reconnection approach can still diverge from the real track in principle — true fix would be GPS map-matching, not attempted), not a guaranteed complete fix, flagged as such to the user.
+14. **Two new safety-alert features added (v1.5.0+9→+10), NOT yet tested on device:**
+    - **Actionable "I'm OK" from the notification shade**, so a nudge can be silenced without opening the app — same UX as snoozing an alarm. New native pieces: `StillnessAckReceiver.kt` (manifest-registered `BroadcastReceiver`, `exported=false`), a new high-importance notification channel (`stillness_nudge_channel`) posted via `MainActivity.showNudgeNotification()`, and `FlutterEngineCache` used to let the static receiver reach back into the already-running Dart engine and call `NativeBridge`'s new native→Dart `acknowledgeStillness` method (registered via `NativeBridge.init()`, called once from `main()`). This does **not** use a headless/background isolate — it reaches the same main-isolate engine already running the walk screen, consistent with the earlier decision to keep the foreground service passive. `NativeBridge.showNudgeNotification()/cancelNudgeNotification()` are called from `_onStillnessNudge()`/`_acknowledgeStillness()`/`_sendStillnessAlert()`/`dispose()`/`_stop()` in both `guide_screen.dart` and `record_trail_screen.dart`.
+    - **"Send emergency SMS" toggle** (Settings → Safety & battery, default ON, right below "Enable safety alert"). When turned off, an unacknowledged nudge never escalates to SMS — instead `StillnessWatchdog._evaluate()` resets its anchor clock and re-fires the nudge, repeating roughly every (nudge+escalate) minutes until acknowledged or the walker moves. Framed to the user as a way to catch a walk/record session left running after they've actually stopped, without ever texting anyone. The escalate-minutes stepper's label switches between "Then send the alert after another" / "Then remind again after another" based on this toggle. New setting: `Settings.sendEmergencySms` (persisted).
+
+# Current Task
+Was mid-discussion (design-only, explicitly "no coding") on a **fall-detection** feature (sudden velocity + sudden stop via accelerometer) when the user ran low on tokens and requested this handoff instead. Nothing has been implemented for it.
+
+# Outstanding Issues
+- **Background/screen-off survival is still unverified.** Nudge/SMS *timing* is now confirmed correct (see Work Completed #12), but only tested foreground/screen-on. Open questions: does `Geolocator`'s position stream keep delivering with screen off/app backgrounded under just this foreground service; does the SMS delivery-confirmation `BroadcastReceiver` fire reliably across Android versions/OEMs; does Samsung's separate "Sleeping apps" OEM battery list still kill the process despite the standard Android battery-optimization exemption being granted (no programmatic fix exists for that OEM-specific list — only manual user guidance in Settings screen).
+- **Stillness-alert wiring is duplicated**, not shared, between `guide_screen.dart` and `record_trail_screen.dart` (each has its own near-identical `_onStillnessNudge`/`_sendStillnessAlert`/`_acknowledgeStillness`/`_stillnessCard`). Acceptable-for-now scope tradeoff; worth extracting if fall-detection adds a second duplicated set.
+- CSV-imported Runkeeper activities have no GPS track → no elevation/pace graph or route map for those entries (by design, not a bug — GPX imports and app-recorded walks have full data).
+- Pre-existing harmless lint: `use_build_context_synchronously` in `author_screen.dart` (~line 790, `PopScope` pattern) and a cosmetic doc-comment lint in `region.dart` — both long-standing, ignored.
+- Zero automated tests exist anywhere in the project.
+
+# Important Decisions
+- **Single shared style.json schema** for bundled and downloaded maps — deliberate, so every feature (routing, styling, auto-follow) works identically regardless of map source. Do not fork the style per source.
+- **Foreground service does no work itself** — it exists purely to keep the process alive; all actual GPS/TTS/cue/stillness logic stays in the existing Dart widget code, unchanged in shape. Rejected the alternative (`flutter_background_service`-style headless Dart isolate) because it would require moving all that logic into a separate isolate — a much bigger, riskier refactor than the promise made to the user ("nothing existing needs to change").
+- **SMS delivery is confirmed via `PendingIntent`+`BroadcastReceiver`**, not assumed from a non-throwing API call — this was treated as essential given the safety-critical nature of the feature (a silent, unconfirmed "success" would be dangerous).
+- **Fall-alert semantics designed to invert stillness-alert semantics**: fall detection would default to auto-sending unless cancelled within a countdown (since a real fall may leave her unable to respond), whereas the stillness nudge waits for lack of *any* response before escalating.
+- **Safety features are opt-in, off by default** — both stillness alert and (planned) fall detection are separate toggles a user must explicitly enable, given the extra permissions and battery/reliability tradeoffs.
+- **Cue repositioning uses app-owned long-press+tap, not native drag** — native MapLibre draggable circles were reliably buggy (ghost duplicates); reverted in favor of full manual control, which also enabled the snap-to-path/free-placement design cleanly.
+- **Version-bump-every-rebuild is now a hard rule** (see Outstanding Issues #6 in Work Completed) — codified because it silently wasted ~10 rebuilds' worth of testing.
+
+# Relevant Code Patterns
+- **Settings**: every user-facing preference lives in `services/settings.dart` as a `ValueNotifier`, persisted via `shared_preferences`, with a `set*` async method and a `load()` entry. Follow this exact pattern for any new setting (see `safetyEnabled`/`emergencyPhone`/`nudgeMinutes`/`escalateMinutes` as the template).
+- **Native bridge**: one `MethodChannel` per concern (`trailguide/import`, `trailguide/native`), registered in `MainActivity.configureFlutterEngine`, wrapped Dart-side in a static-method class (`NativeBridge`) that swallows exceptions and returns safe defaults — never let a native-call failure crash the walk.
+- **Big alert cards**: `BigActionCard` (shared widget) is the standard shape for any bottom-anchored, high-contrast, dismissible alert/cue banner — icon + text + repeat + dismiss, `Positioned` bottom w/ `SafeArea`. Reuse it for any new alert type (as done for fall-detection's planned countdown card) rather than building a new banner from scratch.
+- **State machines for safety features**: `StillnessWatchdog` is the template — plain Dart class (no `BuildContext`), callback-based (`onNudge`, `onSendAlert`), fed via a single `.update(pos)` call from the screen's existing position-stream listener, disposed alongside it. Fall detection should follow this same shape, fed from an accelerometer stream instead.
+- **Nav-bar-safe scrolling screens**: every new scrolling screen pads its `ListView`/`SingleChildScrollView` bottom by `MediaQuery.viewPaddingOf(context).bottom` (learned the hard way — several screens shipped clipped before this became standard).
+- **Router-dependent operations require the camera to have the target on-screen first** — any code calling into `TrailRouter` (snap/connect/route) must `moveCamera`/`animateCamera` to cover the relevant points before querying, since `queryRenderedFeaturesInRect` is viewport-limited.
+
+# Dependencies And Integrations
+- **Protomaps API**: key `2cb9eb6ae263fc16` (embedded in app, not secret for a native client), endpoint `https://api.protomaps.com/tiles/v4/{z}/{x}/{y}.mvt?key=...`, CORS origins set to `*` (irrelevant for native apps).
+- **No backend, no auth, no cloud** — fully local-first; the only network calls are Protomaps tile fetches during region download.
+- **No environment variables** — the API key is a literal in `lib/config.dart`.
+- **Android permissions** (current full set): `ACCESS_FINE_LOCATION`, `ACCESS_COARSE_LOCATION`, `ACCESS_BACKGROUND_LOCATION`, `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_LOCATION`, `POST_NOTIFICATIONS`, `SEND_SMS`.
+- **SMS**: sent via `android.telephony.SmsManager`, no third-party SMS plugin — real carrier signal required (user confirmed her mom's phone has SIM+SMS service, no data plan).
+
+# Testing Status
+- No automated tests exist.
+- Manual-only verification loop: build APK → sideload to family phones (Samsung Note10+, Galaxy A12 confirmed) → real-world walk/use → report back.
+- **Verified on real device**: region download + render + auto-generate + manual mapping (Jakarta test); stillness nudge→SMS timing in both Guide and Record modes, foreground/screen-on, including the moving-anchor fix (2026-07-23, v1.5.0+8/+9 — see Work Completed #12–13).
+- **Not yet verified on device**: background/screen-off tracking survival specifically, SMS delivery-confirmation receiver across OEMs, battery-optimization fix flow, the trail-router detour-factor tightening (#13), and both brand-new v1.5.0+10 features — the notification "I'm OK" action (native BroadcastReceiver + FlutterEngineCache path, never exercised on a real device yet) and the "Send emergency SMS" off/reminder-only toggle.
+- **Not started**: fall detection (no code to test).
+
+# Immediate Next Steps
+1. **Real-device test the two new v1.5.0+10 features** (highest priority — untested native code path): (a) trigger a nudge, background the app (don't force-close), confirm the actionable notification appears and tapping "I'm OK" silences the nudge in-app without reopening it — this is the first real test of the `FlutterEngineCache`/`StillnessAckReceiver` path, so also check logcat for `TGNative` warnings if it silently doesn't work; (b) turn off "Send emergency SMS" in Settings and confirm a nudge repeats periodically instead of ever escalating to SMS.
+2. **Real-device test screen-off/backgrounded survival**: start a Guide or Record session, lock the screen, wait through a full nudge→escalate cycle, confirm TTS/vibration/cues still fire and the SMS sends with delivery confirmation. The debug overlay (Settings → Safety & battery → "Show stillness debug overlay") is available to help diagnose if anything looks off.
+3. If Samsung's OEM battery management still kills the process despite the standard exemption being granted, there's no known programmatic fix — only stronger in-app user guidance is possible; investigate if this becomes a real problem.
+4. **Retest recorded-trail cleanup** (Work Completed #13) for remaining loop/circle artifacts after the `_maxDetourFactor` 6.0→2.5 tightening — this was a mitigation, not a guaranteed fix; if loops persist, next lever is either further tightening or a perpendicular-deviation-from-straight-line rejection check in `trail_router.dart`'s `connect()`.
+5. **Build fall detection** per the agreed scaffold (was awaiting explicit go-ahead when tokens ran out): add `sensors_plus` dependency; new `lib/services/fall_detector.dart` (3-stage heuristic: free-fall dip → impact spike → sustained post-impact stillness, reusing/adapting the stillness-window concept — and per the timing bug fixed in #12, drive its check off its own timer too, not solely off sensor-event arrival); new standalone `fallDetectionEnabled` Settings toggle (shares `emergencyPhone`); new countdown-style `BigActionCard` variant defaulting to auto-send-unless-cancelled; wire into both `guide_screen.dart` and `record_trail_screen.dart` identically to `StillnessWatchdog`; add a settings-screen toggle+explanation. Expect a real-world threshold-calibration pass after first build (start conservative — favor fewer false alarms over catching every possible fall).
+6. Consider extracting the duplicated stillness-alert (and soon fall-alert) wiring from the two walk screens into a shared controller/mixin if the duplication grows further.
+
+# Context Future Claude Must Remember
+- **Always bump `pubspec.yaml`'s `version:` build number (`+N`) before every rebuild** meant for sideload testing — same versionCode+signature can silently fail to update on-device (confirmed root cause of a multi-rebuild-wasted bug this session). If a user ever reports a shipped feature "isn't there," suspect this before assuming a code bug; verify by extracting `lib/arm64-v8a/libapp.so` from the built APK and `grep -a` for a distinctive UI string directly (grepping the whole APK zip gives false negatives due to compression).
+- The user's mother has **no data plan but does have SMS/voice** — this is why the safety feature routes through SMS rather than any data-dependent notification.
+- The user is deeply invested in this being genuinely reliable for elderly parents in the backcountry — err toward honest caveats about reliability ceilings (GPS/SMS signal limits, battery-optimization limits, fall-detection false-positive/negative tradeoffs) rather than overpromising; the user has consistently responded well to this framing throughout the project.
+- Signing keystore + password live only in `android/key.properties` (gitignored) — do not regenerate; reuse the existing key for every future release build or sideloads will break for users who already installed a prior build.
+- The user runs on a token/time budget per session and has explicitly asked for terse, execution-focused responses during active build work — avoid re-deriving already-settled design from scratch; read this document and proceed directly.
