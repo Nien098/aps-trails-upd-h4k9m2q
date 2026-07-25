@@ -1,6 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Exposes <app-docs>/updates/ (where Updater.download() saves the APK) to
-     the FileProvider declared in AndroidManifest.xml. -->
+<!-- Exposes app-private storage to the FileProvider declared in
+     AndroidManifest.xml, for the downloaded update APK. Covers every root
+     path_provider's getApplicationDocumentsDirectory() could plausibly
+     resolve to (its exact Android mapping isn't worth pinning down more
+     precisely than that) — safe to be broad since this provider is
+     exported="false" and only ever reached via URIs we grant ourselves. -->
 <paths>
-    <files-path name="updates" path="updates/"/>
+    <files-path name="files_root" path="."/>
+    <cache-path name="cache_root" path="."/>
+    <external-files-path name="external_root" path="."/>
 </paths>

@@ -15,24 +15,41 @@ class UpdateScreen extends StatefulWidget {
   State<UpdateScreen> createState() => _UpdateScreenState();
 }
 
-class _UpdateScreenState extends State<UpdateScreen> {
+class _UpdateScreenState extends State<UpdateScreen> with WidgetsBindingObserver {
   String _installedVersion = '…';
   bool? _canInstall; // null = not checked yet
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     PackageInfo.fromPlatform().then((p) {
       if (mounted) {
         setState(() => _installedVersion = '${p.version}+${p.buildNumber}');
       }
     });
-    NativeBridge.canInstallPackages().then((can) {
-      if (mounted) setState(() => _canInstall = can);
-    });
+    _refreshCanInstall();
     if (Updater.instance.status.value.phase == UpdatePhase.idle) {
       Updater.instance.check();
     }
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Re-check after a trip to system Settings to grant "Allow installs".
+    if (state == AppLifecycleState.resumed) _refreshCanInstall();
+  }
+
+  void _refreshCanInstall() {
+    NativeBridge.canInstallPackages().then((can) {
+      if (mounted) setState(() => _canInstall = can);
+    });
   }
 
   Future<void> _download() async {
@@ -144,7 +161,6 @@ class _UpdateScreenState extends State<UpdateScreen> {
         );
 
       case UpdatePhase.downloaded:
-      case UpdatePhase.installing:
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -164,7 +180,7 @@ class _UpdateScreenState extends State<UpdateScreen> {
               const SizedBox(height: 10),
             ],
             FilledButton.icon(
-              onPressed: status.phase == UpdatePhase.installing ? null : _install,
+              onPressed: _install,
               icon: const Icon(Icons.system_update_alt),
               label: const Text('Install update'),
             ),
@@ -176,16 +192,28 @@ class _UpdateScreenState extends State<UpdateScreen> {
         );
 
       case UpdatePhase.error:
+        final canRetryInstall = status.filePath != null;
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Couldn\'t check for updates: ${status.error ?? 'unknown error'}',
+            Text(status.error ?? 'Something went wrong',
                 style: const TextStyle(fontSize: 15, color: Color(0xFFC62828))),
             const SizedBox(height: 12),
-            OutlinedButton.icon(
-              onPressed: () => Updater.instance.check(),
+            if (_canInstall == false) ...[
+              const Text(
+                  "APS Trails needs permission to install updates.",
+                  style: TextStyle(fontSize: 14, color: Color(0xFF4A4A4A))),
+              const SizedBox(height: 10),
+              OutlinedButton(
+                onPressed: NativeBridge.requestInstallPackagesPermission,
+                child: const Text('Allow installs'),
+              ),
+              const SizedBox(height: 10),
+            ],
+            FilledButton.icon(
+              onPressed: canRetryInstall ? _install : () => Updater.instance.check(),
               icon: const Icon(Icons.refresh),
-              label: const Text('Try again'),
+              label: Text(canRetryInstall ? 'Try installing again' : 'Try again'),
             ),
           ],
         );

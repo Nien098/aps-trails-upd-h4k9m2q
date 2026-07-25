@@ -92,8 +92,13 @@ class MainActivity : FlutterActivity() {
                         result.success(null)
                     }
                     "installApk" -> {
-                        installApk(call.argument<String>("path") ?: "")
-                        result.success(null)
+                        try {
+                            installApk(call.argument<String>("path") ?: "")
+                            result.success(null)
+                        } catch (e: Exception) {
+                            Log.e("TGNative", "installApk failed", e)
+                            result.error("install_failed", e.message, null)
+                        }
                     }
                     "canInstallPackages" -> {
                         val can = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -229,19 +234,16 @@ class MainActivity : FlutterActivity() {
      * (no root, no device-owner/MDM) can never install silently.
      */
     private fun installApk(path: String) {
-        if (path.isBlank()) return
-        try {
-            val file = File(path)
-            val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
-            val intent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(uri, "application/vnd.android.package-archive")
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            startActivity(intent)
-        } catch (e: Exception) {
-            Log.e("TGNative", "installApk failed", e)
+        if (path.isBlank()) throw IllegalArgumentException("empty path")
+        val file = File(path)
+        if (!file.exists()) throw IllegalStateException("downloaded file missing: $path")
+        val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "application/vnd.android.package-archive")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
+        startActivity(intent)
     }
 
     override fun onNewIntent(intent: Intent) {

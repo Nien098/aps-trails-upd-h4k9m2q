@@ -27,7 +27,7 @@ class UpdateInfo {
   final String notes; // release body, shown as a plain-text changelog
 }
 
-enum UpdatePhase { idle, checking, upToDate, available, downloading, downloaded, installing, error }
+enum UpdatePhase { idle, checking, upToDate, available, downloading, downloaded, error }
 
 class UpdateStatus {
   UpdateStatus(
@@ -90,7 +90,8 @@ class Updater {
         await download();
       }
     } catch (e) {
-      status.value = UpdateStatus(UpdatePhase.error, error: e.toString());
+      status.value = UpdateStatus(UpdatePhase.error,
+          error: "Couldn't check for updates: $e");
     }
   }
 
@@ -173,7 +174,8 @@ class Updater {
       await sink.close();
       status.value = UpdateStatus(UpdatePhase.downloaded, info: info, filePath: path);
     } catch (e) {
-      status.value = UpdateStatus(UpdatePhase.error, info: info, error: e.toString());
+      status.value = UpdateStatus(UpdatePhase.error,
+          info: info, error: 'Download failed: $e');
     } finally {
       client.close(force: true);
     }
@@ -182,12 +184,22 @@ class Updater {
   /// Hands the downloaded APK to Android's own installer. This always shows
   /// the system's install-confirmation screen — there is no way for a normal
   /// app to install silently, on any Android version, without root or MDM.
+  /// Deliberately does NOT transition to some "installing" terminal state:
+  /// there is no reliable signal for when the user finishes or cancels the
+  /// system installer, so status stays at `downloaded` (button stays
+  /// tappable) unless launching the installer itself outright failed.
   Future<void> install() async {
     final path = status.value.filePath;
+    final info = status.value.info;
     if (path == null) return;
-    status.value = UpdateStatus(UpdatePhase.installing,
-        info: status.value.info, filePath: path);
-    await NativeBridge.installApk(path);
+    final ok = await NativeBridge.installApk(path);
+    if (!ok) {
+      status.value = UpdateStatus(UpdatePhase.error,
+          info: info,
+          filePath: path,
+          error: "Couldn't open the installer. Make sure \"Allow installs\" "
+              "is granted, then try again.");
+    }
   }
 
   void reset() => status.value = UpdateStatus(UpdatePhase.idle);
