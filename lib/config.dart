@@ -27,7 +27,7 @@ const int kRegionMaxZoom = 15;
 /// this deliberately avoids. Each release's tag must exactly match the
 /// `version:` in pubspec.yaml (e.g. tag `1.5.0+11` for `version: 1.5.0+11`)
 /// with the built `app-release.apk` attached as a release asset.
-const String kUpdateRepo = 'REPLACE_ME/trailguide-releases';
+const String kUpdateRepo = 'Nien098/aps-trails-upd-h4k9m2q';
 
 String get kUpdateApiUrl =>
     'https://api.github.com/repos/$kUpdateRepo/releases/latest';
