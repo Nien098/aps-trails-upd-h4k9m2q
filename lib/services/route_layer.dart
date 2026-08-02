@@ -30,6 +30,16 @@ class RouteLayer {
     await controller.addImage(_arrowImage,
         bytes.buffer.asUint8List(bytes.offsetInBytes, bytes.lengthInBytes));
     await controller.addGeoJsonSource(_sourceId, Map.of(_empty));
+
+    // The circle/symbol annotation managers (cue & anchor markers, their
+    // number labels) are set up by the plugin before this style-loaded
+    // callback runs, so their layers already exist. Without pinning our
+    // layers below them here, addLineLayer/addSymbolLayer would default to
+    // the top of the stack — burying every marker and label under the
+    // route line and its direction arrows.
+    final symbolLayerIds = controller.symbolManager?.layerIds ?? const [];
+    final belowId = symbolLayerIds.isEmpty ? null : symbolLayerIds.first;
+
     await controller.addLineLayer(
       _sourceId,
       _lineLayerId,
@@ -41,6 +51,7 @@ class RouteLayer {
         lineCap: 'round',
       ),
       enableInteraction: false,
+      belowLayerId: belowId,
     );
     await controller.addSymbolLayer(
       _sourceId,
@@ -55,6 +66,7 @@ class RouteLayer {
         iconIgnorePlacement: true,
       ),
       enableInteraction: false,
+      belowLayerId: belowId,
     );
     _ready = true;
   }
