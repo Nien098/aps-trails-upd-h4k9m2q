@@ -22,13 +22,14 @@ class TrailShare {
 
   static Trail fromMap(Map<String, dynamic> m) {
     final name = (m['name'] as String?)?.trim();
+    final path = Trail.pathFromJson(jsonEncode(m['path'] ?? []));
     return Trail(
       name: (name == null || name.isEmpty) ? 'Imported trail' : name,
       regionId: m['regionId'] as String? ?? 'coquitlam',
       color: m['color'] as String? ?? '#1565C0',
-      path: Trail.pathFromJson(jsonEncode(m['path'] ?? [])),
+      path: path,
       anchors: Trail.pathFromJson(jsonEncode(m['anchors'] ?? [])),
-      cues: Trail.cuesFromJson(jsonEncode(m['cues'] ?? [])),
+      cues: Trail.cuesFromJson(jsonEncode(m['cues'] ?? []), path: path),
     );
   }
 

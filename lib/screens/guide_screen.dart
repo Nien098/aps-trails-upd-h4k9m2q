@@ -12,7 +12,6 @@ import '../cue_style.dart';
 import '../models/activity.dart';
 import '../models/region.dart';
 import '../models/trail.dart';
-import '../services/cue_gen.dart';
 import '../services/geo.dart';
 import '../services/native_bridge.dart';
 import '../services/route_layer.dart';
@@ -78,41 +77,13 @@ class _GuideScreenState extends State<GuideScreen> {
   late final StillnessWatchdog _watchdog =
       StillnessWatchdog(onNudge: _onStillnessNudge, onSendAlert: _sendStillnessAlert);
 
-  /// Firing triggers ordered along the route (out then back), so sequential
-  /// triggering fires each on the correct leg even where the path overlaps
-  /// itself. Dual-action nodes are expanded into two triggers here; the map
-  /// still draws one marker per authored cue (from widget.trail.cues).
-  late final List<Cue> _cues =
-      orderCuesAlongPath(widget.trail.path, _expandCues(widget.trail.cues));
-
-  /// Splits any dual-action node into an outbound trigger and a return trigger
-  /// at the same spot; leaves single-action cues untouched.
-  static List<Cue> _expandCues(List<Cue> cues) {
-    final out = <Cue>[];
-    for (final c in cues) {
-      if (!c.returnEnabled) {
-        out.add(c);
-        continue;
-      }
-      out.add(Cue(
-        type: c.type,
-        position: c.position,
-        label: c.label,
-        spoken: c.spoken,
-        radiusMeters: c.radiusMeters,
-        onReturn: false,
-      ));
-      out.add(Cue(
-        type: c.returnType,
-        position: c.position,
-        label: c.returnLabel,
-        spoken: c.returnSpoken,
-        radiusMeters: c.radiusMeters,
-        onReturn: true,
-      ));
-    }
-    return out;
-  }
+  /// Cues fire strictly in ascending [Cue.order] — see that field's doc for
+  /// why this replaced geometric path-projection ordering (it couldn't
+  /// disambiguate a path crossing itself more than twice; explicit stack
+  /// order has no such limit, and a "same spot, different message" node —
+  /// what used to be one dual-action cue — is just two ordinary cues now).
+  late final List<Cue> _cues = List.of(widget.trail.cues)
+    ..sort((a, b) => a.order.compareTo(b.order));
 
   @override
   void initState() {
@@ -327,27 +298,24 @@ class _GuideScreenState extends State<GuideScreen> {
     await _drawCues();
   }
 
-  /// Draws the cue markers. Unlike the editor (which shows both directions of a
-  /// dual node), Guide mode shows only the leg that's currently active for each
-  /// node and switches to the return direction once you've passed it outbound —
-  /// so a walker sees exactly the one instruction that applies right now.
+  /// Draws the cue markers, each labelled with its stack position so the map
+  /// reads consistently with the cue list.
   Future<void> _drawCues() async {
     final c = _c;
     if (c == null) return;
     await c.clearSymbols();
     await c.clearCircles();
     for (final cue in widget.trail.cues) {
-      final m = _activeMarker(cue);
       await c.addCircle(CircleOptions(
         geometry: cue.position,
         circleRadius: 11,
-        circleColor: cueColorHex(m.type),
-        circleStrokeColor: m.stroke,
-        circleStrokeWidth: cue.onReturn || cue.returnEnabled ? 4 : 3,
+        circleColor: cueColorHex(cue.type),
+        circleStrokeColor: '#ffffff',
+        circleStrokeWidth: 3,
       ));
       await c.addSymbol(SymbolOptions(
         geometry: cue.position,
-        textField: m.label,
+        textField: '${cue.order + 1}. ${cue.label}',
         textSize: 15,
         textColor: '#1a1a1a',
         textHaloColor: '#ffffff',
@@ -356,21 +324,6 @@ class _GuideScreenState extends State<GuideScreen> {
         textOffset: const Offset(0, 1.1),
       ));
     }
-  }
-
-  /// The marker's type / label / ring for [cue] given current walk progress.
-  /// Single-action cues render as-is; a dual node shows its outbound direction
-  /// until its outbound trigger has fired, then its return direction.
-  ({CueType type, String label, String stroke}) _activeMarker(Cue cue) {
-    if (!cue.returnEnabled) {
-      return (type: cue.type, label: cueMapLabel(cue), stroke: cueStrokeHex(cue));
-    }
-    final outboundIdx = _cues.indexWhere(
-        (t) => !t.onReturn && metersBetween(t.position, cue.position) < 0.5);
-    final outboundDone = outboundIdx >= 0 && outboundIdx < _nextIndex;
-    return outboundDone
-        ? (type: cue.returnType, label: cue.returnLabel, stroke: '#7B1FA2')
-        : (type: cue.type, label: cue.label, stroke: '#00838F');
   }
 
   Region get _region => regionById(widget.trail.regionId);

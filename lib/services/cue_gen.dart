@@ -9,7 +9,10 @@ import 'geo.dart';
 /// a Start cue at the beginning, Left/Right cues wherever the route turns
 /// sharply, and a Finish cue at the end. Bearings are measured over a short
 /// distance window so a dense polyline's jitter (and gentle curves) don't spam
-/// cues, and cues are kept a minimum distance apart.
+/// cues, and cues are kept a minimum distance apart. [order] is assigned
+/// sequentially as the path is walked start to finish, so an out-and-back or
+/// loop's full path (both legs) naturally comes out correctly ordered with no
+/// special-casing needed.
 ///
 /// Works on any trail, hand-drawn or generated — the author can edit or delete
 /// each suggestion afterwards like a normal cue.
@@ -18,7 +21,6 @@ List<Cue> suggestCues(
   double turnThresholdDeg = 35,
   double windowMeters = 18,
   double minSpacingMeters = 45,
-  bool markReturnHalf = false,
 }) {
   final cues = <Cue>[];
   if (path.length < 2) return cues;
@@ -31,14 +33,14 @@ List<Cue> suggestCues(
   final total = cum.last;
   if (total < minSpacingMeters * 2) {
     // Too short to bother with turn cues; just bookend it.
-    cues.add(Cue(type: CueType.start, position: path.first));
-    cues.add(Cue(type: CueType.finish, position: path.last));
+    cues.add(Cue(type: CueType.start, position: path.first, order: 0));
+    cues.add(Cue(type: CueType.finish, position: path.last, order: 1));
     return cues;
   }
 
   LatLng pointAt(double d) => _pointAtDistance(path, cum, d.clamp(0, total));
 
-  cues.add(Cue(type: CueType.start, position: path.first));
+  cues.add(Cue(type: CueType.start, position: path.first, order: cues.length));
   var lastCueDist = 0.0;
 
   for (var i = 1; i < path.length - 1; i++) {
@@ -55,40 +57,118 @@ List<Cue> suggestCues(
     cues.add(Cue(
       type: turn > 0 ? CueType.right : CueType.left,
       position: path[i],
-      // On an out-and-back, cues past the halfway apex belong to the return
-      // leg, so they can be told apart from their outbound twin.
-      onReturn: markReturnHalf && d > total / 2,
+      order: cues.length,
     ));
     lastCueDist = d;
   }
 
-  cues.add(Cue(type: CueType.finish, position: path.last));
+  cues.add(Cue(type: CueType.finish, position: path.last, order: cues.length));
   return cues;
 }
 
-/// Orders [cues] in walking order along [path]. Each cue is projected onto the
-/// route; outbound cues take their first pass over that spot and return cues the
-/// last, so an out-and-back that retraces itself fires each cue on the correct
-/// leg. Used by Guide mode to trigger cues sequentially without double-firing.
-List<Cue> orderCuesAlongPath(List<LatLng> path, List<Cue> cues) {
-  if (path.length < 2 || cues.length < 2) return List.of(cues);
+/// One-time conversion for a trail saved before the stack-order model: [raw]
+/// is the decoded `cues` JSON (still possibly carrying the old `onReturn`/
+/// `returnEnabled`/`returnType`/`returnLabel`/`returnSpoken` fields), which
+/// this expands (a dual-action node becomes two ordinary stack cues at the
+/// same position) and orders with the old geometry-projection heuristic — a
+/// reasonable starting point, not a guaranteed-correct one for a path that
+/// crosses itself more than twice. The result is a plain, already-ordered
+/// [Cue] list on the new model; any mis-ordering can be fixed afterwards with
+/// drag-to-reorder in the cue list, same as any other cue.
+List<Cue> migrateLegacyCues(List<Map<String, dynamic>> raw, List<LatLng> path) {
+  final temps = <_LegacyTemp>[];
+  for (final m in raw) {
+    final type = CueType.values.firstWhere((t) => t.name == m['type'],
+        orElse: () => CueType.note);
+    final position =
+        LatLng((m['lat'] as num).toDouble(), (m['lng'] as num).toDouble());
+    final label = m['label'] as String? ?? type.label;
+    final spoken = m['spoken'] as String? ?? type.defaultSpoken;
+    final radius = (m['radius'] as num?)?.toDouble() ?? 25;
+    final onReturn = m['onReturn'] as bool? ?? false;
+    final returnEnabled = m['returnEnabled'] as bool? ?? false;
+    if (returnEnabled) {
+      final returnType = CueType.values.firstWhere(
+          (t) => t.name == m['returnType'],
+          orElse: () => CueType.straight);
+      temps.add(_LegacyTemp(
+          type: type,
+          position: position,
+          label: label,
+          spoken: spoken,
+          radius: radius,
+          onReturn: false));
+      temps.add(_LegacyTemp(
+          type: returnType,
+          position: position,
+          label: m['returnLabel'] as String? ?? returnType.label,
+          spoken: m['returnSpoken'] as String? ?? returnType.defaultSpoken,
+          radius: radius,
+          onReturn: true));
+    } else {
+      temps.add(_LegacyTemp(
+          type: type,
+          position: position,
+          label: label,
+          spoken: spoken,
+          radius: radius,
+          onReturn: onReturn));
+    }
+  }
+
+  final ordered = _legacyOrder(path, temps);
+  return [
+    for (var i = 0; i < ordered.length; i++)
+      Cue(
+        type: ordered[i].type,
+        position: ordered[i].position,
+        label: ordered[i].label,
+        spoken: ordered[i].spoken,
+        radiusMeters: ordered[i].radius,
+        order: i,
+      ),
+  ];
+}
+
+class _LegacyTemp {
+  _LegacyTemp({
+    required this.type,
+    required this.position,
+    required this.label,
+    required this.spoken,
+    required this.radius,
+    required this.onReturn,
+  });
+  final CueType type;
+  final LatLng position;
+  final String label;
+  final String spoken;
+  final double radius;
+  final bool onReturn;
+}
+
+/// The old geometry-based ordering: projects each temp cue onto [path] and
+/// sorts by distance along it — outbound temps take their first crossing,
+/// return temps their last, within a tolerance. Only used for one-time
+/// legacy migration now; live ordering uses [Cue.order] directly.
+List<_LegacyTemp> _legacyOrder(List<LatLng> path, List<_LegacyTemp> temps) {
+  if (path.length < 2 || temps.length < 2) return List.of(temps);
 
   final cum = List<double>.filled(path.length, 0);
   for (var i = 1; i < path.length; i++) {
     cum[i] = cum[i - 1] + metersBetween(path[i - 1], path[i]);
   }
 
-  double alongDistance(Cue c) {
+  double alongDistance(_LegacyTemp t) {
     const nearMeters = 25.0;
-    double? chosen; // matched crossing (first for outbound, last for return)
+    double? chosen;
     var globalBest = double.infinity;
     var globalAt = 0.0;
     for (var i = 0; i < path.length - 1; i++) {
-      final proj = _projectOntoSegment(c.position, path[i], path[i + 1]);
+      final proj = _projectOntoSegment(t.position, path[i], path[i + 1]);
       final at = cum[i] + proj.t * (cum[i + 1] - cum[i]);
       if (proj.meters <= nearMeters) {
-        if (chosen == null ||
-            (c.onReturn ? at > chosen : at < chosen)) {
+        if (chosen == null || (t.onReturn ? at > chosen : at < chosen)) {
           chosen = at;
         }
       }
@@ -100,7 +180,7 @@ List<Cue> orderCuesAlongPath(List<LatLng> path, List<Cue> cues) {
     return chosen ?? globalAt;
   }
 
-  final indexed = [for (final c in cues) (c, alongDistance(c))];
+  final indexed = [for (final t in temps) (t, alongDistance(t))];
   indexed.sort((a, b) => a.$2.compareTo(b.$2));
   return [for (final e in indexed) e.$1];
 }

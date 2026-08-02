@@ -29,23 +29,6 @@ String cueColorHex(CueType t) {
   return '#${(c.toARGB32() & 0xFFFFFF).toRadixString(16).padLeft(6, '0')}';
 }
 
-/// Marker ring colour that encodes a cue's leg: teal for a dual-action node
-/// (fires both ways), purple for a return-only cue, white for plain outbound.
-String cueStrokeHex(Cue cue) {
-  if (cue.returnEnabled) return '#00838F'; // both directions
-  if (cue.onReturn) return '#7B1FA2'; // return leg only
-  return '#ffffff';
-}
-
-/// Map label for a cue, annotated with its leg so overlapping nodes read
-/// clearly: "Turn left / Turn right" for a dual node, "… (return)" for a
-/// return-only cue.
-String cueMapLabel(Cue cue) {
-  if (cue.returnEnabled) return '${cue.label} / ${cue.returnLabel}';
-  if (cue.onReturn) return '${cue.label} (return)';
-  return cue.label;
-}
-
 /// Icon shown on Guide-mode cards and the author's type picker.
 IconData cueIcon(CueType t) {
   switch (t) {

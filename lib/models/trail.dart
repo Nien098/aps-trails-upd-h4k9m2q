@@ -2,6 +2,8 @@ import 'dart:convert';
 
 import 'package:maplibre_gl/maplibre_gl.dart';
 
+import '../services/cue_gen.dart' show migrateLegacyCues;
+
 /// The kind of direction cue, which drives the marker's icon/colour and the
 /// default spoken phrase. Authors can override the spoken text per cue.
 enum CueType {
@@ -27,22 +29,25 @@ enum CueType {
 }
 
 /// A single direction cue placed along a trail.
+///
+/// Cues fire strictly in ascending [order] — a walker only ever sees the next
+/// one in the stack, never a later or earlier one, regardless of whether the
+/// path physically crosses itself. [order] is assigned "current max + 1" when
+/// a cue is created (append to the stack), so the order cues are authored in
+/// is the order they fire in by default; editable via drag-to-reorder in the
+/// cue list for a retroactive insert. This replaced an older geometry-based
+/// ordering scheme (projecting each cue onto the path to guess which pass it
+/// belonged to) that couldn't handle a path crossing itself more than twice.
 class Cue {
   Cue({
     required this.type,
     required this.position,
+    required this.order,
     String? label,
     String? spoken,
     this.radiusMeters = 25,
-    this.onReturn = false,
-    this.returnEnabled = false,
-    this.returnType = CueType.straight,
-    String? returnLabel,
-    String? returnSpoken,
   })  : label = label ?? type.label,
-        spoken = spoken ?? type.defaultSpoken,
-        returnLabel = returnLabel ?? returnType.label,
-        returnSpoken = returnSpoken ?? returnType.defaultSpoken;
+        spoken = spoken ?? type.defaultSpoken;
 
   /// The direction category (drives icon + default phrase).
   CueType type;
@@ -59,20 +64,8 @@ class Cue {
   /// How close (metres) the walker must be for the cue to fire.
   double radiusMeters;
 
-  /// Which leg of an out-and-back / loop this cue belongs to. false = the
-  /// outbound pass (default), true = the return pass. Used to order cues along
-  /// the route and to fire the right one when the path overlaps itself.
-  /// Ignored when [returnEnabled] (then the cue fires on both legs).
-  bool onReturn;
-
-  /// When true this single node carries TWO directions at the same spot: the
-  /// primary ([type]/[label]/[spoken]) fires on the way out, and the return
-  /// action below fires on the way back. Lets one crossroads marker say e.g.
-  /// "turn left" outbound and "turn right" on the return.
-  bool returnEnabled;
-  CueType returnType;
-  String returnLabel;
-  String returnSpoken;
+  /// Stack position — see class doc. Lower fires first.
+  int order;
 
   Map<String, dynamic> toJson() => {
         'type': type.name,
@@ -81,30 +74,23 @@ class Cue {
         'label': label,
         'spoken': spoken,
         'radius': radiusMeters,
-        'onReturn': onReturn,
-        if (returnEnabled) 'returnEnabled': true,
-        if (returnEnabled) 'returnType': returnType.name,
-        if (returnEnabled) 'returnLabel': returnLabel,
-        if (returnEnabled) 'returnSpoken': returnSpoken,
+        'order': order,
       };
 
-  factory Cue.fromJson(Map<String, dynamic> j) => Cue(
+  /// [order] is required — legacy JSON (no `order` key, pre-stack-order
+  /// trails) needs [Trail.cuesFromJson]'s migration path instead of this
+  /// constructor directly, since converting a legacy dual-action cue into two
+  /// stack entries needs the whole cue list + trail path, not just one cue.
+  factory Cue.fromJson(Map<String, dynamic> j, {required int order}) => Cue(
         type: CueType.values.firstWhere(
           (t) => t.name == j['type'],
           orElse: () => CueType.note,
         ),
         position: LatLng((j['lat'] as num).toDouble(), (j['lng'] as num).toDouble()),
+        order: order,
         label: j['label'] as String?,
         spoken: j['spoken'] as String?,
         radiusMeters: (j['radius'] as num?)?.toDouble() ?? 25,
-        onReturn: j['onReturn'] as bool? ?? false,
-        returnEnabled: j['returnEnabled'] as bool? ?? false,
-        returnType: CueType.values.firstWhere(
-          (t) => t.name == j['returnType'],
-          orElse: () => CueType.straight,
-        ),
-        returnLabel: j['returnLabel'] as String?,
-        returnSpoken: j['returnSpoken'] as String?,
       );
 }
 
@@ -169,9 +155,22 @@ class Trail {
       .map((e) => LatLng((e[0] as num).toDouble(), (e[1] as num).toDouble()))
       .toList();
 
-  static List<Cue> cuesFromJson(String s) => (jsonDecode(s) as List)
-      .map((e) => Cue.fromJson(e as Map<String, dynamic>))
-      .toList();
+  /// Parses the cues column/field. [path] is only used for legacy trails
+  /// (saved before the stack-order model) — those get a one-time geometric
+  /// order guess via [migrateLegacyCues]; anything already on the new format
+  /// just parses and sorts by its stored [Cue.order].
+  static List<Cue> cuesFromJson(String s, {List<LatLng> path = const []}) {
+    final raw = (jsonDecode(s) as List).cast<Map<String, dynamic>>();
+    if (raw.isEmpty) return [];
+    if (raw.any((m) => m['order'] == null)) {
+      return migrateLegacyCues(raw, path);
+    }
+    final cues = [
+      for (final m in raw) Cue.fromJson(m, order: (m['order'] as num).toInt()),
+    ];
+    cues.sort((a, b) => a.order.compareTo(b.order));
+    return cues;
+  }
 
   /// Full snapshot for backup (includes per-device walk stats).
   Map<String, dynamic> toBackupJson() => {
@@ -187,18 +186,21 @@ class Trail {
         'elevGainMeters': elevGainMeters,
       };
 
-  factory Trail.fromBackupJson(Map<String, dynamic> j) => Trail(
-        name: j['name'] as String? ?? 'Trail',
-        regionId: j['regionId'] as String? ?? 'coquitlam',
-        color: j['color'] as String? ?? '#1565C0',
-        path: Trail.pathFromJson(jsonEncode(j['path'] ?? [])),
-        anchors: Trail.pathFromJson(jsonEncode(j['anchors'] ?? [])),
-        cues: Trail.cuesFromJson(jsonEncode(j['cues'] ?? [])),
-        createdAt: DateTime.fromMillisecondsSinceEpoch(
-            (j['createdAt'] as num?)?.toInt() ??
-                DateTime.now().millisecondsSinceEpoch),
-        walkedMeters: (j['walkedMeters'] as num?)?.toDouble() ?? 0,
-        walkCount: (j['walkCount'] as int?) ?? 0,
-        elevGainMeters: (j['elevGainMeters'] as num?)?.toDouble() ?? 0,
-      );
+  factory Trail.fromBackupJson(Map<String, dynamic> j) {
+    final path = Trail.pathFromJson(jsonEncode(j['path'] ?? []));
+    return Trail(
+      name: j['name'] as String? ?? 'Trail',
+      regionId: j['regionId'] as String? ?? 'coquitlam',
+      color: j['color'] as String? ?? '#1565C0',
+      path: path,
+      anchors: Trail.pathFromJson(jsonEncode(j['anchors'] ?? [])),
+      cues: Trail.cuesFromJson(jsonEncode(j['cues'] ?? []), path: path),
+      createdAt: DateTime.fromMillisecondsSinceEpoch(
+          (j['createdAt'] as num?)?.toInt() ??
+              DateTime.now().millisecondsSinceEpoch),
+      walkedMeters: (j['walkedMeters'] as num?)?.toDouble() ?? 0,
+      walkCount: (j['walkCount'] as int?) ?? 0,
+      elevGainMeters: (j['elevGainMeters'] as num?)?.toDouble() ?? 0,
+    );
+  }
 }

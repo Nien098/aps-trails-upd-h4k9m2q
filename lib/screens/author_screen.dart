@@ -15,6 +15,8 @@ import '../services/settings.dart';
 import '../services/trail_router.dart';
 import '../services/trail_store.dart';
 import '../widgets/base_map.dart';
+import '../widgets/cue_editor_sheet.dart';
+import 'cue_list_screen.dart';
 
 /// Trail editor. Tap the map to lay the path (Path mode) or drop a labelled
 /// direction cue (Cue mode). Tap an existing cue marker to edit or delete it.
@@ -100,16 +102,35 @@ class _AuthorScreenState extends State<AuthorScreen> {
   }
 
   /// A tap on a drawn circle. Behaviour depends on the current mode:
+  /// - While a cue move is pending ([_moving]), a tap on an anchor dot places
+  ///   it there exactly; a tap on any cue circle is ignored (ambiguous —
+  ///   tap empty map or Cancel instead).
   /// - Cue circle in Draw-path mode → link that cue into the trail (connect
   ///   the dots), routing to its exact position.
-  /// - Cue circle in Add-cue mode → edit / delete the cue (unless a move is
-  ///   already pending, see [_moving] — then all circle taps are ignored so
-  ///   the user must tap empty map to place it, or Cancel).
+  /// - Cue circle in Add-cue mode → edit / delete the cue.
   /// - Anchor circle in Draw-path mode → continue/return the trail *through*
   ///   that existing point (so a loop can retrace its own line). Long-press an
   ///   anchor to delete it instead.
   Future<void> _onCircleTapped(Circle circle) async {
-    if (_moving != null) return;
+    if (_moving != null) {
+      // A tap that lands exactly on an anchor dot places the moving cue
+      // there precisely, bypassing the fuzzy snap-to-nearest-path-point that
+      // a generic map click falls back to — that fallback often couldn't
+      // land exactly on a node even when the tap visually looked spot-on.
+      // Cue-circle taps stay ignored during a move to avoid the ambiguity of
+      // "is this an edit or a move?" — tap empty map or Cancel instead.
+      final idx = _circleToAnchor[circle.id];
+      if (idx != null) {
+        final moving = _moving!;
+        setState(() {
+          moving.position = _trail.anchors[idx];
+          _moving = null;
+          _dirty = true;
+        });
+        await _redraw();
+      }
+      return;
+    }
     final cue = _circleToCue[circle.id];
     if (cue != null) {
       if (_cueMode) {
@@ -214,11 +235,20 @@ class _AuthorScreenState extends State<AuthorScreen> {
     }
   }
 
+  /// Next stack position — new cues append to the end, so authoring order is
+  /// firing order by default (see [Cue.order]).
+  int get _nextCueOrder => _trail.cues.isEmpty
+      ? 0
+      : _trail.cues.map((c) => c.order).reduce((a, b) => a > b ? a : b) + 1;
+
   /// Opens the cue editor at [position] and, if saved, adds the cue.
   Future<void> _addCueAt(LatLng position) async {
-    final cue = await _showCueEditor(position: position);
+    final cue = await showCueEditor(context, position: position);
     if (cue == null) return;
-    setState(() => _trail.cues.add(cue));
+    setState(() {
+      cue.order = _nextCueOrder;
+      _trail.cues.add(cue);
+    });
     _dirty = true;
     await _redraw();
   }
@@ -281,21 +311,18 @@ class _AuthorScreenState extends State<AuthorScreen> {
   }
 
   Future<void> _editCue(Cue cue) async {
-    final result = await _showCueEditor(position: cue.position, existing: cue);
-    if (result == _deletedSentinel) {
+    final result = await showCueEditor(context, position: cue.position, existing: cue);
+    if (result == deletedCueSentinel) {
       setState(() => _trail.cues.remove(cue));
     } else if (result != null) {
+      // order is deliberately left untouched — editing a cue's type/text
+      // shouldn't move its place in the firing sequence.
       setState(() {
         cue
           ..type = result.type
           ..label = result.label
           ..spoken = result.spoken
-          ..radiusMeters = result.radiusMeters
-          ..onReturn = result.onReturn
-          ..returnEnabled = result.returnEnabled
-          ..returnType = result.returnType
-          ..returnLabel = result.returnLabel
-          ..returnSpoken = result.returnSpoken;
+          ..radiusMeters = result.radiusMeters;
       });
     } else {
       return;
@@ -403,15 +430,15 @@ class _AuthorScreenState extends State<AuthorScreen> {
         geometry: cue.position,
         circleRadius: isMoving ? 14 : 11,
         circleColor: cueColorHex(cue.type),
-        // Ring colour encodes the cue's leg (teal=both, purple=return); a cue
-        // pending a move is highlighted gold so it's obvious which one it is.
-        circleStrokeColor: isMoving ? '#FFC107' : cueStrokeHex(cue),
-        circleStrokeWidth: isMoving ? 5 : (cue.onReturn || cue.returnEnabled ? 4 : 3),
+        // A cue pending a move is highlighted gold so it's obvious which one.
+        circleStrokeColor: isMoving ? '#FFC107' : '#ffffff',
+        circleStrokeWidth: isMoving ? 5 : 3,
       ));
       _circleToCue[cueCircle.id] = cue;
       final symbol = await c.addSymbol(SymbolOptions(
         geometry: cue.position,
-        textField: cueMapLabel(cue),
+        // Order prefix ties the map marker to its row in the cue list.
+        textField: '${cue.order + 1}. ${cue.label}',
         textSize: 15,
         textColor: '#1a1a1a',
         textHaloColor: '#ffffff',
@@ -468,9 +495,12 @@ class _AuthorScreenState extends State<AuthorScreen> {
     await _c?.animateCamera(CameraUpdate.newLatLng(here));
     if (!mounted) return;
     if (_cueMode) {
-      final cue = await _showCueEditor(position: here);
+      final cue = await showCueEditor(context, position: here);
       if (!mounted || cue == null) return;
-      setState(() => _trail.cues.add(cue));
+      setState(() {
+        cue.order = _nextCueOrder;
+        _trail.cues.add(cue);
+      });
       _dirty = true;
       await _redraw();
     } else {
@@ -544,10 +574,11 @@ class _AuthorScreenState extends State<AuthorScreen> {
           ..clear()
           ..addAll(_rebuildSegments(route.path, route.anchors));
         if (choice.cues) {
+          // route.path already includes both legs of an out-and-back, so
+          // walking it start to finish naturally assigns correct stack order.
           _trail.cues
             ..clear()
-            // Out-and-backs retrace themselves, so tag the return-leg cues.
-            ..addAll(suggestCues(route.path, markReturnHalf: !route.loop));
+            ..addAll(suggestCues(route.path));
         }
         _dirty = true;
       });
@@ -755,30 +786,14 @@ class _AuthorScreenState extends State<AuthorScreen> {
     return ok ?? false;
   }
 
-  static final Cue _deletedSentinel =
-      Cue(type: CueType.note, position: const LatLng(0, 0));
-
-  /// Shows the cue editor sheet. Returns the edited cue, [_deletedSentinel]
-  /// if deleted, or null if cancelled.
-  Future<Cue?> _showCueEditor({required LatLng position, Cue? existing}) {
-    return showModalBottomSheet<Cue>(
-      context: context,
-      isScrollControlled: true,
-      useSafeArea: true, // never draw under the status bar
-      constraints: BoxConstraints(
-        maxHeight: MediaQuery.of(context).size.height * 0.9,
-      ),
-      builder: (ctx) => Padding(
-        padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
-        child: _CueEditorSheet(
-          position: position,
-          existing: existing,
-          onDelete: existing == null
-              ? null
-              : () => Navigator.pop(ctx, _deletedSentinel),
-        ),
-      ),
-    );
+  /// Opens the numbered cue list; edits/reorders/deletes there mutate
+  /// _trail.cues in place, so just re-draw and mark dirty on return.
+  Future<void> _openCueList() async {
+    await Navigator.push(
+        context, MaterialPageRoute(builder: (_) => CueListScreen(trail: _trail)));
+    if (!mounted) return;
+    setState(() => _dirty = true);
+    await _redraw();
   }
 
   @override
@@ -815,6 +830,11 @@ class _AuthorScreenState extends State<AuthorScreen> {
                   border: Border.all(color: Colors.white, width: 2),
                 ),
               ),
+            ),
+            IconButton(
+              tooltip: 'Cue order',
+              onPressed: _trail.cues.isEmpty ? null : _openCueList,
+              icon: const Icon(Icons.format_list_numbered),
             ),
             IconButton(
               tooltip: 'Undo last point',
@@ -1192,274 +1212,3 @@ class _GeneratorSheetState extends State<_GeneratorSheet> {
   }
 }
 
-/// Which leg(s) a cue applies to, chosen in the editor.
-enum _CueWhen { outbound, returnLeg, both }
-
-/// Bottom-sheet editor for a single cue: type, label, spoken text, radius.
-class _CueEditorSheet extends StatefulWidget {
-  const _CueEditorSheet({
-    required this.position,
-    this.existing,
-    this.onDelete,
-  });
-
-  final LatLng position;
-  final Cue? existing;
-  final VoidCallback? onDelete;
-
-  @override
-  State<_CueEditorSheet> createState() => _CueEditorSheetState();
-}
-
-class _CueEditorSheetState extends State<_CueEditorSheet> {
-  late CueType _type;
-  late TextEditingController _label;
-  late TextEditingController _spoken;
-  late double _radius;
-  late _CueWhen _when;
-
-  // The second action for a "Both directions" node.
-  late CueType _returnType;
-  late TextEditingController _returnLabel;
-  late TextEditingController _returnSpoken;
-
-  @override
-  void initState() {
-    super.initState();
-    final e = widget.existing;
-    _type = e?.type ?? CueType.left;
-    _label = TextEditingController(text: e?.label ?? _type.label);
-    _spoken = TextEditingController(text: e?.spoken ?? _type.defaultSpoken);
-    _radius = e?.radiusMeters ?? 25;
-    _when = e == null
-        ? _CueWhen.outbound
-        : e.returnEnabled
-            ? _CueWhen.both
-            : e.onReturn
-                ? _CueWhen.returnLeg
-                : _CueWhen.outbound;
-    _returnType = e?.returnType ?? CueType.right;
-    _returnLabel = TextEditingController(text: e?.returnLabel ?? _returnType.label);
-    _returnSpoken =
-        TextEditingController(text: e?.returnSpoken ?? _returnType.defaultSpoken);
-  }
-
-  @override
-  void dispose() {
-    _label.dispose();
-    _spoken.dispose();
-    _returnLabel.dispose();
-    _returnSpoken.dispose();
-    super.dispose();
-  }
-
-  /// Refresh return label/spoken when the return type changes, unless the user
-  /// customised them away from the old type's defaults.
-  void _selectReturnType(CueType t) {
-    setState(() {
-      if (_returnLabel.text == _returnType.label) _returnLabel.text = t.label;
-      if (_returnSpoken.text == _returnType.defaultSpoken) {
-        _returnSpoken.text = t.defaultSpoken;
-      }
-      _returnType = t;
-    });
-  }
-
-  /// When the type changes, refresh label/spoken if the user hasn't customised
-  /// them away from the previous type's defaults.
-  void _selectType(CueType t) {
-    setState(() {
-      if (_label.text == _type.label) _label.text = t.label;
-      if (_spoken.text == _type.defaultSpoken) _spoken.text = t.defaultSpoken;
-      _type = t;
-    });
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    // The sheet fills at most 88% of the screen (useSafeArea keeps it clear of
-    // the status bar); the fields scroll while the actions stay pinned above
-    // the nav bar.
-    return SafeArea(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Flexible(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-            Text(widget.existing == null ? 'New cue' : 'Edit cue',
-                style: Theme.of(context).textTheme.titleLarge),
-            const SizedBox(height: 12),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                for (final t in CueType.values)
-                  ChoiceChip(
-                    selected: _type == t,
-                    avatar: Icon(cueIcon(t),
-                        size: 18,
-                        color: _type == t ? Colors.white : cueColor(t)),
-                    label: Text(t.label),
-                    selectedColor: cueColor(t),
-                    labelStyle: TextStyle(
-                        color: _type == t ? Colors.white : null),
-                    onSelected: (_) => _selectType(t),
-                  ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: _label,
-              textCapitalization: TextCapitalization.sentences,
-              decoration: const InputDecoration(
-                labelText: 'Map label (short)',
-                border: OutlineInputBorder(),
-              ),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: _spoken,
-              textCapitalization: TextCapitalization.sentences,
-              minLines: 1,
-              maxLines: 3,
-              decoration: const InputDecoration(
-                labelText: 'Spoken direction (read aloud)',
-                border: OutlineInputBorder(),
-              ),
-            ),
-            const SizedBox(height: 12),
-            Text('Trigger distance: ${_radius.round()} m'),
-            Slider(
-              value: _radius,
-              min: 10,
-              max: 60,
-              divisions: 10,
-              label: '${_radius.round()} m',
-              onChanged: (v) => setState(() => _radius = v),
-            ),
-            const SizedBox(height: 12),
-            const Text('When does this fire?',
-                style: TextStyle(fontWeight: FontWeight.w600)),
-            const SizedBox(height: 8),
-            SegmentedButton<_CueWhen>(
-              showSelectedIcon: false,
-              segments: const [
-                ButtonSegment(value: _CueWhen.outbound, label: Text('Way out')),
-                ButtonSegment(value: _CueWhen.returnLeg, label: Text('Way back')),
-                ButtonSegment(value: _CueWhen.both, label: Text('Both')),
-              ],
-              selected: {_when},
-              onSelectionChanged: (s) => setState(() => _when = s.first),
-            ),
-            if (_when == _CueWhen.both) ...[
-              const SizedBox(height: 16),
-              const Divider(),
-              const SizedBox(height: 4),
-              Row(
-                children: [
-                  const Icon(Icons.u_turn_right, size: 20),
-                  const SizedBox(width: 8),
-                  Text('On the way back',
-                      style: Theme.of(context).textTheme.titleMedium),
-                ],
-              ),
-              const SizedBox(height: 4),
-              const Text('The direction to give at this same spot on the return.',
-                  style: TextStyle(color: Color(0xFF4A4A4A))),
-              const SizedBox(height: 12),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  for (final t in CueType.values)
-                    ChoiceChip(
-                      selected: _returnType == t,
-                      avatar: Icon(cueIcon(t),
-                          size: 18,
-                          color: _returnType == t ? Colors.white : cueColor(t)),
-                      label: Text(t.label),
-                      selectedColor: cueColor(t),
-                      labelStyle: TextStyle(
-                          color: _returnType == t ? Colors.white : null),
-                      onSelected: (_) => _selectReturnType(t),
-                    ),
-                ],
-              ),
-              const SizedBox(height: 16),
-              TextField(
-                controller: _returnLabel,
-                textCapitalization: TextCapitalization.sentences,
-                decoration: const InputDecoration(
-                  labelText: 'Return map label (short)',
-                  border: OutlineInputBorder(),
-                ),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _returnSpoken,
-                textCapitalization: TextCapitalization.sentences,
-                minLines: 1,
-                maxLines: 3,
-                decoration: const InputDecoration(
-                  labelText: 'Return spoken direction (read aloud)',
-                  border: OutlineInputBorder(),
-                ),
-              ),
-            ],
-                ],
-              ),
-            ),
-          ),
-          const Divider(height: 1),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
-            child: Row(
-              children: [
-                if (widget.onDelete != null)
-                  TextButton.icon(
-                    onPressed: widget.onDelete,
-                    icon: const Icon(Icons.delete_outline),
-                    label: const Text('Delete'),
-                    style: TextButton.styleFrom(
-                        foregroundColor: Colors.red),
-                  ),
-                const Spacer(),
-                TextButton(
-                    onPressed: () => Navigator.pop(context),
-                    child: const Text('Cancel')),
-                const SizedBox(width: 8),
-                FilledButton(
-                  onPressed: () => Navigator.pop(
-                    context,
-                    Cue(
-                      type: _type,
-                      position: widget.position,
-                      label: _label.text.trim().isEmpty
-                          ? _type.label
-                          : _label.text.trim(),
-                      spoken: _spoken.text.trim(),
-                      radiusMeters: _radius,
-                      onReturn: _when == _CueWhen.returnLeg,
-                      returnEnabled: _when == _CueWhen.both,
-                      returnType: _returnType,
-                      returnLabel: _returnLabel.text.trim().isEmpty
-                          ? _returnType.label
-                          : _returnLabel.text.trim(),
-                      returnSpoken: _returnSpoken.text.trim(),
-                    ),
-                  ),
-                  child: const Text('Save cue'),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}

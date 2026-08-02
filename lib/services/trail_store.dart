@@ -160,18 +160,20 @@ class TrailStore {
     await db.delete('activities', where: 'id = ?', whereArgs: [id]);
   }
 
-  Trail _fromRow(Map<String, Object?> r) => Trail(
-        id: r['id'] as int,
-        name: r['name'] as String,
-        regionId: (r['region_id'] as String?) ?? 'coquitlam',
-        color: (r['color'] as String?) ?? '#1565C0',
-        path: Trail.pathFromJson(r['path'] as String),
-        anchors: Trail.pathFromJson((r['anchors'] as String?) ?? '[]'),
-        cues: Trail.cuesFromJson(r['cues'] as String),
-        createdAt:
-            DateTime.fromMillisecondsSinceEpoch(r['created_at'] as int),
-        walkedMeters: (r['walked_meters'] as num?)?.toDouble() ?? 0,
-        walkCount: (r['walk_count'] as int?) ?? 0,
-        elevGainMeters: (r['elev_gain'] as num?)?.toDouble() ?? 0,
-      );
+  Trail _fromRow(Map<String, Object?> r) {
+    final path = Trail.pathFromJson(r['path'] as String);
+    return Trail(
+      id: r['id'] as int,
+      name: r['name'] as String,
+      regionId: (r['region_id'] as String?) ?? 'coquitlam',
+      color: (r['color'] as String?) ?? '#1565C0',
+      path: path,
+      anchors: Trail.pathFromJson((r['anchors'] as String?) ?? '[]'),
+      cues: Trail.cuesFromJson(r['cues'] as String, path: path),
+      createdAt: DateTime.fromMillisecondsSinceEpoch(r['created_at'] as int),
+      walkedMeters: (r['walked_meters'] as num?)?.toDouble() ?? 0,
+      walkCount: (r['walk_count'] as int?) ?? 0,
+      elevGainMeters: (r['elev_gain'] as num?)?.toDouble() ?? 0,
+    );
+  }
 }
