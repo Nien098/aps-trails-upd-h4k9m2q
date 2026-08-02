@@ -1,5 +1,6 @@
 import 'dart:math' show Point;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:maplibre_gl/maplibre_gl.dart';
@@ -10,14 +11,16 @@ import '../services/offline_map.dart';
 /// Reusable offline MapLibre map. Loads the bundled Coquitlam pmtiles style
 /// and forwards the common callbacks. Shared by the author and guide screens.
 ///
-/// Also supports keyboard pan (arrow keys) and zoom (+/-) as a fallback for
-/// input paths where touch-drag doesn't translate reliably — e.g. some
-/// remote-desktop tools (confirmed with Phone Link and Samsung Flow) inject
-/// touch via Android's accessibility gesture API, which delivers sparse
-/// synthetic move events that MapLibre's native pan-gesture recognizer often
-/// doesn't pick up, even though a real finger (or the Android emulator's
-/// proper virtual-touchscreen input) works fine. Keyboard events don't go
-/// through that gesture recognizer at all, so they sidestep the problem.
+/// Also supports keyboard pan (arrow keys), zoom (+/-), and rotate ([ / ]),
+/// plus mouse-wheel zoom, as a fallback for input paths where touch-drag
+/// doesn't translate reliably — e.g. some remote-desktop tools (confirmed
+/// with Phone Link and Samsung Flow) inject touch via Android's
+/// accessibility gesture API, which delivers sparse synthetic move events
+/// that MapLibre's native pan-gesture recognizer often doesn't pick up, even
+/// though a real finger (or the Android emulator's proper virtual-
+/// touchscreen input) works fine. Keyboard events, and a real/forwarded
+/// mouse's wheel and hover, don't go through that gesture recognizer at all,
+/// so they sidestep the problem.
 class BaseMap extends StatefulWidget {
   const BaseMap({
     super.key,
@@ -46,6 +49,7 @@ class BaseMap extends StatefulWidget {
 
 class _BaseMapState extends State<BaseMap> {
   static const _panStepPx = 80.0;
+  static const _rotateStepDeg = 15.0;
 
   MapLibreMapController? _controller;
 
@@ -60,12 +64,31 @@ class _BaseMapState extends State<BaseMap> {
     }
     final c = _controller;
     if (c == null) return KeyEventResult.ignored;
+    final key = event.logicalKey;
+
+    // Rotate: '[' / ']', with Numpad 7 / 9 as alternates. Physical Numpad
+    // 7/9 only send LogicalKeyboardKey.numpad7/9 when NumLock is ON — with
+    // NumLock OFF, the OS translates those same physical keys to Home / Page
+    // Up before the event ever reaches the app (NOT Home/End — it's Numpad
+    // 1/3 that map to End/Page Down), so both forms are bound to cover
+    // either NumLock state.
+    if (key == LogicalKeyboardKey.bracketLeft ||
+        key == LogicalKeyboardKey.numpad7 ||
+        key == LogicalKeyboardKey.home) {
+      _rotateBy(-_rotateStepDeg);
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.bracketRight ||
+        key == LogicalKeyboardKey.numpad9 ||
+        key == LogicalKeyboardKey.pageUp) {
+      _rotateBy(_rotateStepDeg);
+      return KeyEventResult.handled;
+    }
 
     // scrollBy moves the camera TARGET, not the visible content — so to make
     // the arrow key match the direction content visually pans (not the
     // "drag" direction, which is the opposite), each axis is inverted from
     // what scrollBy's own dx/dy sign would naively suggest.
-    final key = event.logicalKey;
     CameraUpdate? update;
     if (key == LogicalKeyboardKey.arrowUp) {
       update = CameraUpdate.scrollBy(0, _panStepPx);
@@ -88,6 +111,34 @@ class _BaseMapState extends State<BaseMap> {
     return KeyEventResult.handled;
   }
 
+  /// Rotates the camera bearing by [deltaDeg] (positive = clockwise / turn
+  /// right, matching ']'; negative = counter-clockwise / turn left, matching
+  /// '[') relative to wherever it currently is. Queried fresh each time
+  /// rather than tracked locally, since the on-screen compass / pinch-rotate
+  /// gesture can also change the bearing independently of these keys.
+  Future<void> _rotateBy(double deltaDeg) async {
+    final c = _controller;
+    if (c == null) return;
+    final pos = await c.queryCameraPosition();
+    final next = ((pos?.bearing ?? 0.0) + deltaDeg) % 360;
+    await c.animateCamera(CameraUpdate.bearingTo(next));
+  }
+
+  /// Mouse-wheel zoom: standard scroll-to-zoom convention (Google Maps,
+  /// browser maps, etc.) — scrolling up/away zooms in, down/toward zooms
+  /// out, i.e. it mimics the '+' / '-' keys. A real or forwarded mouse's
+  /// wheel arrives as a distinct pointer-signal input, separate from the
+  /// touch-gesture path that click-drag panning struggles with over some
+  /// remote-desktop tools, so this is expected to work reliably even there.
+  void _onPointerSignal(PointerSignalEvent event) {
+    if (event is! PointerScrollEvent) return;
+    final c = _controller;
+    if (c == null) return;
+    c.animateCamera(event.scrollDelta.dy < 0
+        ? CameraUpdate.zoomIn()
+        : CameraUpdate.zoomOut());
+  }
+
   @override
   Widget build(BuildContext context) {
     return FutureBuilder<String>(
@@ -99,22 +150,25 @@ class _BaseMapState extends State<BaseMap> {
         if (!snap.hasData) {
           return const Center(child: CircularProgressIndicator());
         }
-        return Focus(
-          autofocus: true,
-          onKeyEvent: _onKey,
-          child: MapLibreMap(
-            styleString: snap.data!,
-            initialCameraPosition: widget.initialCamera,
-            minMaxZoomPreference: const MinMaxZoomPreference(10, 18),
-            myLocationEnabled: widget.myLocationEnabled,
-            trackCameraPosition: widget.trackCameraPosition,
-            compassEnabled: true,
-            compassViewPosition: CompassViewPosition.topLeft,
-            compassViewMargins: const Point(12, 90),
-            onMapCreated: _onMapCreated,
-            onStyleLoadedCallback: widget.onStyleLoaded,
-            onMapClick: widget.onMapClick,
-            onMapLongClick: widget.onMapLongClick,
+        return Listener(
+          onPointerSignal: _onPointerSignal,
+          child: Focus(
+            autofocus: true,
+            onKeyEvent: _onKey,
+            child: MapLibreMap(
+              styleString: snap.data!,
+              initialCameraPosition: widget.initialCamera,
+              minMaxZoomPreference: const MinMaxZoomPreference(10, 18),
+              myLocationEnabled: widget.myLocationEnabled,
+              trackCameraPosition: widget.trackCameraPosition,
+              compassEnabled: true,
+              compassViewPosition: CompassViewPosition.topLeft,
+              compassViewMargins: const Point(12, 90),
+              onMapCreated: _onMapCreated,
+              onStyleLoadedCallback: widget.onStyleLoaded,
+              onMapClick: widget.onMapClick,
+              onMapLongClick: widget.onMapLongClick,
+            ),
           ),
         );
       },
