@@ -21,6 +21,14 @@ class _CueListScreenState extends State<CueListScreen> {
   List<Cue> get _sorted =>
       List.of(widget.trail.cues)..sort((a, b) => a.order.compareTo(b.order));
 
+  /// Default position for a brand new cue — after the highest cue number
+  /// anywhere on the trail, not just the one it's being stacked with (a
+  /// marker passed on the way back might fire after dozens of other cues).
+  int get _nextCueOrder => widget.trail.cues.isEmpty
+      ? 0
+      : widget.trail.cues.map((c) => c.order).reduce((a, b) => a > b ? a : b) +
+          1;
+
   /// Inserts [cue] at [cue.order] (already the author's chosen position —
   /// see [showCueEditor]'s `initialOrder`), shifting every cue currently at
   /// or after that position up by one to make room.
@@ -36,11 +44,11 @@ class _CueListScreenState extends State<CueListScreen> {
     if (result == deletedCueSentinel) {
       setState(() => widget.trail.cues.remove(cue));
     } else if (result == addAnotherCueSentinel) {
-      // Defaults to right after the cue it's stacking with — still editable
-      // in the field if that's not actually where it belongs.
+      // Defaults to after the highest cue number anywhere on the trail — see
+      // the same reasoning in author_screen.dart's _cueGroupSheet.
       if (!mounted) return;
       final another = await showCueEditor(context,
-          position: cue.position, initialOrder: cue.order + 1);
+          position: cue.position, initialOrder: _nextCueOrder);
       if (!mounted || another == null) return;
       setState(() => _insertCueAtOrder(another));
     } else if (result != null) {

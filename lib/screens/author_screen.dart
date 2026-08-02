@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'dart:math' show Point, sqrt, cos, sin, pi;
+import 'dart:math' show Point, sqrt;
 
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
@@ -66,6 +66,11 @@ class _AuthorScreenState extends State<AuthorScreen> {
   // Map drawn markers back to their data for tap-to-edit / tap-to-delete.
   final Map<String, Cue> _symbolToCue = {};
   final Map<String, Cue> _circleToCue = {};
+  // Circles drawn for a stacked-cue spot (2+ cues within a metre of each
+  // other) map here instead of [_circleToCue] — tapping one opens a picker
+  // rather than assuming which cue in the stack was meant.
+  final Map<String, List<Cue>> _circleToCueGroup = {};
+  final Map<String, List<Cue>> _symbolToCueGroup = {};
   final Map<String, int> _circleToAnchor = {};
 
   @override
@@ -146,6 +151,15 @@ class _AuthorScreenState extends State<AuthorScreen> {
       // an anchor exactly onto another existing anchor's position.
       final idx = _circleToAnchor[circle.id];
       if (idx != null) await _placeMovingAnchor(_trail.anchors[idx]);
+      return;
+    }
+    final group = _circleToCueGroup[circle.id];
+    if (group != null) {
+      if (_cueMode) {
+        await _cueGroupSheet(group);
+      } else {
+        await _addAnchor(group.first.position, snap: false);
+      }
       return;
     }
     final cue = _circleToCue[circle.id];
@@ -342,8 +356,73 @@ class _AuthorScreenState extends State<AuthorScreen> {
   }
 
   Future<void> _onCueTapped(Symbol s) async {
+    final group = _symbolToCueGroup[s.id];
+    if (group != null) {
+      await _cueGroupSheet(group);
+      return;
+    }
     final cue = _symbolToCue[s.id];
     if (cue != null) await _editCue(cue);
+  }
+
+  /// Tapping a stacked-cue marker (2+ cues within a metre of each other)
+  /// shows which cues live there and lets the author pick one to edit, or
+  /// add a new one to the same spot — rather than guessing which was meant.
+  Future<void> _cueGroupSheet(List<Cue> group) async {
+    final display = _cueDisplayInfo();
+    final sorted = List.of(group)
+      ..sort((a, b) => (display.rank[a] ?? 0).compareTo(display.rank[b] ?? 0));
+    final choice = await showModalBottomSheet<Cue>(
+      context: context,
+      useSafeArea: true,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text('${sorted.length} cues stacked here',
+                    style: Theme.of(ctx).textTheme.titleMedium),
+              ),
+            ),
+            for (final cue in sorted)
+              ListTile(
+                leading: CircleAvatar(
+                  backgroundColor: cueColor(cue.type),
+                  child: Text('${display.rank[cue]}',
+                      style: const TextStyle(
+                          color: Colors.white, fontWeight: FontWeight.bold)),
+                ),
+                title: Text(cue.label),
+                subtitle:
+                    Text(cue.spoken, maxLines: 1, overflow: TextOverflow.ellipsis),
+                onTap: () => Navigator.pop(ctx, cue),
+              ),
+            ListTile(
+              leading: const CircleAvatar(child: Icon(Icons.add)),
+              title: const Text('Add another cue at this same spot'),
+              onTap: () => Navigator.pop(ctx, addAnotherCueSentinel),
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+    if (choice == null || !mounted) return;
+    if (identical(choice, addAnotherCueSentinel)) {
+      // Defaults to after the highest cue number anywhere on the trail — see
+      // the same reasoning in _editCue's addAnotherCueSentinel branch.
+      final another = await showCueEditor(context,
+          position: sorted.first.position, initialOrder: _nextCueOrder);
+      if (!mounted || another == null) return;
+      setState(() => _insertCueAtOrder(another));
+      _dirty = true;
+      await _redraw();
+    } else {
+      await _editCue(choice);
+    }
   }
 
   Future<void> _editCue(Cue cue) async {
@@ -351,11 +430,13 @@ class _AuthorScreenState extends State<AuthorScreen> {
     if (result == deletedCueSentinel) {
       setState(() => _trail.cues.remove(cue));
     } else if (result == addAnotherCueSentinel) {
-      // Defaults to right after the cue it's stacking with — still editable
-      // in the field if that's not actually where it belongs.
+      // Defaults to after the highest cue number anywhere on the trail, not
+      // the one it's stacking with — a marker you pass on the way back might
+      // fire after dozens of other cues, so "previous + 1" would be wrong.
+      // Still editable in the field if that's not actually where it belongs.
       if (!mounted) return;
       final another = await showCueEditor(context,
-          position: cue.position, initialOrder: cue.order + 1);
+          position: cue.position, initialOrder: _nextCueOrder);
       if (!mounted || another == null) return;
       setState(() => _insertCueAtOrder(another));
       _dirty = true;
@@ -546,6 +627,8 @@ class _AuthorScreenState extends State<AuthorScreen> {
     await c.clearSymbols();
     _symbolToCue.clear();
     _circleToCue.clear();
+    _circleToCueGroup.clear();
+    _symbolToCueGroup.clear();
     _circleToAnchor.clear();
 
     // The route line + directional arrows (GeoJSON layer, taps pass through).
@@ -580,26 +663,34 @@ class _AuthorScreenState extends State<AuthorScreen> {
     }
 
     final display = _cueDisplayInfo();
-    for (final cue in _trail.cues) {
-      final isMoving = identical(cue, _moving);
-      final isHighlighted = identical(cue, _highlighted);
-      final drawPos = display.drawPos[cue] ?? cue.position;
+    for (final group in display.groups) {
+      final stacked = group.length > 1;
+      if (stacked) {
+        group.sort(
+            (a, b) => (display.rank[a] ?? 0).compareTo(display.rank[b] ?? 0));
+      }
+      final cue = group.first;
+      final isMoving = !stacked && identical(cue, _moving);
+      final isHighlighted = !stacked && identical(cue, _highlighted);
       final cueCircle = await c.addCircle(CircleOptions(
-        geometry: drawPos,
-        circleRadius: isMoving || isHighlighted ? 15 : 11,
-        circleColor: cueColorHex(cue.type),
+        geometry: cue.position,
+        circleRadius: stacked ? 13 : (isMoving || isHighlighted ? 15 : 11),
+        circleColor: stacked ? stackedCueColorHex : cueColorHex(cue.type),
         // A cue pending a move is highlighted gold; one just located from the
         // cue list flashes cyan, so it's obvious which marker is which.
-        circleStrokeColor:
-            isMoving ? '#FFC107' : (isHighlighted ? '#00E5FF' : '#ffffff'),
-        circleStrokeWidth: isMoving || isHighlighted ? 5 : 3,
+        circleStrokeColor: stacked
+            ? '#ffffff'
+            : (isMoving ? '#FFC107' : (isHighlighted ? '#00E5FF' : '#ffffff')),
+        circleStrokeWidth: stacked ? 4 : (isMoving || isHighlighted ? 5 : 3),
       ));
-      _circleToCue[cueCircle.id] = cue;
       final symbol = await c.addSymbol(SymbolOptions(
-        geometry: drawPos,
+        geometry: cue.position,
         // Rank (not the raw, possibly-gappy order value) ties the map
-        // marker to its row in the cue list.
-        textField: '${display.rank[cue]}. ${cue.label}',
+        // marker to its row in the cue list. A stacked spot lists every cue
+        // there on its own line instead of hiding all but one.
+        textField: stacked
+            ? group.map((g) => '${display.rank[g]}. ${g.label}').join('\n')
+            : '${display.rank[cue]}. ${cue.label}',
         textSize: 15,
         textColor: '#1a1a1a',
         textHaloColor: '#ffffff',
@@ -607,21 +698,24 @@ class _AuthorScreenState extends State<AuthorScreen> {
         textAnchor: 'top',
         textOffset: const Offset(0, 1.1),
       ));
-      _symbolToCue[symbol.id] = cue;
+      if (stacked) {
+        _circleToCueGroup[cueCircle.id] = group;
+        _symbolToCueGroup[symbol.id] = group;
+      } else {
+        _circleToCue[cueCircle.id] = cue;
+        _symbolToCue[symbol.id] = cue;
+      }
     }
   }
 
-  /// Cues within this many metres of each other are treated as "the same
-  /// spot" and fanned out around it on the map instead of being drawn
-  /// exactly on top of one another — otherwise only the last-drawn one is
-  /// visible or tappable, and a stack of cues just looks like a single one.
-  static const _stackFanMeters = 4.0;
-
-  /// Display number (sorted rank, always a clean 1..N regardless of what the
+  /// Display rank (sorted, always a clean 1..N regardless of what the
   /// underlying [Cue.order] integers actually are — manual entry and moves
-  /// can leave gaps) and draw position (fanned out for same-spot stacks) for
-  /// every cue currently in [_trail].
-  ({Map<Cue, int> rank, Map<Cue, LatLng> drawPos}) _cueDisplayInfo() {
+  /// can leave gaps) and draw groups for every cue in [_trail]: cues within a
+  /// metre of each other are grouped so they render as one "stacked" marker
+  /// instead of hiding on top of one another. A cue mid-move or just located
+  /// from the cue list is always kept in its own solo group so it can still
+  /// be highlighted distinctly (gold / cyan) even if it shares a spot.
+  ({Map<Cue, int> rank, List<List<Cue>> groups}) _cueDisplayInfo() {
     final sorted = List.of(_trail.cues)
       ..sort((a, b) => a.order.compareTo(b.order));
     final rank = <Cue, int>{
@@ -630,38 +724,21 @@ class _AuthorScreenState extends State<AuthorScreen> {
 
     final groups = <List<Cue>>[];
     for (final cue in _trail.cues) {
-      final match = groups.where(
-          (g) => metersBetween(g.first.position, cue.position) < 1.0);
+      if (identical(cue, _moving) || identical(cue, _highlighted)) {
+        groups.add([cue]);
+        continue;
+      }
+      final match = groups.where((g) =>
+          !identical(g.first, _moving) &&
+          !identical(g.first, _highlighted) &&
+          metersBetween(g.first.position, cue.position) < 1.0);
       if (match.isNotEmpty) {
         match.first.add(cue);
       } else {
         groups.add([cue]);
       }
     }
-    final drawPos = <Cue, LatLng>{};
-    for (final group in groups) {
-      if (group.length == 1) {
-        drawPos[group.first] = group.first.position;
-        continue;
-      }
-      for (var i = 0; i < group.length; i++) {
-        final angle = 2 * pi * i / group.length;
-        drawPos[group[i]] =
-            _offsetMeters(group.first.position, angle, _stackFanMeters);
-      }
-    }
-    return (rank: rank, drawPos: drawPos);
-  }
-
-  static LatLng _offsetMeters(LatLng base, double angleRad, double meters) {
-    const metersPerDegLat = 111320.0;
-    final cosLat = cos(base.latitude * pi / 180);
-    final dx = meters * cos(angleRad);
-    final dy = meters * sin(angleRad);
-    return LatLng(
-      base.latitude + dy / metersPerDegLat,
-      base.longitude + dx / (metersPerDegLat * cosLat),
-    );
+    return (rank: rank, groups: groups);
   }
 
   /// Resolves the current GPS position, handling permission + service checks

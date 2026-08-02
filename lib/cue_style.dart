@@ -29,6 +29,12 @@ String cueColorHex(CueType t) {
   return '#${(c.toARGB32() & 0xFFFFFF).toRadixString(16).padLeft(6, '0')}';
 }
 
+/// Marker colour for a spot where two or more cues are stacked (e.g. a 4-way
+/// crossing) — distinct from every [cueColor] so a stack reads as "multiple
+/// cues here" at a glance, before the author or hiker even reads the label.
+const Color stackedCueColor = Color(0xFFAD1457); // deep pink/magenta
+const String stackedCueColorHex = '#AD1457';
+
 /// Icon shown on Guide-mode cards and the author's type picker.
 IconData cueIcon(CueType t) {
   switch (t) {

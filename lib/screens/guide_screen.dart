@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:math' show cos, sin, pi;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_tts/flutter_tts.dart';
@@ -301,8 +300,10 @@ class _GuideScreenState extends State<GuideScreen> {
 
   /// Draws the cue markers, each labelled with its stack position so the map
   /// reads consistently with the cue list. Cues sharing (almost) the same
-  /// spot are fanned out a few metres apart instead of drawn exactly on top
-  /// of each other — otherwise only the last-drawn one would be visible.
+  /// spot stay at that one spot — drawn as a single marker in a distinct
+  /// "stacked" colour, with every cue in the stack listed on its own line
+  /// (e.g. "2. Go right" / "8. Go left" / "15. Go straight") so it's obvious
+  /// several cues live there without splitting them apart on the map.
   Future<void> _drawCues() async {
     final c = _c;
     if (c == null) return;
@@ -322,30 +323,21 @@ class _GuideScreenState extends State<GuideScreen> {
         groups.add([cue]);
       }
     }
-    final drawPos = <Cue, LatLng>{};
-    for (final group in groups) {
-      if (group.length == 1) {
-        drawPos[group.first] = group.first.position;
-        continue;
-      }
-      for (var i = 0; i < group.length; i++) {
-        final angle = 2 * pi * i / group.length;
-        drawPos[group[i]] = _fanOffset(group.first.position, angle, 4.0);
-      }
-    }
 
-    for (final cue in widget.trail.cues) {
-      final pos = drawPos[cue] ?? cue.position;
+    for (final group in groups) {
+      final stacked = group.length > 1;
+      if (stacked) group.sort((a, b) => rank[a]!.compareTo(rank[b]!));
+      final pos = group.first.position;
       await c.addCircle(CircleOptions(
         geometry: pos,
-        circleRadius: 11,
-        circleColor: cueColorHex(cue.type),
+        circleRadius: stacked ? 13 : 11,
+        circleColor: stacked ? stackedCueColorHex : cueColorHex(group.first.type),
         circleStrokeColor: '#ffffff',
-        circleStrokeWidth: 3,
+        circleStrokeWidth: stacked ? 4 : 3,
       ));
       await c.addSymbol(SymbolOptions(
         geometry: pos,
-        textField: '${rank[cue]}. ${cue.label}',
+        textField: group.map((cue) => '${rank[cue]}. ${cue.label}').join('\n'),
         textSize: 15,
         textColor: '#1a1a1a',
         textHaloColor: '#ffffff',
@@ -354,17 +346,6 @@ class _GuideScreenState extends State<GuideScreen> {
         textOffset: const Offset(0, 1.1),
       ));
     }
-  }
-
-  static LatLng _fanOffset(LatLng base, double angleRad, double meters) {
-    const metersPerDegLat = 111320.0;
-    final cosLat = cos(base.latitude * pi / 180);
-    final dx = meters * cos(angleRad);
-    final dy = meters * sin(angleRad);
-    return LatLng(
-      base.latitude + dy / metersPerDegLat,
-      base.longitude + dx / (metersPerDegLat * cosLat),
-    );
   }
 
   Region get _region => regionById(widget.trail.regionId);
