@@ -844,6 +844,11 @@ class _AuthorScreenState extends State<AuthorScreen> {
     try {
       final choice = await showModalBottomSheet<_GenChoice>(
         context: context,
+        isScrollControlled: true,
+        useSafeArea: true,
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.of(context).size.height * 0.9,
+        ),
         builder: (_) => const _GeneratorSheet(),
       );
       if (choice == null || !mounted) return;
@@ -1564,84 +1569,104 @@ class _GeneratorSheetState extends State<_GeneratorSheet> {
   Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
     final s = Settings.instance;
+    // Scrollable content + a Generate button pinned outside the scroll area
+    // (same structure as cue_editor_sheet.dart) — without this, a sheet that
+    // isn't isScrollControlled is capped to a fraction of the screen height,
+    // and content taller than that can push the final button below the
+    // sheet's actual layout bounds: still visible-ish, but not reliably
+    // tappable. Confirmed as the likely cause of "Generate doesn't respond
+    // to a finger tap, but works when clicked via Phone Link's mouse" — a
+    // difference in reserved nav-bar space could be exactly enough to tip
+    // this over on one input path and not the other.
     return SafeArea(
-      child: Padding(
-        // Explicit nav-bar inset in addition to the SafeArea above — see the
-        // same reasoning in cue_editor_sheet.dart.
-        padding: EdgeInsets.fromLTRB(
-            20, 20, 20, 24 + MediaQuery.viewPaddingOf(context).bottom),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('Auto-generate a trail', style: text.titleLarge),
-            const SizedBox(height: 4),
-            Text('Builds a route from the trails shown on screen now.',
-                style: text.bodyMedium),
-            const SizedBox(height: 18),
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.baseline,
-              textBaseline: TextBaseline.alphabetic,
-              children: [
-                Text('Length', style: text.titleMedium),
-                const Spacer(),
-                // Live, units-aware readout of the chosen distance.
-                Text(s.formatDistance(_meters),
-                    style: text.titleLarge
-                        ?.copyWith(fontWeight: FontWeight.bold)),
-              ],
-            ),
-            Slider(
-              value: _meters,
-              min: _minMeters,
-              max: _maxMeters,
-              divisions: 58, // ~250 m steps
-              label: s.formatDistance(_meters),
-              onChanged: (v) => setState(() => _meters = v),
-            ),
-            // Reference zones along the scale.
-            const Padding(
-              padding: EdgeInsets.symmetric(horizontal: 4),
-              child: Row(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Flexible(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.fromLTRB(20, 20, 20, 8),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('Short', style: TextStyle(color: Color(0xFF4A4A4A))),
-                  Spacer(),
-                  Text('Medium', style: TextStyle(color: Color(0xFF4A4A4A))),
-                  Spacer(),
-                  Text('Long', style: TextStyle(color: Color(0xFF4A4A4A))),
+                  Text('Auto-generate a trail', style: text.titleLarge),
+                  const SizedBox(height: 4),
+                  Text('Builds a route from the trails shown on screen now.',
+                      style: text.bodyMedium),
+                  const SizedBox(height: 18),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.baseline,
+                    textBaseline: TextBaseline.alphabetic,
+                    children: [
+                      Text('Length', style: text.titleMedium),
+                      const Spacer(),
+                      // Live, units-aware readout of the chosen distance.
+                      Text(s.formatDistance(_meters),
+                          style: text.titleLarge
+                              ?.copyWith(fontWeight: FontWeight.bold)),
+                    ],
+                  ),
+                  Slider(
+                    value: _meters,
+                    min: _minMeters,
+                    max: _maxMeters,
+                    divisions: 58, // ~250 m steps
+                    label: s.formatDistance(_meters),
+                    onChanged: (v) => setState(() => _meters = v),
+                  ),
+                  // Reference zones along the scale.
+                  const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 4),
+                    child: Row(
+                      children: [
+                        Text('Short',
+                            style: TextStyle(color: Color(0xFF4A4A4A))),
+                        Spacer(),
+                        Text('Medium',
+                            style: TextStyle(color: Color(0xFF4A4A4A))),
+                        Spacer(),
+                        Text('Long',
+                            style: TextStyle(color: Color(0xFF4A4A4A))),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Text('Shape', style: text.titleMedium),
+                  const SizedBox(height: 8),
+                  SegmentedButton<bool>(
+                    showSelectedIcon: false,
+                    segments: const [
+                      ButtonSegment(
+                          value: true,
+                          icon: Icon(Icons.loop),
+                          label: Text('Loop')),
+                      ButtonSegment(
+                          value: false,
+                          icon: Icon(Icons.swap_horiz),
+                          label: Text('There & back')),
+                    ],
+                    selected: {_loop},
+                    onSelectionChanged: (s) => setState(() => _loop = s.first),
+                  ),
+                  const SizedBox(height: 8),
+                  CheckboxListTile(
+                    contentPadding: EdgeInsets.zero,
+                    dense: true,
+                    value: _cues,
+                    onChanged: (v) => setState(() => _cues = v ?? true),
+                    secondary: const Icon(Icons.signpost_outlined),
+                    title: const Text('Add turn directions'),
+                    subtitle:
+                        const Text('Drops spoken "turn left / right" cues'),
+                  ),
                 ],
               ),
             ),
-            const SizedBox(height: 16),
-            Text('Shape', style: text.titleMedium),
-            const SizedBox(height: 8),
-            SegmentedButton<bool>(
-              showSelectedIcon: false,
-              segments: const [
-                ButtonSegment(
-                    value: true,
-                    icon: Icon(Icons.loop),
-                    label: Text('Loop')),
-                ButtonSegment(
-                    value: false,
-                    icon: Icon(Icons.swap_horiz),
-                    label: Text('There & back')),
-              ],
-              selected: {_loop},
-              onSelectionChanged: (s) => setState(() => _loop = s.first),
-            ),
-            const SizedBox(height: 8),
-            CheckboxListTile(
-              contentPadding: EdgeInsets.zero,
-              dense: true,
-              value: _cues,
-              onChanged: (v) => setState(() => _cues = v ?? true),
-              secondary: const Icon(Icons.signpost_outlined),
-              title: const Text('Add turn directions'),
-              subtitle: const Text('Drops spoken "turn left / right" cues'),
-            ),
-            const SizedBox(height: 14),
-            SizedBox(
+          ),
+          Padding(
+            padding: EdgeInsets.fromLTRB(
+                20, 8, 20, 12 + MediaQuery.viewPaddingOf(context).bottom),
+            child: SizedBox(
               width: double.infinity,
               child: FilledButton.icon(
                 onPressed: () =>
@@ -1650,8 +1675,8 @@ class _GeneratorSheetState extends State<_GeneratorSheet> {
                 label: const Text('Generate'),
               ),
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
