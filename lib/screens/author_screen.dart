@@ -1243,22 +1243,6 @@ class _AuthorScreenState extends State<AuthorScreen> {
               right: 12,
               top: 132,
               child: FloatingActionButton.small(
-                heroTag: 'generate',
-                tooltip: 'Auto-generate a trail here',
-                // Stays tappable even while busy (rather than disabling and
-                // going silent) so a tap always gives some feedback instead
-                // of doing nothing with no visible response.
-                onPressed: _busy
-                    ? () => _toast(
-                        'Still working on the last request — try again in a moment')
-                    : _openGenerator,
-                child: const Icon(Icons.auto_awesome),
-              ),
-            ),
-            Positioned(
-              right: 12,
-              top: 186,
-              child: FloatingActionButton.small(
                 heroTag: 'centerMe',
                 tooltip: 'Center on my location',
                 onPressed: _centerOnMe,
@@ -1287,8 +1271,8 @@ class _AuthorScreenState extends State<AuthorScreen> {
                 ),
               ),
             Positioned(
-              left: 12,
-              right: _modeBarHidden ? null : 12,
+              left: _modeBarHidden ? null : 12,
+              right: 12,
               // Lift above the Android nav bar (0 on gesture-nav phones).
               bottom: 16 + MediaQuery.viewPaddingOf(context).bottom,
               child: _modeBarHidden
@@ -1319,6 +1303,13 @@ class _AuthorScreenState extends State<AuthorScreen> {
                       onExpandedChanged: (v) =>
                           setState(() => _modeBarExpanded = v),
                       onHide: () => setState(() => _modeBarHidden = true),
+                      // Stays tappable even while busy (rather than
+                      // disabling and going silent) so a tap always gives
+                      // some feedback instead of doing nothing visibly.
+                      onGenerate: _busy
+                          ? () => _toast(
+                              'Still working on the last request — try again in a moment')
+                          : _openGenerator,
                     ),
             ),
             if (_moving != null)
@@ -1403,6 +1394,7 @@ class _ModeBar extends StatelessWidget {
     required this.onFreeMoveChanged,
     required this.onExpandedChanged,
     required this.onHide,
+    required this.onGenerate,
   });
 
   final bool cueMode;
@@ -1417,6 +1409,7 @@ class _ModeBar extends StatelessWidget {
   final ValueChanged<bool> onFreeMoveChanged;
   final ValueChanged<bool> onExpandedChanged;
   final VoidCallback onHide;
+  final VoidCallback onGenerate;
 
   @override
   Widget build(BuildContext context) {
@@ -1424,107 +1417,115 @@ class _ModeBar extends StatelessWidget {
       elevation: 4,
       child: Padding(
         padding: const EdgeInsets.fromLTRB(10, 2, 2, 10),
-        child: Stack(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
           children: [
-            Padding(
-              padding: const EdgeInsets.only(top: 22),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  SegmentedButton<bool>(
-                    showSelectedIcon: false,
-                    segments: const [
-                      ButtonSegment(
-                          value: false,
-                          icon: Icon(Icons.timeline),
-                          label: Text('Draw path')),
-                      ButtonSegment(
-                          value: true,
-                          icon: Icon(Icons.add_location_alt),
-                          label: Text('Add cue')),
-                    ],
-                    selected: {cueMode},
-                    onSelectionChanged: (s) => onModeChanged(s.first),
+            // A real Row slot for the collapse/hide icons (stacked vertically,
+            // beside the segmented button) rather than absolutely-positioned
+            // overlay icons — those sat right on top of the "Add cue" segment
+            // and looked cramped.
+            Row(
+              children: [
+                IconButton(
+                  visualDensity: VisualDensity.compact,
+                  tooltip: 'Auto-generate a trail here',
+                  icon: const Icon(Icons.auto_awesome),
+                  onPressed: onGenerate,
+                ),
+                Expanded(
+                  child: Center(
+                    child: SegmentedButton<bool>(
+                      showSelectedIcon: false,
+                      segments: const [
+                        ButtonSegment(
+                            value: false,
+                            icon: Icon(Icons.timeline),
+                            label: Text('Draw path')),
+                        ButtonSegment(
+                            value: true,
+                            icon: Icon(Icons.add_location_alt),
+                            label: Text('Add cue')),
+                      ],
+                      selected: {cueMode},
+                      onSelectionChanged: (s) => onModeChanged(s.first),
+                    ),
                   ),
-                  const SizedBox(height: 8),
-                  // Live planned length of the trail as it's drawn.
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      const Icon(Icons.straighten, size: 20),
-                      const SizedBox(width: 6),
-                      Text('Trail length: $lengthLabel',
-                          style: const TextStyle(
-                              fontSize: 16, fontWeight: FontWeight.w600)),
-                    ],
-                  ),
-                  if (expanded) ...[
-                    // Same slot either way (so the bar height — and thus the
-                    // Draw/Cue buttons — never jump between modes):
-                    // Follow-trails in Draw mode, Free-placement in Cue mode.
-                    cueMode
-                        ? SwitchListTile(
-                            dense: true,
-                            contentPadding: EdgeInsets.zero,
-                            value: freeMove,
-                            onChanged: onFreeMoveChanged,
-                            secondary: const Icon(Icons.open_with),
-                            title: const Text('Free placement'),
-                            subtitle: Text(freeMove
-                                ? 'Moved cues drop exactly where you tap'
-                                : 'Moved cues snap onto the drawn trail line'),
-                          )
-                        : SwitchListTile(
-                            dense: true,
-                            contentPadding: EdgeInsets.zero,
-                            value: follow,
-                            onChanged: onFollowChanged,
-                            secondary: const Icon(Icons.alt_route),
-                            title: const Text('Follow trails'),
-                            subtitle: Text(follow
-                                ? 'Route bends along real trails between taps'
-                                : 'Straight lines between taps'),
-                          ),
-                    const SizedBox(height: 4),
-                    Text(
-                      cueMode
-                          ? 'Tap map to drop a cue • tap to edit/delete • long-press to move • $cueCount placed'
-                          : 'Tap map to add • tap a point to route through it • long-press a point to move/delete, or long-press the line to insert one • $anchorCount ${anchorCount == 1 ? "point" : "points"}',
-                      style: Theme.of(context).textTheme.bodySmall,
-                      textAlign: TextAlign.center,
+                ),
+                Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      visualDensity: VisualDensity.compact,
+                      constraints: const BoxConstraints(),
+                      padding: const EdgeInsets.all(4),
+                      iconSize: 20,
+                      tooltip: expanded ? 'Show less' : 'Show more',
+                      icon: Icon(
+                          expanded ? Icons.unfold_less : Icons.unfold_more),
+                      onPressed: () => onExpandedChanged(!expanded),
+                    ),
+                    IconButton(
+                      visualDensity: VisualDensity.compact,
+                      constraints: const BoxConstraints(),
+                      padding: const EdgeInsets.all(4),
+                      iconSize: 20,
+                      tooltip:
+                          'Hide — tap the icon in the corner to bring it back',
+                      icon: const Icon(Icons.close),
+                      onPressed: onHide,
                     ),
                   ],
-                ],
-              ),
+                ),
+              ],
             ),
-            Positioned(
-              top: 0,
-              right: 0,
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  IconButton(
-                    visualDensity: VisualDensity.compact,
-                    constraints: const BoxConstraints(),
-                    padding: const EdgeInsets.all(4),
-                    iconSize: 20,
-                    tooltip: expanded ? 'Show less' : 'Show more',
-                    icon: Icon(
-                        expanded ? Icons.unfold_less : Icons.unfold_more),
-                    onPressed: () => onExpandedChanged(!expanded),
-                  ),
-                  IconButton(
-                    visualDensity: VisualDensity.compact,
-                    constraints: const BoxConstraints(),
-                    padding: const EdgeInsets.all(4),
-                    iconSize: 20,
-                    tooltip: 'Hide — tap the icon in the corner to bring it back',
-                    icon: const Icon(Icons.close),
-                    onPressed: onHide,
-                  ),
-                ],
-              ),
+            const SizedBox(height: 8),
+            // Live planned length of the trail as it's drawn.
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Icon(Icons.straighten, size: 20),
+                const SizedBox(width: 6),
+                Text('Trail length: $lengthLabel',
+                    style: const TextStyle(
+                        fontSize: 16, fontWeight: FontWeight.w600)),
+              ],
             ),
+            if (expanded) ...[
+              // Same slot either way (so the bar height — and thus the
+              // Draw/Cue buttons — never jump between modes): Follow-trails
+              // in Draw mode, Free-placement in Cue mode.
+              cueMode
+                  ? SwitchListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      value: freeMove,
+                      onChanged: onFreeMoveChanged,
+                      secondary: const Icon(Icons.open_with),
+                      title: const Text('Free placement'),
+                      subtitle: Text(freeMove
+                          ? 'Moved cues drop exactly where you tap'
+                          : 'Moved cues snap onto the drawn trail line'),
+                    )
+                  : SwitchListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      value: follow,
+                      onChanged: onFollowChanged,
+                      secondary: const Icon(Icons.alt_route),
+                      title: const Text('Follow trails'),
+                      subtitle: Text(follow
+                          ? 'Route bends along real trails between taps'
+                          : 'Straight lines between taps'),
+                    ),
+              const SizedBox(height: 4),
+              Text(
+                cueMode
+                    ? 'Tap map to drop a cue • tap to edit/delete • long-press to move • $cueCount placed'
+                    : 'Tap map to add • tap a point to route through it • long-press a point to move/delete, or long-press the line to insert one • $anchorCount ${anchorCount == 1 ? "point" : "points"}',
+                style: Theme.of(context).textTheme.bodySmall,
+                textAlign: TextAlign.center,
+              ),
+            ],
           ],
         ),
       ),
