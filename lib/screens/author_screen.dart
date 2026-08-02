@@ -51,6 +51,12 @@ class _AuthorScreenState extends State<AuthorScreen> {
   /// tapping out a path.
   bool _modeBarExpanded = true;
 
+  /// When true, the mode-bar card is hidden entirely — replaced by a small
+  /// corner icon (like the map's other small FABs) — for when even the
+  /// collapsed card is still in the way and the map needs the full screen.
+  /// Reopening restores whatever [_modeBarExpanded] state it was in before.
+  bool _modeBarHidden = false;
+
   /// The cue awaiting a new position (long-pressed in Cue mode), or null.
   Cue? _moving;
   /// When true, the next tap places [_moving] exactly where tapped; when
@@ -832,21 +838,35 @@ class _AuthorScreenState extends State<AuthorScreen> {
   /// Opens the generator sheet, then auto-builds a route from the trails in the
   /// current map view. Replaces the existing path (after confirming).
   Future<void> _openGenerator() async {
-    final choice = await showModalBottomSheet<_GenChoice>(
-      context: context,
-      builder: (_) => const _GeneratorSheet(),
-    );
-    if (choice == null || !mounted) return;
-    if (_trail.anchors.isNotEmpty &&
-        !await _confirm('Replace the current path with a generated one?')) {
-      return;
+    // Every exit from here now surfaces something — a toast, the sheet, or
+    // the generated route itself — so a tap on "Auto-generate" never just
+    // silently does nothing with no feedback at all.
+    try {
+      final choice = await showModalBottomSheet<_GenChoice>(
+        context: context,
+        builder: (_) => const _GeneratorSheet(),
+      );
+      if (choice == null || !mounted) return;
+      if (_trail.anchors.isNotEmpty &&
+          !await _confirm('Replace the current path with a generated one?')) {
+        return;
+      }
+      await _generateRoute(choice);
+    } catch (_) {
+      if (mounted) _toast('Could not open the generator — try again');
     }
-    await _generateRoute(choice);
   }
 
   Future<void> _generateRoute(_GenChoice choice) async {
     final c = _c;
-    if (c == null || _busy) return;
+    if (c == null) {
+      _toast('Map is still loading — try again in a second');
+      return;
+    }
+    if (_busy) {
+      _toast('Still working on the last request — try again in a moment');
+      return;
+    }
     final size = MediaQuery.of(context).size;
     setState(() => _busy = true);
     try {
@@ -1225,7 +1245,13 @@ class _AuthorScreenState extends State<AuthorScreen> {
               child: FloatingActionButton.small(
                 heroTag: 'generate',
                 tooltip: 'Auto-generate a trail here',
-                onPressed: _busy ? null : _openGenerator,
+                // Stays tappable even while busy (rather than disabling and
+                // going silent) so a tap always gives some feedback instead
+                // of doing nothing with no visible response.
+                onPressed: _busy
+                    ? () => _toast(
+                        'Still working on the last request — try again in a moment')
+                    : _openGenerator,
                 child: const Icon(Icons.auto_awesome),
               ),
             ),
@@ -1262,24 +1288,38 @@ class _AuthorScreenState extends State<AuthorScreen> {
               ),
             Positioned(
               left: 12,
-              right: 12,
+              right: _modeBarHidden ? null : 12,
               // Lift above the Android nav bar (0 on gesture-nav phones).
               bottom: 16 + MediaQuery.viewPaddingOf(context).bottom,
-              child: _ModeBar(
-                cueMode: _cueMode,
-                follow: _follow,
-                anchorCount: _trail.anchors.length,
-                cueCount: _trail.cues.length,
-                lengthLabel: Settings.instance.formatDistance(
-                    pathLength(_trail.path)),
-                freeMove: _freeMove,
-                expanded: _modeBarExpanded,
-                onModeChanged: (v) => setState(() => _cueMode = v),
-                onFollowChanged: (v) => setState(() => _follow = v),
-                onFreeMoveChanged: (v) => setState(() => _freeMove = v),
-                onExpandedChanged: (v) =>
-                    setState(() => _modeBarExpanded = v),
-              ),
+              child: _modeBarHidden
+                  // Hidden entirely — just a small corner FAB (same style as
+                  // the map's other small FABs) to bring it back, restoring
+                  // whatever expanded/collapsed state it was in before.
+                  ? FloatingActionButton.small(
+                      heroTag: 'modeBarRestore',
+                      tooltip: 'Show trail controls',
+                      onPressed: () => setState(() => _modeBarHidden = false),
+                      child: Icon(_cueMode
+                          ? Icons.add_location_alt
+                          : Icons.timeline),
+                    )
+                  : _ModeBar(
+                      cueMode: _cueMode,
+                      follow: _follow,
+                      anchorCount: _trail.anchors.length,
+                      cueCount: _trail.cues.length,
+                      lengthLabel: Settings.instance
+                          .formatDistance(pathLength(_trail.path)),
+                      freeMove: _freeMove,
+                      expanded: _modeBarExpanded,
+                      onModeChanged: (v) => setState(() => _cueMode = v),
+                      onFollowChanged: (v) => setState(() => _follow = v),
+                      onFreeMoveChanged: (v) =>
+                          setState(() => _freeMove = v),
+                      onExpandedChanged: (v) =>
+                          setState(() => _modeBarExpanded = v),
+                      onHide: () => setState(() => _modeBarHidden = true),
+                    ),
             ),
             if (_moving != null)
               Positioned(
@@ -1346,7 +1386,9 @@ class _AuthorScreenState extends State<AuthorScreen> {
 /// The Path / Cue mode toggle, auto-follow switch, and a hint line. A small
 /// expand/collapse button in the corner drops the switch + hint when the
 /// card is getting in the way of actively drawing, keeping just the mode
-/// toggle and trail length visible.
+/// toggle and trail length visible; a second button hides the card entirely
+/// down to a small corner icon (see [_AuthorScreenState._modeBarHidden]) for
+/// when even that's still in the way.
 class _ModeBar extends StatelessWidget {
   const _ModeBar({
     required this.cueMode,
@@ -1360,6 +1402,7 @@ class _ModeBar extends StatelessWidget {
     required this.onFollowChanged,
     required this.onFreeMoveChanged,
     required this.onExpandedChanged,
+    required this.onHide,
   });
 
   final bool cueMode;
@@ -1373,6 +1416,7 @@ class _ModeBar extends StatelessWidget {
   final ValueChanged<bool> onFollowChanged;
   final ValueChanged<bool> onFreeMoveChanged;
   final ValueChanged<bool> onExpandedChanged;
+  final VoidCallback onHide;
 
   @override
   Widget build(BuildContext context) {
@@ -1456,14 +1500,29 @@ class _ModeBar extends StatelessWidget {
             Positioned(
               top: 0,
               right: 0,
-              child: IconButton(
-                visualDensity: VisualDensity.compact,
-                constraints: const BoxConstraints(),
-                padding: const EdgeInsets.all(4),
-                iconSize: 20,
-                tooltip: expanded ? 'Show less' : 'Show more',
-                icon: Icon(expanded ? Icons.unfold_less : Icons.unfold_more),
-                onPressed: () => onExpandedChanged(!expanded),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton(
+                    visualDensity: VisualDensity.compact,
+                    constraints: const BoxConstraints(),
+                    padding: const EdgeInsets.all(4),
+                    iconSize: 20,
+                    tooltip: expanded ? 'Show less' : 'Show more',
+                    icon: Icon(
+                        expanded ? Icons.unfold_less : Icons.unfold_more),
+                    onPressed: () => onExpandedChanged(!expanded),
+                  ),
+                  IconButton(
+                    visualDensity: VisualDensity.compact,
+                    constraints: const BoxConstraints(),
+                    padding: const EdgeInsets.all(4),
+                    iconSize: 20,
+                    tooltip: 'Hide — tap the icon in the corner to bring it back',
+                    icon: const Icon(Icons.close),
+                    onPressed: onHide,
+                  ),
+                ],
               ),
             ),
           ],
