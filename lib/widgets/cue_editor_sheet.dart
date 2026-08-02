@@ -25,13 +25,22 @@ final Cue addAnotherCueSentinel = Cue(
 /// Shows the cue editor as a modal bottom sheet. Returns the edited cue,
 /// [deletedCueSentinel] if deleted, [addAnotherCueSentinel] if the user chose
 /// to stack another cue here (both only possible when [existing] is given),
-/// or null if cancelled. The returned cue's [Cue.order] is a placeholder —
-/// callers own ordering (new cues: append to the stack; edits: keep the
-/// original cue's order unchanged).
+/// or null if cancelled.
+///
+/// [initialOrder] (0-based) is only used — and only shown as an editable
+/// field — when [existing] is null: it's the stack position a brand new cue
+/// defaults to (typically "append to the end"), which the author can type
+/// over directly to insert it somewhere else instead. There's deliberately
+/// no geometric auto-guessing of where a new cue "should" go — that was
+/// tried and broke exactly on the case it most needed to handle (a path
+/// crossing itself), silently reshuffling cues far from where a fresh tap
+/// actually belonged. Editing an existing cue leaves its order untouched;
+/// reposition it via drag-to-reorder in the cue list instead.
 Future<Cue?> showCueEditor(
   BuildContext context, {
   required LatLng position,
   Cue? existing,
+  int initialOrder = 0,
 }) {
   return showModalBottomSheet<Cue>(
     context: context,
@@ -45,6 +54,7 @@ Future<Cue?> showCueEditor(
       child: CueEditorSheet(
         position: position,
         existing: existing,
+        initialOrder: initialOrder,
         onDelete: existing == null
             ? null
             : () => Navigator.pop(ctx, deletedCueSentinel),
@@ -61,12 +71,14 @@ class CueEditorSheet extends StatefulWidget {
     super.key,
     required this.position,
     this.existing,
+    this.initialOrder = 0,
     this.onDelete,
     this.onAddAnother,
   });
 
   final LatLng position;
   final Cue? existing;
+  final int initialOrder;
   final VoidCallback? onDelete;
   final VoidCallback? onAddAnother;
 
@@ -78,6 +90,7 @@ class _CueEditorSheetState extends State<CueEditorSheet> {
   late CueType _type;
   late TextEditingController _label;
   late TextEditingController _spoken;
+  late TextEditingController _order; // 1-based, only shown for a new cue
   late double _radius;
 
   @override
@@ -87,6 +100,7 @@ class _CueEditorSheetState extends State<CueEditorSheet> {
     _type = e?.type ?? CueType.left;
     _label = TextEditingController(text: e?.label ?? _type.label);
     _spoken = TextEditingController(text: e?.spoken ?? _type.defaultSpoken);
+    _order = TextEditingController(text: '${widget.initialOrder + 1}');
     _radius = e?.radiusMeters ?? 25;
   }
 
@@ -94,6 +108,7 @@ class _CueEditorSheetState extends State<CueEditorSheet> {
   void dispose() {
     _label.dispose();
     _spoken.dispose();
+    _order.dispose();
     super.dispose();
   }
 
@@ -125,6 +140,22 @@ class _CueEditorSheetState extends State<CueEditorSheet> {
                 children: [
                   Text(widget.existing == null ? 'New cue' : 'Edit cue',
                       style: Theme.of(context).textTheme.titleLarge),
+                  if (widget.existing == null) ...[
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: _order,
+                      keyboardType: TextInputType.number,
+                      decoration: const InputDecoration(
+                        labelText: 'Position in list (1 = first)',
+                        helperText:
+                            'Defaults to the end of the list — type a smaller '
+                            'number to insert it earlier; everything from '
+                            'there shifts up automatically.',
+                        helperMaxLines: 2,
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                  ],
                   const SizedBox(height: 12),
                   Wrap(
                     spacing: 8,
@@ -208,21 +239,29 @@ class _CueEditorSheetState extends State<CueEditorSheet> {
                     child: const Text('Cancel')),
                 const SizedBox(width: 8),
                 FilledButton(
-                  onPressed: () => Navigator.pop(
-                    context,
-                    Cue(
-                      type: _type,
-                      position: widget.position,
-                      // Placeholder — the caller assigns the real order (new
-                      // cues append to the stack; edits keep the original).
-                      order: widget.existing?.order ?? 0,
-                      label: _label.text.trim().isEmpty
-                          ? _type.label
-                          : _label.text.trim(),
-                      spoken: _spoken.text.trim(),
-                      radiusMeters: _radius,
-                    ),
-                  ),
+                  onPressed: () {
+                    final int order;
+                    if (widget.existing != null) {
+                      order = widget.existing!.order; // left untouched
+                    } else {
+                      final typed = int.tryParse(_order.text.trim());
+                      order = ((typed ?? widget.initialOrder + 1) - 1)
+                          .clamp(0, 1 << 30);
+                    }
+                    Navigator.pop(
+                      context,
+                      Cue(
+                        type: _type,
+                        position: widget.position,
+                        order: order,
+                        label: _label.text.trim().isEmpty
+                            ? _type.label
+                            : _label.text.trim(),
+                        spoken: _spoken.text.trim(),
+                        radiusMeters: _radius,
+                      ),
+                    );
+                  },
                   child: const Text('Save cue'),
                 ),
               ],

@@ -21,13 +21,13 @@ class _CueListScreenState extends State<CueListScreen> {
   List<Cue> get _sorted =>
       List.of(widget.trail.cues)..sort((a, b) => a.order.compareTo(b.order));
 
-  /// Inserts [cue] at [order], shifting every cue currently at or after that
-  /// position up by one to make room.
-  void _insertCueAtOrder(Cue cue, int order) {
+  /// Inserts [cue] at [cue.order] (already the author's chosen position —
+  /// see [showCueEditor]'s `initialOrder`), shifting every cue currently at
+  /// or after that position up by one to make room.
+  void _insertCueAtOrder(Cue cue) {
     for (final c in widget.trail.cues) {
-      if (c.order >= order) c.order++;
+      if (c.order >= cue.order) c.order++;
     }
-    cue.order = order;
     widget.trail.cues.add(cue);
   }
 
@@ -36,11 +36,13 @@ class _CueListScreenState extends State<CueListScreen> {
     if (result == deletedCueSentinel) {
       setState(() => widget.trail.cues.remove(cue));
     } else if (result == addAnotherCueSentinel) {
-      // Insert right after the cue it's stacking with.
+      // Defaults to right after the cue it's stacking with — still editable
+      // in the field if that's not actually where it belongs.
       if (!mounted) return;
-      final another = await showCueEditor(context, position: cue.position);
+      final another = await showCueEditor(context,
+          position: cue.position, initialOrder: cue.order + 1);
       if (!mounted || another == null) return;
-      setState(() => _insertCueAtOrder(another, cue.order + 1));
+      setState(() => _insertCueAtOrder(another));
     } else if (result != null) {
       setState(() {
         cue

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' show cos, sin, pi;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_tts/flutter_tts.dart';
@@ -299,23 +300,52 @@ class _GuideScreenState extends State<GuideScreen> {
   }
 
   /// Draws the cue markers, each labelled with its stack position so the map
-  /// reads consistently with the cue list.
+  /// reads consistently with the cue list. Cues sharing (almost) the same
+  /// spot are fanned out a few metres apart instead of drawn exactly on top
+  /// of each other — otherwise only the last-drawn one would be visible.
   Future<void> _drawCues() async {
     final c = _c;
     if (c == null) return;
     await c.clearSymbols();
     await c.clearCircles();
+
+    // _cues is already sorted by order — that sort position is the display
+    // rank, always a clean 1..N regardless of gaps in the raw order values.
+    final rank = <Cue, int>{for (var i = 0; i < _cues.length; i++) _cues[i]: i + 1};
+    final groups = <List<Cue>>[];
     for (final cue in widget.trail.cues) {
+      final match = groups
+          .where((g) => metersBetween(g.first.position, cue.position) < 1.0);
+      if (match.isNotEmpty) {
+        match.first.add(cue);
+      } else {
+        groups.add([cue]);
+      }
+    }
+    final drawPos = <Cue, LatLng>{};
+    for (final group in groups) {
+      if (group.length == 1) {
+        drawPos[group.first] = group.first.position;
+        continue;
+      }
+      for (var i = 0; i < group.length; i++) {
+        final angle = 2 * pi * i / group.length;
+        drawPos[group[i]] = _fanOffset(group.first.position, angle, 4.0);
+      }
+    }
+
+    for (final cue in widget.trail.cues) {
+      final pos = drawPos[cue] ?? cue.position;
       await c.addCircle(CircleOptions(
-        geometry: cue.position,
+        geometry: pos,
         circleRadius: 11,
         circleColor: cueColorHex(cue.type),
         circleStrokeColor: '#ffffff',
         circleStrokeWidth: 3,
       ));
       await c.addSymbol(SymbolOptions(
-        geometry: cue.position,
-        textField: '${cue.order + 1}. ${cue.label}',
+        geometry: pos,
+        textField: '${rank[cue]}. ${cue.label}',
         textSize: 15,
         textColor: '#1a1a1a',
         textHaloColor: '#ffffff',
@@ -324,6 +354,17 @@ class _GuideScreenState extends State<GuideScreen> {
         textOffset: const Offset(0, 1.1),
       ));
     }
+  }
+
+  static LatLng _fanOffset(LatLng base, double angleRad, double meters) {
+    const metersPerDegLat = 111320.0;
+    final cosLat = cos(base.latitude * pi / 180);
+    final dx = meters * cos(angleRad);
+    final dy = meters * sin(angleRad);
+    return LatLng(
+      base.latitude + dy / metersPerDegLat,
+      base.longitude + dx / (metersPerDegLat * cosLat),
+    );
   }
 
   Region get _region => regionById(widget.trail.regionId);

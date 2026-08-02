@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'dart:math' show Point, sqrt;
+import 'dart:math' show Point, sqrt, cos, sin, pi;
 
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
@@ -259,47 +259,32 @@ class _AuthorScreenState extends State<AuthorScreen> {
     }
   }
 
-  /// Next stack position — used when there's nothing to slot in relative to
-  /// (an empty trail, or the tap falls past every existing cue).
+  /// Next stack position — the default a new cue's editor field is prefilled
+  /// with (append to the end); the author can type a different number in
+  /// directly to insert it elsewhere instead. Deliberately no geometric
+  /// auto-guessing here — that was tried and broke exactly on a path that
+  /// crosses itself, silently reshuffling cues far from where a fresh tap
+  /// actually belonged.
   int get _nextCueOrder => _trail.cues.isEmpty
       ? 0
       : _trail.cues.map((c) => c.order).reduce((a, b) => a > b ? a : b) + 1;
 
-  /// Where a newly-tapped cue position should slot into the stack, based on
-  /// how far along the path it falls relative to the EXISTING cues — so
-  /// filling in a turn auto-generate missed lands at roughly the right
-  /// number instead of always at the very end. Just a default: drag-to-
-  /// reorder in the cue list always wins if this guesses wrong (e.g. on a
-  /// path that crosses itself near the tap).
-  int _insertionOrderFor(LatLng tapped) {
-    if (_trail.path.length < 2 || _trail.cues.isEmpty) return _nextCueOrder;
-    final tappedAt = distanceAlongPath(tapped, _trail.path);
-    final sorted = List.of(_trail.cues)
-      ..sort((a, b) => a.order.compareTo(b.order));
-    for (final cue in sorted) {
-      if (distanceAlongPath(cue.position, _trail.path) > tappedAt) {
-        return cue.order;
-      }
-    }
-    return _nextCueOrder;
-  }
-
-  /// Inserts [cue] at [order], shifting every cue currently at or after that
-  /// position up by one to make room — "add a cue in the middle" without
-  /// needing a separate drag-to-reorder step afterward.
-  void _insertCueAtOrder(Cue cue, int order) {
+  /// Inserts [cue] at [cue.order] (already the author's chosen position —
+  /// see [showCueEditor]'s `initialOrder`), shifting every cue currently at
+  /// or after that position up by one to make room.
+  void _insertCueAtOrder(Cue cue) {
     for (final c in _trail.cues) {
-      if (c.order >= order) c.order++;
+      if (c.order >= cue.order) c.order++;
     }
-    cue.order = order;
     _trail.cues.add(cue);
   }
 
   /// Opens the cue editor at [position] and, if saved, adds the cue.
   Future<void> _addCueAt(LatLng position) async {
-    final cue = await showCueEditor(context, position: position);
+    final cue = await showCueEditor(context,
+        position: position, initialOrder: _nextCueOrder);
     if (cue == null) return;
-    setState(() => _insertCueAtOrder(cue, _insertionOrderFor(position)));
+    setState(() => _insertCueAtOrder(cue));
     _dirty = true;
     await _redraw();
   }
@@ -366,12 +351,13 @@ class _AuthorScreenState extends State<AuthorScreen> {
     if (result == deletedCueSentinel) {
       setState(() => _trail.cues.remove(cue));
     } else if (result == addAnotherCueSentinel) {
-      // Insert right after the cue it's stacking with, not the geometric
-      // guess _addCueAt would make — we already know exactly where it goes.
+      // Defaults to right after the cue it's stacking with — still editable
+      // in the field if that's not actually where it belongs.
       if (!mounted) return;
-      final another = await showCueEditor(context, position: cue.position);
+      final another = await showCueEditor(context,
+          position: cue.position, initialOrder: cue.order + 1);
       if (!mounted || another == null) return;
-      setState(() => _insertCueAtOrder(another, cue.order + 1));
+      setState(() => _insertCueAtOrder(another));
       _dirty = true;
       await _redraw();
       return;
@@ -593,11 +579,13 @@ class _AuthorScreenState extends State<AuthorScreen> {
       }
     }
 
+    final display = _cueDisplayInfo();
     for (final cue in _trail.cues) {
       final isMoving = identical(cue, _moving);
       final isHighlighted = identical(cue, _highlighted);
+      final drawPos = display.drawPos[cue] ?? cue.position;
       final cueCircle = await c.addCircle(CircleOptions(
-        geometry: cue.position,
+        geometry: drawPos,
         circleRadius: isMoving || isHighlighted ? 15 : 11,
         circleColor: cueColorHex(cue.type),
         // A cue pending a move is highlighted gold; one just located from the
@@ -608,9 +596,10 @@ class _AuthorScreenState extends State<AuthorScreen> {
       ));
       _circleToCue[cueCircle.id] = cue;
       final symbol = await c.addSymbol(SymbolOptions(
-        geometry: cue.position,
-        // Order prefix ties the map marker to its row in the cue list.
-        textField: '${cue.order + 1}. ${cue.label}',
+        geometry: drawPos,
+        // Rank (not the raw, possibly-gappy order value) ties the map
+        // marker to its row in the cue list.
+        textField: '${display.rank[cue]}. ${cue.label}',
         textSize: 15,
         textColor: '#1a1a1a',
         textHaloColor: '#ffffff',
@@ -620,6 +609,59 @@ class _AuthorScreenState extends State<AuthorScreen> {
       ));
       _symbolToCue[symbol.id] = cue;
     }
+  }
+
+  /// Cues within this many metres of each other are treated as "the same
+  /// spot" and fanned out around it on the map instead of being drawn
+  /// exactly on top of one another — otherwise only the last-drawn one is
+  /// visible or tappable, and a stack of cues just looks like a single one.
+  static const _stackFanMeters = 4.0;
+
+  /// Display number (sorted rank, always a clean 1..N regardless of what the
+  /// underlying [Cue.order] integers actually are — manual entry and moves
+  /// can leave gaps) and draw position (fanned out for same-spot stacks) for
+  /// every cue currently in [_trail].
+  ({Map<Cue, int> rank, Map<Cue, LatLng> drawPos}) _cueDisplayInfo() {
+    final sorted = List.of(_trail.cues)
+      ..sort((a, b) => a.order.compareTo(b.order));
+    final rank = <Cue, int>{
+      for (var i = 0; i < sorted.length; i++) sorted[i]: i + 1,
+    };
+
+    final groups = <List<Cue>>[];
+    for (final cue in _trail.cues) {
+      final match = groups.where(
+          (g) => metersBetween(g.first.position, cue.position) < 1.0);
+      if (match.isNotEmpty) {
+        match.first.add(cue);
+      } else {
+        groups.add([cue]);
+      }
+    }
+    final drawPos = <Cue, LatLng>{};
+    for (final group in groups) {
+      if (group.length == 1) {
+        drawPos[group.first] = group.first.position;
+        continue;
+      }
+      for (var i = 0; i < group.length; i++) {
+        final angle = 2 * pi * i / group.length;
+        drawPos[group[i]] =
+            _offsetMeters(group.first.position, angle, _stackFanMeters);
+      }
+    }
+    return (rank: rank, drawPos: drawPos);
+  }
+
+  static LatLng _offsetMeters(LatLng base, double angleRad, double meters) {
+    const metersPerDegLat = 111320.0;
+    final cosLat = cos(base.latitude * pi / 180);
+    final dx = meters * cos(angleRad);
+    final dy = meters * sin(angleRad);
+    return LatLng(
+      base.latitude + dy / metersPerDegLat,
+      base.longitude + dx / (metersPerDegLat * cosLat),
+    );
   }
 
   /// Resolves the current GPS position, handling permission + service checks
@@ -667,9 +709,10 @@ class _AuthorScreenState extends State<AuthorScreen> {
     await _c?.animateCamera(CameraUpdate.newLatLng(here));
     if (!mounted) return;
     if (_cueMode) {
-      final cue = await showCueEditor(context, position: here);
+      final cue = await showCueEditor(context,
+          position: here, initialOrder: _nextCueOrder);
       if (!mounted || cue == null) return;
-      setState(() => _insertCueAtOrder(cue, _insertionOrderFor(here)));
+      setState(() => _insertCueAtOrder(cue));
       _dirty = true;
       await _redraw();
     } else {
