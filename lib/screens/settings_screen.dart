@@ -209,7 +209,93 @@ class _SettingsScreenState extends State<SettingsScreen> {
               '(or Device care → Battery) and make sure APS Trails is not '
               'in "Sleeping apps" or "Deep sleeping apps".',
               style: TextStyle(fontSize: 13, color: Color(0xFF4A4A4A))),
+          const Divider(height: 40),
+          const Text('Map trail lines',
+              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 6),
+          const Text(
+              "Colour and pattern of the background map's hiking-path lines — "
+              "the other trails shown in the area, not the one you're "
+              "authoring or following (that always draws in its own colour, "
+              "on top). Pick whatever's easiest to follow when a few trails "
+              "run close together.",
+              style: TextStyle(fontSize: 14, color: Color(0xFF4A4A4A))),
+          const SizedBox(height: 12),
+          ValueListenableBuilder<String>(
+            valueListenable: s.trailLineColor,
+            builder: (context, selected, _) => Wrap(
+              spacing: 12,
+              runSpacing: 12,
+              children: [
+                for (final hex in _trailColorChoices)
+                  _ColorSwatch(
+                    hex: hex,
+                    selected: hex == selected,
+                    onTap: () => s.setTrailLineColor(hex),
+                  ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 4),
+          ValueListenableBuilder<bool>(
+            valueListenable: s.trailLineDashed,
+            builder: (context, dashed, _) => SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              value: dashed,
+              onChanged: s.setTrailLineDashed,
+              title: const Text('Dashed line'),
+              subtitle: Text(dashed
+                  ? 'Dashed — off for a solid line, easier to follow where '
+                      'trails cross or run close together.'
+                  : 'Solid line.'),
+            ),
+          ),
         ],
+      ),
+    );
+  }
+}
+
+/// Preset colours offered for the background trail line — distinct from
+/// every cue-marker colour and from each other, and legible against the
+/// basemap's tan/cream terrain.
+const _trailColorChoices = <String>[
+  '#3F51B5', // indigo (default)
+  '#00695C', // deep teal
+  '#B5451F', // the original red-brown, for anyone who preferred it
+  '#4E342E', // dark brown
+  '#212121', // near-black
+  '#6A1B9A', // purple
+];
+
+class _ColorSwatch extends StatelessWidget {
+  const _ColorSwatch(
+      {required this.hex, required this.selected, required this.onTap});
+
+  final String hex;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = Color(int.parse('FF${hex.substring(1)}', radix: 16));
+    return InkWell(
+      borderRadius: BorderRadius.circular(24),
+      onTap: onTap,
+      child: Container(
+        width: 44,
+        height: 44,
+        decoration: BoxDecoration(
+          color: color,
+          shape: BoxShape.circle,
+          border: Border.all(
+            color: selected ? Colors.black : Colors.black26,
+            width: selected ? 3 : 1,
+          ),
+        ),
+        child: selected
+            ? const Icon(Icons.check, color: Colors.white, size: 20)
+            : null,
       ),
     );
   }

@@ -7,6 +7,7 @@ import 'package:maplibre_gl/maplibre_gl.dart';
 
 import '../models/region.dart';
 import '../services/offline_map.dart';
+import '../services/settings.dart';
 
 /// Reusable offline MapLibre map. Loads the bundled Coquitlam pmtiles style
 /// and forwards the common callbacks. Shared by the author and guide screens.
@@ -53,9 +54,49 @@ class _BaseMapState extends State<BaseMap> {
 
   MapLibreMapController? _controller;
 
+  @override
+  void initState() {
+    super.initState();
+    // Live-apply so a change made on the Settings screen (pushed on top of
+    // an already-open map) takes effect the moment you come back to it,
+    // without needing to fully leave and reopen the trail.
+    Settings.instance.trailLineColor.addListener(_applyTrailLineStyle);
+    Settings.instance.trailLineDashed.addListener(_applyTrailLineStyle);
+  }
+
+  @override
+  void dispose() {
+    Settings.instance.trailLineColor.removeListener(_applyTrailLineStyle);
+    Settings.instance.trailLineDashed.removeListener(_applyTrailLineStyle);
+    super.dispose();
+  }
+
   void _onMapCreated(MapLibreMapController controller) {
     _controller = controller;
     widget.onMapCreated?.call(controller);
+  }
+
+  /// Applies the user's chosen colour/dash setting to the background map's
+  /// generic hiking-path layer ("trails" in style.json) — the "other trails
+  /// in the area" clutter, not a trail you've authored (those draw their own
+  /// per-trail colour on top, unaffected by this). Safe to call before the
+  /// style has loaded (no-op) or repeatedly (idempotent).
+  void _onStyleLoaded() {
+    _applyTrailLineStyle();
+    widget.onStyleLoaded?.call();
+  }
+
+  void _applyTrailLineStyle() {
+    final c = _controller;
+    if (c == null) return;
+    c.setLayerProperties(
+      'trails',
+      LineLayerProperties(
+        lineColor: Settings.instance.trailLineColor.value,
+        lineDasharray:
+            Settings.instance.trailLineDashed.value ? [2, 1.5] : null,
+      ),
+    );
   }
 
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
@@ -165,7 +206,7 @@ class _BaseMapState extends State<BaseMap> {
               compassViewPosition: CompassViewPosition.topLeft,
               compassViewMargins: const Point(12, 90),
               onMapCreated: _onMapCreated,
-              onStyleLoadedCallback: widget.onStyleLoaded,
+              onStyleLoadedCallback: _onStyleLoaded,
               onMapClick: widget.onMapClick,
               onMapLongClick: widget.onMapLongClick,
             ),

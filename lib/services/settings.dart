@@ -17,6 +17,8 @@ class Settings {
   static const _kEscalateMinutes = 'stillness_escalate_minutes';
   static const _kDebugStillness = 'debug_stillness_overlay';
   static const _kSendEmergencySms = 'send_emergency_sms';
+  static const _kTrailLineColor = 'basemap_trail_line_color';
+  static const _kTrailLineDashed = 'basemap_trail_line_dashed';
 
   /// true = metric (m / km), false = imperial (ft / mi). Defaults to metric.
   final ValueNotifier<bool> metric = ValueNotifier(true);
@@ -53,6 +55,17 @@ class Settings {
   /// instead of ever texting the emergency contact. On by default.
   final ValueNotifier<bool> sendEmergencySms = ValueNotifier(true);
 
+  /// Colour (hex) of the background map's generic hiking-path line — the
+  /// "other trails in the area" clutter, not a trail you've authored (those
+  /// draw in their own per-trail colour on top). Defaults to a solid indigo,
+  /// distinct from every cue-marker colour.
+  final ValueNotifier<String> trailLineColor = ValueNotifier('#3F51B5');
+
+  /// Whether that background trail line is dashed. Off (solid) by default —
+  /// a dashed line was the original complaint: hard to follow where several
+  /// trails run close together.
+  final ValueNotifier<bool> trailLineDashed = ValueNotifier(false);
+
   Future<void> load() async {
     final p = await SharedPreferences.getInstance();
     metric.value = p.getBool(_kMetric) ?? true;
@@ -65,6 +78,8 @@ class Settings {
     escalateMinutes.value = p.getInt(_kEscalateMinutes) ?? 8;
     debugStillness.value = p.getBool(_kDebugStillness) ?? false;
     sendEmergencySms.value = p.getBool(_kSendEmergencySms) ?? true;
+    trailLineColor.value = p.getString(_kTrailLineColor) ?? '#3F51B5';
+    trailLineDashed.value = p.getBool(_kTrailLineDashed) ?? false;
   }
 
   Future<void> setMetric(bool value) async {
@@ -113,6 +128,18 @@ class Settings {
     sendEmergencySms.value = value;
     final p = await SharedPreferences.getInstance();
     await p.setBool(_kSendEmergencySms, value);
+  }
+
+  Future<void> setTrailLineColor(String hex) async {
+    trailLineColor.value = hex;
+    final p = await SharedPreferences.getInstance();
+    await p.setString(_kTrailLineColor, hex);
+  }
+
+  Future<void> setTrailLineDashed(bool value) async {
+    trailLineDashed.value = value;
+    final p = await SharedPreferences.getInstance();
+    await p.setBool(_kTrailLineDashed, value);
   }
 
   /// Adds a finished walk's distance and elevation gain to the lifetime totals.

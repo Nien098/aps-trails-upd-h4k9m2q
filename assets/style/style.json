@@ -92,9 +92,8 @@
       "filter": ["all", ["==", ["get", "kind"], "path"], ["match", ["get", "kind_detail"], ["sidewalk", "crossing"], false, true]],
       "layout": { "line-cap": "round", "line-join": "round" },
       "paint": {
-        "line-color": "#b5451f",
-        "line-width": ["interpolate", ["linear"], ["zoom"], 12, 2.5, 15, 6, 18, 12],
-        "line-dasharray": [2, 1.5]
+        "line-color": "#3F51B5",
+        "line-width": ["interpolate", ["linear"], ["zoom"], 12, 2.5, 15, 6, 18, 12]
       }
     },
     {
