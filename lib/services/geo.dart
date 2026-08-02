@@ -46,9 +46,32 @@ LatLng nearestPointOnPath(LatLng p, List<LatLng> path) {
   return best;
 }
 
-/// Nearest point on segment [a]–[b] to [p] (and its distance in metres), using
-/// a local equirectangular projection centred on [p] (accurate at trail scale).
-({LatLng point, double meters}) _projectOntoSegment(LatLng p, LatLng a, LatLng b) {
+/// How far along [path] (metres from its start) the point nearest to [p]
+/// lies — used to slot a newly-placed cue in among existing ones by
+/// geometry (e.g. filling in a turn auto-generate missed) instead of always
+/// appending it to the end of the stack.
+double distanceAlongPath(LatLng p, List<LatLng> path) {
+  if (path.length < 2) return 0;
+  var bestMeters = double.infinity;
+  var bestAlong = 0.0;
+  var cum = 0.0;
+  for (var i = 0; i < path.length - 1; i++) {
+    final segLen = metersBetween(path[i], path[i + 1]);
+    final proj = _projectOntoSegment(p, path[i], path[i + 1]);
+    if (proj.meters < bestMeters) {
+      bestMeters = proj.meters;
+      bestAlong = cum + proj.t * segLen;
+    }
+    cum += segLen;
+  }
+  return bestAlong;
+}
+
+/// Nearest point on segment [a]–[b] to [p] (its distance in metres, and how
+/// far along the segment, 0..1, that point falls), using a local
+/// equirectangular projection centred on [p] (accurate at trail scale).
+({LatLng point, double meters, double t}) _projectOntoSegment(
+    LatLng p, LatLng a, LatLng b) {
   const metersPerDegLat = 111320.0;
   final cosLat = math.cos(p.latitude * math.pi / 180);
 
@@ -67,7 +90,7 @@ LatLng nearestPointOnPath(LatLng p, List<LatLng> path) {
   final meters = math.sqrt(cx * cx + cy * cy);
   final lat = p.latitude + cy / metersPerDegLat;
   final lng = p.longitude + cx / (metersPerDegLat * cosLat);
-  return (point: LatLng(lat, lng), meters: meters);
+  return (point: LatLng(lat, lng), meters: meters, t: t);
 }
 
 /// Douglas–Peucker simplification: drops points that lie within

@@ -21,24 +21,26 @@ class _CueListScreenState extends State<CueListScreen> {
   List<Cue> get _sorted =>
       List.of(widget.trail.cues)..sort((a, b) => a.order.compareTo(b.order));
 
-  /// Next stack position — mirrors AuthorScreen's own helper; appending here
-  /// keeps a cue added from the list consistent with one added from the map.
-  int get _nextCueOrder => widget.trail.cues.isEmpty
-      ? 0
-      : widget.trail.cues.map((c) => c.order).reduce((a, b) => a > b ? a : b) + 1;
+  /// Inserts [cue] at [order], shifting every cue currently at or after that
+  /// position up by one to make room.
+  void _insertCueAtOrder(Cue cue, int order) {
+    for (final c in widget.trail.cues) {
+      if (c.order >= order) c.order++;
+    }
+    cue.order = order;
+    widget.trail.cues.add(cue);
+  }
 
   Future<void> _edit(Cue cue) async {
     final result = await showCueEditor(context, position: cue.position, existing: cue);
     if (result == deletedCueSentinel) {
       setState(() => widget.trail.cues.remove(cue));
     } else if (result == addAnotherCueSentinel) {
+      // Insert right after the cue it's stacking with.
       if (!mounted) return;
       final another = await showCueEditor(context, position: cue.position);
       if (!mounted || another == null) return;
-      setState(() {
-        another.order = _nextCueOrder;
-        widget.trail.cues.add(another);
-      });
+      setState(() => _insertCueAtOrder(another, cue.order + 1));
     } else if (result != null) {
       setState(() {
         cue

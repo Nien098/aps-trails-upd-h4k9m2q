@@ -259,20 +259,47 @@ class _AuthorScreenState extends State<AuthorScreen> {
     }
   }
 
-  /// Next stack position — new cues append to the end, so authoring order is
-  /// firing order by default (see [Cue.order]).
+  /// Next stack position — used when there's nothing to slot in relative to
+  /// (an empty trail, or the tap falls past every existing cue).
   int get _nextCueOrder => _trail.cues.isEmpty
       ? 0
       : _trail.cues.map((c) => c.order).reduce((a, b) => a > b ? a : b) + 1;
+
+  /// Where a newly-tapped cue position should slot into the stack, based on
+  /// how far along the path it falls relative to the EXISTING cues — so
+  /// filling in a turn auto-generate missed lands at roughly the right
+  /// number instead of always at the very end. Just a default: drag-to-
+  /// reorder in the cue list always wins if this guesses wrong (e.g. on a
+  /// path that crosses itself near the tap).
+  int _insertionOrderFor(LatLng tapped) {
+    if (_trail.path.length < 2 || _trail.cues.isEmpty) return _nextCueOrder;
+    final tappedAt = distanceAlongPath(tapped, _trail.path);
+    final sorted = List.of(_trail.cues)
+      ..sort((a, b) => a.order.compareTo(b.order));
+    for (final cue in sorted) {
+      if (distanceAlongPath(cue.position, _trail.path) > tappedAt) {
+        return cue.order;
+      }
+    }
+    return _nextCueOrder;
+  }
+
+  /// Inserts [cue] at [order], shifting every cue currently at or after that
+  /// position up by one to make room — "add a cue in the middle" without
+  /// needing a separate drag-to-reorder step afterward.
+  void _insertCueAtOrder(Cue cue, int order) {
+    for (final c in _trail.cues) {
+      if (c.order >= order) c.order++;
+    }
+    cue.order = order;
+    _trail.cues.add(cue);
+  }
 
   /// Opens the cue editor at [position] and, if saved, adds the cue.
   Future<void> _addCueAt(LatLng position) async {
     final cue = await showCueEditor(context, position: position);
     if (cue == null) return;
-    setState(() {
-      cue.order = _nextCueOrder;
-      _trail.cues.add(cue);
-    });
+    setState(() => _insertCueAtOrder(cue, _insertionOrderFor(position)));
     _dirty = true;
     await _redraw();
   }
@@ -339,8 +366,15 @@ class _AuthorScreenState extends State<AuthorScreen> {
     if (result == deletedCueSentinel) {
       setState(() => _trail.cues.remove(cue));
     } else if (result == addAnotherCueSentinel) {
-      await _addCueAt(cue.position);
-      return; // _addCueAt already marks dirty and redraws
+      // Insert right after the cue it's stacking with, not the geometric
+      // guess _addCueAt would make — we already know exactly where it goes.
+      if (!mounted) return;
+      final another = await showCueEditor(context, position: cue.position);
+      if (!mounted || another == null) return;
+      setState(() => _insertCueAtOrder(another, cue.order + 1));
+      _dirty = true;
+      await _redraw();
+      return;
     } else if (result != null) {
       // order is deliberately left untouched — editing a cue's type/text
       // shouldn't move its place in the firing sequence.
@@ -635,10 +669,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
     if (_cueMode) {
       final cue = await showCueEditor(context, position: here);
       if (!mounted || cue == null) return;
-      setState(() {
-        cue.order = _nextCueOrder;
-        _trail.cues.add(cue);
-      });
+      setState(() => _insertCueAtOrder(cue, _insertionOrderFor(here)));
       _dirty = true;
       await _redraw();
     } else {
