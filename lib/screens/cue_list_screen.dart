@@ -96,9 +96,19 @@ class _CueListScreenState extends State<CueListScreen> {
                     title: Text(cue.label, style: const TextStyle(fontSize: 17)),
                     subtitle: Text(cue.spoken,
                         maxLines: 1, overflow: TextOverflow.ellipsis),
-                    trailing: ReorderableDragStartListener(
-                      index: i,
-                      child: const Icon(Icons.drag_handle),
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          tooltip: 'Show on map',
+                          icon: const Icon(Icons.center_focus_strong),
+                          onPressed: () => Navigator.pop(context, cue),
+                        ),
+                        ReorderableDragStartListener(
+                          index: i,
+                          child: const Icon(Icons.drag_handle),
+                        ),
+                      ],
                     ),
                     onTap: () => _edit(cue),
                   ),

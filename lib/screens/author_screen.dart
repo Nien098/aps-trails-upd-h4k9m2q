@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' show Point, sqrt;
 
 import 'package:flutter/material.dart';
@@ -48,6 +49,11 @@ class _AuthorScreenState extends State<AuthorScreen> {
   /// When true, the next tap places [_moving] exactly where tapped; when
   /// false (default), it snaps onto the nearest point of the drawn path.
   bool _freeMove = false;
+
+  /// Briefly highlighted after being located from the cue list, so it's
+  /// obvious which marker the map just centred on.
+  Cue? _highlighted;
+  Timer? _highlightTimer;
 
   /// Route segments parallel to [_trail.anchors]: segment i connects anchor
   /// i-1 → i (segment 0 is just [anchor0]). Undo drops the last of each.
@@ -426,13 +432,16 @@ class _AuthorScreenState extends State<AuthorScreen> {
 
     for (final cue in _trail.cues) {
       final isMoving = identical(cue, _moving);
+      final isHighlighted = identical(cue, _highlighted);
       final cueCircle = await c.addCircle(CircleOptions(
         geometry: cue.position,
-        circleRadius: isMoving ? 14 : 11,
+        circleRadius: isMoving || isHighlighted ? 15 : 11,
         circleColor: cueColorHex(cue.type),
-        // A cue pending a move is highlighted gold so it's obvious which one.
-        circleStrokeColor: isMoving ? '#FFC107' : '#ffffff',
-        circleStrokeWidth: isMoving ? 5 : 3,
+        // A cue pending a move is highlighted gold; one just located from the
+        // cue list flashes cyan, so it's obvious which marker is which.
+        circleStrokeColor:
+            isMoving ? '#FFC107' : (isHighlighted ? '#00E5FF' : '#ffffff'),
+        circleStrokeWidth: isMoving || isHighlighted ? 5 : 3,
       ));
       _circleToCue[cueCircle.id] = cue;
       final symbol = await c.addSymbol(SymbolOptions(
@@ -787,13 +796,34 @@ class _AuthorScreenState extends State<AuthorScreen> {
   }
 
   /// Opens the numbered cue list; edits/reorders/deletes there mutate
-  /// _trail.cues in place, so just re-draw and mark dirty on return.
+  /// _trail.cues in place, so just re-draw and mark dirty on return. Tapping
+  /// a row's "show on map" action pops with that cue, which we then centre
+  /// on and briefly highlight.
   Future<void> _openCueList() async {
-    await Navigator.push(
+    final located = await Navigator.push<Cue>(
         context, MaterialPageRoute(builder: (_) => CueListScreen(trail: _trail)));
     if (!mounted) return;
     setState(() => _dirty = true);
     await _redraw();
+    if (located != null) await _locateCue(located);
+  }
+
+  Future<void> _locateCue(Cue cue) async {
+    await _c?.animateCamera(CameraUpdate.newLatLngZoom(cue.position, 17));
+    _highlightTimer?.cancel();
+    setState(() => _highlighted = cue);
+    await _redraw();
+    _highlightTimer = Timer(const Duration(seconds: 3), () {
+      if (!mounted || !identical(_highlighted, cue)) return;
+      setState(() => _highlighted = null);
+      _redraw();
+    });
+  }
+
+  @override
+  void dispose() {
+    _highlightTimer?.cancel();
+    super.dispose();
   }
 
   @override
