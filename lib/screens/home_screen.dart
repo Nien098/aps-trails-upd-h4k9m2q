@@ -150,6 +150,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   'Walk the trail now — GPS traces the path and drops cues'),
               onTap: () => Navigator.pop(ctx, 'record'),
             ),
+            SizedBox(height: MediaQuery.viewPaddingOf(ctx).bottom),
           ],
         ),
       ),
@@ -261,7 +262,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setSheet) => SafeArea(
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
+            // Explicit nav-bar inset in addition to the SafeArea above — see
+            // the same reasoning in cue_editor_sheet.dart.
+            padding: EdgeInsets.fromLTRB(
+                16, 16, 16, 16 + MediaQuery.viewPaddingOf(ctx).bottom),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,

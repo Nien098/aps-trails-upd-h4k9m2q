@@ -44,6 +44,13 @@ class _AuthorScreenState extends State<AuthorScreen> {
   bool _follow = true; // auto-follow trail lines between anchors
   bool _busy = false; // a routing query is in flight
 
+  /// Whether the mode-bar card shows its full controls (Follow-trails/Free-
+  /// placement switch + hint text) or just the essentials (Draw/Cue toggle +
+  /// trail length). Starts expanded (unchanged default); collapsing is an
+  /// explicit choice for when the full card gets in the way while actively
+  /// tapping out a path.
+  bool _modeBarExpanded = true;
+
   /// The cue awaiting a new position (long-pressed in Cue mode), or null.
   Cue? _moving;
   /// When true, the next tap places [_moving] exactly where tapped; when
@@ -405,7 +412,9 @@ class _AuthorScreenState extends State<AuthorScreen> {
               title: const Text('Add another cue at this same spot'),
               onTap: () => Navigator.pop(ctx, addAnotherCueSentinel),
             ),
-            const SizedBox(height: 8),
+            // Explicit nav-bar inset in addition to the SafeArea above — see
+            // the same reasoning in cue_editor_sheet.dart.
+            SizedBox(height: 8 + MediaQuery.viewPaddingOf(ctx).bottom),
           ],
         ),
       ),
@@ -478,6 +487,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
               title: const Text('Delete this point'),
               onTap: () => Navigator.pop(ctx, 'delete'),
             ),
+            SizedBox(height: MediaQuery.viewPaddingOf(ctx).bottom),
           ],
         ),
       ),
@@ -955,7 +965,10 @@ class _AuthorScreenState extends State<AuthorScreen> {
       context: context,
       builder: (ctx) => SafeArea(
         child: Padding(
-          padding: const EdgeInsets.all(20),
+          // Explicit nav-bar inset in addition to the SafeArea above — see
+          // the same reasoning in cue_editor_sheet.dart.
+          padding: EdgeInsets.fromLTRB(
+              20, 20, 20, 20 + MediaQuery.viewPaddingOf(ctx).bottom),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -1260,9 +1273,12 @@ class _AuthorScreenState extends State<AuthorScreen> {
                 lengthLabel: Settings.instance.formatDistance(
                     pathLength(_trail.path)),
                 freeMove: _freeMove,
+                expanded: _modeBarExpanded,
                 onModeChanged: (v) => setState(() => _cueMode = v),
                 onFollowChanged: (v) => setState(() => _follow = v),
                 onFreeMoveChanged: (v) => setState(() => _freeMove = v),
+                onExpandedChanged: (v) =>
+                    setState(() => _modeBarExpanded = v),
               ),
             ),
             if (_moving != null)
@@ -1327,7 +1343,10 @@ class _AuthorScreenState extends State<AuthorScreen> {
   }
 }
 
-/// The Path / Cue mode toggle, auto-follow switch, and a hint line.
+/// The Path / Cue mode toggle, auto-follow switch, and a hint line. A small
+/// expand/collapse button in the corner drops the switch + hint when the
+/// card is getting in the way of actively drawing, keeping just the mode
+/// toggle and trail length visible.
 class _ModeBar extends StatelessWidget {
   const _ModeBar({
     required this.cueMode,
@@ -1336,9 +1355,11 @@ class _ModeBar extends StatelessWidget {
     required this.cueCount,
     required this.lengthLabel,
     required this.freeMove,
+    required this.expanded,
     required this.onModeChanged,
     required this.onFollowChanged,
     required this.onFreeMoveChanged,
+    required this.onExpandedChanged,
   });
 
   final bool cueMode;
@@ -1347,79 +1368,103 @@ class _ModeBar extends StatelessWidget {
   final int cueCount;
   final String lengthLabel;
   final bool freeMove;
+  final bool expanded;
   final ValueChanged<bool> onModeChanged;
   final ValueChanged<bool> onFollowChanged;
   final ValueChanged<bool> onFreeMoveChanged;
+  final ValueChanged<bool> onExpandedChanged;
 
   @override
   Widget build(BuildContext context) {
     return Card(
       elevation: 4,
       child: Padding(
-        padding: const EdgeInsets.all(10),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
+        padding: const EdgeInsets.fromLTRB(10, 2, 2, 10),
+        child: Stack(
           children: [
-            SegmentedButton<bool>(
-              showSelectedIcon: false,
-              segments: const [
-                ButtonSegment(
-                    value: false,
-                    icon: Icon(Icons.timeline),
-                    label: Text('Draw path')),
-                ButtonSegment(
-                    value: true,
-                    icon: Icon(Icons.add_location_alt),
-                    label: Text('Add cue')),
-              ],
-              selected: {cueMode},
-              onSelectionChanged: (s) => onModeChanged(s.first),
-            ),
-            const SizedBox(height: 8),
-            // Live planned length of the trail as it's drawn.
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                const Icon(Icons.straighten, size: 20),
-                const SizedBox(width: 6),
-                Text('Trail length: $lengthLabel',
-                    style: const TextStyle(
-                        fontSize: 16, fontWeight: FontWeight.w600)),
-              ],
-            ),
-            // Same slot either way (so the bar height — and thus the Draw/Cue
-            // buttons — never jump between modes): Follow-trails in Draw mode,
-            // Free-placement in Cue mode.
-            cueMode
-                ? SwitchListTile(
-                    dense: true,
-                    contentPadding: EdgeInsets.zero,
-                    value: freeMove,
-                    onChanged: onFreeMoveChanged,
-                    secondary: const Icon(Icons.open_with),
-                    title: const Text('Free placement'),
-                    subtitle: Text(freeMove
-                        ? 'Moved cues drop exactly where you tap'
-                        : 'Moved cues snap onto the drawn trail line'),
-                  )
-                : SwitchListTile(
-                    dense: true,
-                    contentPadding: EdgeInsets.zero,
-                    value: follow,
-                    onChanged: onFollowChanged,
-                    secondary: const Icon(Icons.alt_route),
-                    title: const Text('Follow trails'),
-                    subtitle: Text(follow
-                        ? 'Route bends along real trails between taps'
-                        : 'Straight lines between taps'),
+            Padding(
+              padding: const EdgeInsets.only(top: 22),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SegmentedButton<bool>(
+                    showSelectedIcon: false,
+                    segments: const [
+                      ButtonSegment(
+                          value: false,
+                          icon: Icon(Icons.timeline),
+                          label: Text('Draw path')),
+                      ButtonSegment(
+                          value: true,
+                          icon: Icon(Icons.add_location_alt),
+                          label: Text('Add cue')),
+                    ],
+                    selected: {cueMode},
+                    onSelectionChanged: (s) => onModeChanged(s.first),
                   ),
-            const SizedBox(height: 4),
-            Text(
-              cueMode
-                  ? 'Tap map to drop a cue • tap to edit/delete • long-press to move • $cueCount placed'
-                  : 'Tap map to add • tap a point to route through it • long-press a point to move/delete, or long-press the line to insert one • $anchorCount ${anchorCount == 1 ? "point" : "points"}',
-              style: Theme.of(context).textTheme.bodySmall,
-              textAlign: TextAlign.center,
+                  const SizedBox(height: 8),
+                  // Live planned length of the trail as it's drawn.
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Icon(Icons.straighten, size: 20),
+                      const SizedBox(width: 6),
+                      Text('Trail length: $lengthLabel',
+                          style: const TextStyle(
+                              fontSize: 16, fontWeight: FontWeight.w600)),
+                    ],
+                  ),
+                  if (expanded) ...[
+                    // Same slot either way (so the bar height — and thus the
+                    // Draw/Cue buttons — never jump between modes):
+                    // Follow-trails in Draw mode, Free-placement in Cue mode.
+                    cueMode
+                        ? SwitchListTile(
+                            dense: true,
+                            contentPadding: EdgeInsets.zero,
+                            value: freeMove,
+                            onChanged: onFreeMoveChanged,
+                            secondary: const Icon(Icons.open_with),
+                            title: const Text('Free placement'),
+                            subtitle: Text(freeMove
+                                ? 'Moved cues drop exactly where you tap'
+                                : 'Moved cues snap onto the drawn trail line'),
+                          )
+                        : SwitchListTile(
+                            dense: true,
+                            contentPadding: EdgeInsets.zero,
+                            value: follow,
+                            onChanged: onFollowChanged,
+                            secondary: const Icon(Icons.alt_route),
+                            title: const Text('Follow trails'),
+                            subtitle: Text(follow
+                                ? 'Route bends along real trails between taps'
+                                : 'Straight lines between taps'),
+                          ),
+                    const SizedBox(height: 4),
+                    Text(
+                      cueMode
+                          ? 'Tap map to drop a cue • tap to edit/delete • long-press to move • $cueCount placed'
+                          : 'Tap map to add • tap a point to route through it • long-press a point to move/delete, or long-press the line to insert one • $anchorCount ${anchorCount == 1 ? "point" : "points"}',
+                      style: Theme.of(context).textTheme.bodySmall,
+                      textAlign: TextAlign.center,
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            Positioned(
+              top: 0,
+              right: 0,
+              child: IconButton(
+                visualDensity: VisualDensity.compact,
+                constraints: const BoxConstraints(),
+                padding: const EdgeInsets.all(4),
+                iconSize: 20,
+                tooltip: expanded ? 'Show less' : 'Show more',
+                icon: Icon(expanded ? Icons.unfold_less : Icons.unfold_more),
+                onPressed: () => onExpandedChanged(!expanded),
+              ),
             ),
           ],
         ),
@@ -1461,7 +1506,10 @@ class _GeneratorSheetState extends State<_GeneratorSheet> {
     final s = Settings.instance;
     return SafeArea(
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(20, 20, 20, 24),
+        // Explicit nav-bar inset in addition to the SafeArea above — see the
+        // same reasoning in cue_editor_sheet.dart.
+        padding: EdgeInsets.fromLTRB(
+            20, 20, 20, 24 + MediaQuery.viewPaddingOf(context).bottom),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,

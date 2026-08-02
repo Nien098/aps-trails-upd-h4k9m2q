@@ -223,7 +223,14 @@ class _CueEditorSheetState extends State<CueEditorSheet> {
               ),
             ),
           Padding(
-            padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+            // Explicit nav-bar inset on top of the SafeArea above — belt and
+            // suspenders. On devices where it's already handled, this reads
+            // as 0 (MediaQuery has nothing left to give); where it isn't
+            // (e.g. the 3-button nav bar has been observed to sit over sheet
+            // content regardless), it's what actually keeps Save/Delete from
+            // landing underneath it.
+            padding: EdgeInsets.fromLTRB(
+                12, 8, 12, 12 + MediaQuery.viewPaddingOf(context).bottom),
             child: Row(
               children: [
                 if (widget.onDelete != null)
