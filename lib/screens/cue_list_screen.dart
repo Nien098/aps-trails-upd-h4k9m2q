@@ -21,10 +21,24 @@ class _CueListScreenState extends State<CueListScreen> {
   List<Cue> get _sorted =>
       List.of(widget.trail.cues)..sort((a, b) => a.order.compareTo(b.order));
 
+  /// Next stack position — mirrors AuthorScreen's own helper; appending here
+  /// keeps a cue added from the list consistent with one added from the map.
+  int get _nextCueOrder => widget.trail.cues.isEmpty
+      ? 0
+      : widget.trail.cues.map((c) => c.order).reduce((a, b) => a > b ? a : b) + 1;
+
   Future<void> _edit(Cue cue) async {
     final result = await showCueEditor(context, position: cue.position, existing: cue);
     if (result == deletedCueSentinel) {
       setState(() => widget.trail.cues.remove(cue));
+    } else if (result == addAnotherCueSentinel) {
+      if (!mounted) return;
+      final another = await showCueEditor(context, position: cue.position);
+      if (!mounted || another == null) return;
+      setState(() {
+        another.order = _nextCueOrder;
+        widget.trail.cues.add(another);
+      });
     } else if (result != null) {
       setState(() {
         cue

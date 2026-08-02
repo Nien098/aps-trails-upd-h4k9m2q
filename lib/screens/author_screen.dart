@@ -55,6 +55,10 @@ class _AuthorScreenState extends State<AuthorScreen> {
   Cue? _highlighted;
   Timer? _highlightTimer;
 
+  /// Index into [_trail]'s anchors awaiting a new position (chosen via the
+  /// long-press action sheet), or null.
+  int? _movingAnchor;
+
   /// Route segments parallel to [_trail.anchors]: segment i connects anchor
   /// i-1 → i (segment 0 is just [anchor0]). Undo drops the last of each.
   final List<List<LatLng>> _segments = [];
@@ -137,6 +141,13 @@ class _AuthorScreenState extends State<AuthorScreen> {
       }
       return;
     }
+    if (_movingAnchor != null) {
+      // Same precise-placement logic as the cue-move case above, for moving
+      // an anchor exactly onto another existing anchor's position.
+      final idx = _circleToAnchor[circle.id];
+      if (idx != null) await _placeMovingAnchor(_trail.anchors[idx]);
+      return;
+    }
     final cue = _circleToCue[circle.id];
     if (cue != null) {
       if (_cueMode) {
@@ -161,9 +172,10 @@ class _AuthorScreenState extends State<AuthorScreen> {
 
   /// Long-press on the map. In Cue mode, long-pressing a cue starts moving it
   /// (tap the map to drop it at the new spot, or Cancel). In Draw mode,
-  /// long-pressing an anchor deletes it (re-joining the trail) — deletion is
-  /// off single-tap there so tapping can retrace an existing line instead.
-  Future<void> _onMapLongClick(Point<double> screen, LatLng _) async {
+  /// long-pressing an anchor opens a Move/Delete choice; long-pressing the
+  /// drawn *line* somewhere between two anchors (not on either of them)
+  /// inserts a new anchor there instead, splitting that hop into two.
+  Future<void> _onMapLongClick(Point<double> screen, LatLng latlng) async {
     final c = _c;
     if (c == null) return;
 
@@ -202,7 +214,11 @@ class _AuthorScreenState extends State<AuthorScreen> {
         best = i;
       }
     }
-    if (best >= 0) await _confirmDeleteAnchor(best);
+    if (best >= 0) {
+      await _anchorActionSheet(best);
+    } else {
+      await _insertAnchorNear(latlng);
+    }
   }
 
   Future<void> _onStyleLoaded() async {
@@ -236,6 +252,8 @@ class _AuthorScreenState extends State<AuthorScreen> {
       } else {
         await _addCueAt(latlng);
       }
+    } else if (_movingAnchor != null) {
+      await _placeMovingAnchor(latlng);
     } else {
       await _addAnchor(latlng);
     }
@@ -320,6 +338,9 @@ class _AuthorScreenState extends State<AuthorScreen> {
     final result = await showCueEditor(context, position: cue.position, existing: cue);
     if (result == deletedCueSentinel) {
       setState(() => _trail.cues.remove(cue));
+    } else if (result == addAnotherCueSentinel) {
+      await _addCueAt(cue.position);
+      return; // _addCueAt already marks dirty and redraws
     } else if (result != null) {
       // order is deliberately left untouched — editing a cue's type/text
       // shouldn't move its place in the firing sequence.
@@ -334,6 +355,112 @@ class _AuthorScreenState extends State<AuthorScreen> {
       return;
     }
     _dirty = true;
+    await _redraw();
+  }
+
+  /// Long-press on an anchor opens this: move it, or delete it (existing
+  /// confirm-dialog flow unchanged).
+  Future<void> _anchorActionSheet(int index) async {
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.open_with),
+              title: const Text('Move this point'),
+              onTap: () => Navigator.pop(ctx, 'move'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.delete_outline, color: Colors.red),
+              title: const Text('Delete this point'),
+              onTap: () => Navigator.pop(ctx, 'delete'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (!mounted) return;
+    if (action == 'move') {
+      setState(() => _movingAnchor = index);
+      await _redraw();
+    } else if (action == 'delete') {
+      await _confirmDeleteAnchor(index);
+    }
+  }
+
+  void _cancelMovingAnchor() => setState(() => _movingAnchor = null);
+
+  /// Commits the anchor at [_movingAnchor] to [tapped], re-routing the hop(s)
+  /// on either side of it — same re-joining logic [_deleteAnchor] uses for a
+  /// removed middle point, just re-targeted instead of closed up.
+  Future<void> _placeMovingAnchor(LatLng tapped) async {
+    final idx = _movingAnchor;
+    if (idx == null) return;
+    final c = _c;
+    setState(() => _busy = true);
+    try {
+      final anchors = _trail.anchors;
+      anchors[idx] = tapped;
+      if (idx > 0) {
+        final prev = anchors[idx - 1];
+        _segments[idx] = (_follow && c != null)
+            ? await TrailRouter(c).between(prev, tapped)
+            : [prev, tapped];
+      } else if (_segments.isNotEmpty) {
+        _segments[0] = [tapped];
+      }
+      if (idx < anchors.length - 1) {
+        final next = anchors[idx + 1];
+        _segments[idx + 1] = (_follow && c != null)
+            ? await TrailRouter(c).between(tapped, next)
+            : [tapped, next];
+      }
+      _trail.path = _composePath();
+      _dirty = true;
+    } finally {
+      _movingAnchor = null;
+      if (mounted) setState(() => _busy = false);
+    }
+    await _redraw();
+  }
+
+  /// Inserts a new anchor between whichever existing hop [tapped] lands
+  /// closest to (within tolerance), splitting that hop into two routed
+  /// segments — for fixing a path drawn too coarsely to follow a real trail,
+  /// without needing to delete and redraw everything after the gap.
+  Future<void> _insertAnchorNear(LatLng tapped) async {
+    final c = _c;
+    if (c == null || _busy || _segments.length < 2) return;
+    var bestHop = -1;
+    var bestMeters = 20.0;
+    for (var k = 1; k < _segments.length; k++) {
+      final d = distanceToPath(tapped, _segments[k]);
+      if (d < bestMeters) {
+        bestMeters = d;
+        bestHop = k;
+      }
+    }
+    if (bestHop < 0) return; // not close enough to any existing line
+    setState(() => _busy = true);
+    try {
+      final prev = _trail.anchors[bestHop - 1];
+      final next = _trail.anchors[bestHop];
+      final segA =
+          _follow ? await TrailRouter(c).between(prev, tapped) : [prev, tapped];
+      final segB =
+          _follow ? await TrailRouter(c).between(tapped, next) : [tapped, next];
+      setState(() {
+        _trail.anchors.insert(bestHop, tapped);
+        _segments[bestHop] = segA;
+        _segments.insert(bestHop + 1, segB);
+        _trail.path = _composePath();
+        _dirty = true;
+      });
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
     await _redraw();
   }
 
@@ -405,18 +532,20 @@ class _AuthorScreenState extends State<AuthorScreen> {
     await _routeLayer?.setRoute(_trail.path, _trail.color);
 
     // Anchor markers: start is green, the last (drawing-from) anchor is a
-    // larger highlighted ring, the rest are small blue dots. Tap to delete.
+    // larger highlighted ring, the rest are small blue dots. Long-press for
+    // move/delete. One awaiting a move is highlighted gold, like a moving cue.
     final anchors = _trail.anchors;
     for (var i = 0; i < anchors.length; i++) {
       final isLast = i == anchors.length - 1;
       final isFirst = i == 0;
+      final isMovingAnchor = i == _movingAnchor;
       final color = isFirst ? '#2E7D32' : '#1565C0';
       final circle = await c.addCircle(CircleOptions(
         geometry: anchors[i],
-        circleRadius: isLast ? 12 : 7,
+        circleRadius: isMovingAnchor ? 12 : (isLast ? 12 : 7),
         circleColor: isLast ? '#ffffff' : color,
-        circleStrokeColor: isLast ? '#1565C0' : '#ffffff',
-        circleStrokeWidth: isLast ? 5 : 2,
+        circleStrokeColor: isMovingAnchor ? '#FFC107' : (isLast ? '#1565C0' : '#ffffff'),
+        circleStrokeWidth: isMovingAnchor ? 5 : (isLast ? 5 : 2),
       ));
       _circleToAnchor[circle.id] = i;
       if (isLast && anchors.length > 1) {
@@ -1013,6 +1142,33 @@ class _AuthorScreenState extends State<AuthorScreen> {
                   ),
                 ),
               ),
+            if (_movingAnchor != null)
+              Positioned(
+                left: 12,
+                right: 12,
+                bottom: 190 + MediaQuery.viewPaddingOf(context).bottom,
+                child: Card(
+                  color: const Color(0xFFFFF8E1),
+                  elevation: 4,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 14, vertical: 10),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.open_with, color: Color(0xFFF57F17)),
+                        const SizedBox(width: 10),
+                        const Expanded(
+                          child: Text('Moving point — tap the map to place it',
+                              style: TextStyle(fontWeight: FontWeight.w600)),
+                        ),
+                        TextButton(
+                            onPressed: _cancelMovingAnchor,
+                            child: const Text('Cancel')),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
           ],
         ),
       ),
@@ -1110,7 +1266,7 @@ class _ModeBar extends StatelessWidget {
             Text(
               cueMode
                   ? 'Tap map to drop a cue • tap to edit/delete • long-press to move • $cueCount placed'
-                  : 'Tap map to add • tap a point to route through it • long-press to delete • $anchorCount ${anchorCount == 1 ? "point" : "points"}',
+                  : 'Tap map to add • tap a point to route through it • long-press a point to move/delete, or long-press the line to insert one • $anchorCount ${anchorCount == 1 ? "point" : "points"}',
               style: Theme.of(context).textTheme.bodySmall,
               textAlign: TextAlign.center,
             ),

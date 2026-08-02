@@ -12,8 +12,19 @@ final Cue deletedCueSentinel = Cue(
   order: -1,
 );
 
+/// Returned by [showCueEditor] when the user asks to stack another cue at
+/// the same spot instead of saving/editing this one — the caller should
+/// immediately open a fresh (non-`existing`) editor at the same position and
+/// append it to the stack, same as any other new cue.
+final Cue addAnotherCueSentinel = Cue(
+  type: CueType.note,
+  position: const LatLng(0, 0),
+  order: -2,
+);
+
 /// Shows the cue editor as a modal bottom sheet. Returns the edited cue,
-/// [deletedCueSentinel] if deleted (only possible when [existing] is given),
+/// [deletedCueSentinel] if deleted, [addAnotherCueSentinel] if the user chose
+/// to stack another cue here (both only possible when [existing] is given),
 /// or null if cancelled. The returned cue's [Cue.order] is a placeholder —
 /// callers own ordering (new cues: append to the stack; edits: keep the
 /// original cue's order unchanged).
@@ -37,6 +48,9 @@ Future<Cue?> showCueEditor(
         onDelete: existing == null
             ? null
             : () => Navigator.pop(ctx, deletedCueSentinel),
+        onAddAnother: existing == null
+            ? null
+            : () => Navigator.pop(ctx, addAnotherCueSentinel),
       ),
     ),
   );
@@ -48,11 +62,13 @@ class CueEditorSheet extends StatefulWidget {
     required this.position,
     this.existing,
     this.onDelete,
+    this.onAddAnother,
   });
 
   final LatLng position;
   final Cue? existing;
   final VoidCallback? onDelete;
+  final VoidCallback? onAddAnother;
 
   @override
   State<CueEditorSheet> createState() => _CueEditorSheetState();
@@ -163,6 +179,18 @@ class _CueEditorSheetState extends State<CueEditorSheet> {
             ),
           ),
           const Divider(height: 1),
+          if (widget.onAddAnother != null)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+              child: SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: widget.onAddAnother,
+                  icon: const Icon(Icons.add_location_alt_outlined),
+                  label: const Text('Add another cue at this same spot'),
+                ),
+              ),
+            ),
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
             child: Row(
