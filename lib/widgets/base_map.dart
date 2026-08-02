@@ -61,16 +61,20 @@ class _BaseMapState extends State<BaseMap> {
     final c = _controller;
     if (c == null) return KeyEventResult.ignored;
 
+    // scrollBy moves the camera TARGET, not the visible content — so to make
+    // the arrow key match the direction content visually pans (not the
+    // "drag" direction, which is the opposite), each axis is inverted from
+    // what scrollBy's own dx/dy sign would naively suggest.
     final key = event.logicalKey;
     CameraUpdate? update;
     if (key == LogicalKeyboardKey.arrowUp) {
-      update = CameraUpdate.scrollBy(0, -_panStepPx);
-    } else if (key == LogicalKeyboardKey.arrowDown) {
       update = CameraUpdate.scrollBy(0, _panStepPx);
+    } else if (key == LogicalKeyboardKey.arrowDown) {
+      update = CameraUpdate.scrollBy(0, -_panStepPx);
     } else if (key == LogicalKeyboardKey.arrowLeft) {
-      update = CameraUpdate.scrollBy(-_panStepPx, 0);
-    } else if (key == LogicalKeyboardKey.arrowRight) {
       update = CameraUpdate.scrollBy(_panStepPx, 0);
+    } else if (key == LogicalKeyboardKey.arrowRight) {
+      update = CameraUpdate.scrollBy(-_panStepPx, 0);
     } else if (key == LogicalKeyboardKey.equal ||
         key == LogicalKeyboardKey.add ||
         key == LogicalKeyboardKey.numpadAdd) {
