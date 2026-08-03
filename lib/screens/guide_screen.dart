@@ -267,6 +267,7 @@ class _GuideScreenState extends State<GuideScreen> {
     final skipped = _cues[_nextIndex];
     setState(() => _nextIndex++);
     _toast('Skipped: ${skipped.label}');
+    _drawCues(); // grey out the skipped marker immediately
     _writeCheckpoint();
   }
 
@@ -422,12 +423,22 @@ class _GuideScreenState extends State<GuideScreen> {
     await _drawCues();
   }
 
+  /// Grey used for cues already passed (fired or manually skipped) — clearly
+  /// distinct from every real cue-type/stacked colour, so completed vs.
+  /// upcoming is obvious on the map at a glance without needing to compare
+  /// numbers, and stays legible whether resuming a walk or checking progress
+  /// after a run of skips.
+  static const _completedColorHex = '#9E9E9E';
+
   /// Draws the cue markers, each labelled with its stack position so the map
   /// reads consistently with the cue list. Cues sharing (almost) the same
   /// spot stay at that one spot — drawn as a single marker in a distinct
   /// "stacked" colour, with every cue in the stack listed on its own line
   /// (e.g. "2. Go right" / "8. Go left" / "15. Go straight") so it's obvious
-  /// several cues live there without splitting them apart on the map.
+  /// several cues live there without splitting them apart on the map. Cues
+  /// already passed (index < _nextIndex — fired naturally or skipped) draw
+  /// grey instead of their normal colour; a stacked spot only greys out once
+  /// every cue there is done.
   Future<void> _drawCues() async {
     final c = _c;
     if (c == null) return;
@@ -451,11 +462,14 @@ class _GuideScreenState extends State<GuideScreen> {
     for (final group in groups) {
       final stacked = group.length > 1;
       if (stacked) group.sort((a, b) => rank[a]!.compareTo(rank[b]!));
+      final completed = group.every((cue) => rank[cue]! <= _nextIndex);
       final pos = group.first.position;
       await c.addCircle(CircleOptions(
         geometry: pos,
         circleRadius: stacked ? 13 : 11,
-        circleColor: stacked ? stackedCueColorHex : cueColorHex(group.first.type),
+        circleColor: completed
+            ? _completedColorHex
+            : (stacked ? stackedCueColorHex : cueColorHex(group.first.type)),
         circleStrokeColor: '#ffffff',
         circleStrokeWidth: stacked ? 4 : 3,
       ));
@@ -463,7 +477,7 @@ class _GuideScreenState extends State<GuideScreen> {
         geometry: pos,
         textField: group.map((cue) => '${rank[cue]}. ${cue.label}').join('\n'),
         textSize: 15,
-        textColor: '#1a1a1a',
+        textColor: completed ? '#757575' : '#1a1a1a',
         textHaloColor: '#ffffff',
         textHaloWidth: 2,
         textAnchor: 'top',
@@ -601,6 +615,7 @@ class _GuideScreenState extends State<GuideScreen> {
                 child: _NextCueStrip(
                   nextCue: _nextIndex < _cues.length ? _cues[_nextIndex] : null,
                   distance: _distToNext,
+                  rank: _nextIndex < _cues.length ? _nextIndex + 1 : null,
                   onSkip: _nextIndex < _cues.length ? _skipCue : null,
                 ),
               ),
@@ -665,6 +680,7 @@ class _GuideScreenState extends State<GuideScreen> {
                   ? _activeCard!.label
                   : _activeCard!.spoken),
               onDismiss: () => setState(() => _activeCard = null),
+              number: _cues.indexOf(_activeCard!) + 1,
             )
           else if (stillnessVisible)
             _stillnessCard(),
@@ -896,10 +912,19 @@ class _TopBar extends StatelessWidget {
 
 class _NextCueStrip extends StatelessWidget {
   const _NextCueStrip(
-      {required this.nextCue, required this.distance, this.onSkip});
+      {required this.nextCue,
+      required this.distance,
+      this.rank,
+      this.onSkip});
 
   final Cue? nextCue;
   final double? distance;
+
+  /// This cue's 1-based position in the trail's stack order, matching the
+  /// number on its map marker — so it's obvious which cue you're looking at
+  /// (or about to skip) when checking against the map, especially after
+  /// resuming a walk or skipping several in a row.
+  final int? rank;
 
   /// Advances past this cue without firing it — for a resumed walk that
   /// landed at a slightly-off position where a cue (or several) genuinely
@@ -929,8 +954,9 @@ class _NextCueStrip extends StatelessWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Text('Next',
-                          style: TextStyle(fontSize: 15, color: Colors.black54)),
+                      Text(rank == null ? 'Next' : 'Next · #$rank',
+                          style: const TextStyle(
+                              fontSize: 15, color: Colors.black54)),
                       Text(cue.label,
                           style: const TextStyle(
                               fontSize: 26, fontWeight: FontWeight.bold)),

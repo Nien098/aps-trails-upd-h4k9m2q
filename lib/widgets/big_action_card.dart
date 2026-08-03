@@ -13,6 +13,7 @@ class BigActionCard extends StatelessWidget {
     required this.onDismiss,
     this.dismissIcon = Icons.close,
     this.dismissTooltip = 'Close',
+    this.number,
   });
 
   final Color color;
@@ -22,6 +23,12 @@ class BigActionCard extends StatelessWidget {
   final VoidCallback onDismiss;
   final IconData dismissIcon;
   final String dismissTooltip;
+
+  /// This cue's 1-based position in the trail's stack order, shown as a
+  /// small badge on the icon — matches its map marker number, so it's
+  /// obvious which cue just fired without needing to check the map. Null
+  /// (no badge) for the off-route/stillness alert cards, which aren't cues.
+  final int? number;
 
   @override
   Widget build(BuildContext context) {
@@ -41,7 +48,30 @@ class BigActionCard extends StatelessWidget {
               padding: const EdgeInsets.fromLTRB(16, 10, 6, 10),
               child: Row(
                 children: [
-                  Icon(icon, size: 48, color: Colors.white),
+                  Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                      Icon(icon, size: 48, color: Colors.white),
+                      if (number != null)
+                        Positioned(
+                          top: -6,
+                          left: -6,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: Colors.white,
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: Text('#$number',
+                                style: TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.bold,
+                                    color: color)),
+                          ),
+                        ),
+                    ],
+                  ),
                   const SizedBox(width: 14),
                   Expanded(
                     child: Text(
