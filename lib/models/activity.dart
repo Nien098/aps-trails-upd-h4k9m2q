@@ -11,6 +11,29 @@ class TrackPoint {
   final double? ele;
 }
 
+/// Shared by [Activity] and [WalkCheckpoint], which both persist a track.
+String _encodeTrack(List<TrackPoint> track) => jsonEncode([
+      for (final p in track)
+        [
+          p.position.latitude,
+          p.position.longitude,
+          p.tSec,
+          if (p.ele != null) p.ele,
+        ]
+    ]);
+
+List<TrackPoint> _decodeTrack(String? s) {
+  if (s == null || s.isEmpty) return [];
+  return [
+    for (final e in jsonDecode(s) as List)
+      TrackPoint(
+        LatLng((e[0] as num).toDouble(), (e[1] as num).toDouble()),
+        (e[2] as num).toInt(),
+        ele: e.length > 3 ? (e[3] as num?)?.toDouble() : null,
+      ),
+  ];
+}
+
 /// A single completed walk (a "Runkeeper-style" activity), logged per device.
 /// Holds the summary stats plus the recorded GPS track so its route can be
 /// re-drawn and per-km/mile splits computed later.
@@ -37,27 +60,9 @@ class Activity {
   double elevGainMeters;
   List<TrackPoint> track;
 
-  String trackToJson() => jsonEncode([
-        for (final p in track)
-          [
-            p.position.latitude,
-            p.position.longitude,
-            p.tSec,
-            if (p.ele != null) p.ele,
-          ]
-      ]);
+  String trackToJson() => _encodeTrack(track);
 
-  static List<TrackPoint> trackFromJson(String? s) {
-    if (s == null || s.isEmpty) return [];
-    return [
-      for (final e in jsonDecode(s) as List)
-        TrackPoint(
-          LatLng((e[0] as num).toDouble(), (e[1] as num).toDouble()),
-          (e[2] as num).toInt(),
-          ele: e.length > 3 ? (e[3] as num?)?.toDouble() : null,
-        ),
-    ];
-  }
+  static List<TrackPoint> trackFromJson(String? s) => _decodeTrack(s);
 
   Map<String, Object?> toRow() => {
         'trail_id': trailId,
@@ -79,5 +84,76 @@ class Activity {
         distanceMeters: (r['distance_meters'] as num?)?.toDouble() ?? 0,
         elevGainMeters: (r['elev_gain_meters'] as num?)?.toDouble() ?? 0,
         track: trackFromJson(r['track'] as String?),
+      );
+}
+
+/// A checkpoint of an in-progress walk, written periodically during Guide
+/// mode (cue fires, pause/resume, and every ~15s while walking) so an
+/// interrupted walk — the app killed by Android, not a deliberate Stop —
+/// can be resumed close to where it left off instead of losing everything
+/// and restarting from the trailhead. Cleared once the walk ends normally
+/// (see GuideScreen._saveWalk). Only one is ever kept per trail.
+class WalkCheckpoint {
+  WalkCheckpoint({
+    required this.trailId,
+    required this.trailName,
+    required this.startedAt,
+    this.pausedTotalSec = 0,
+    this.wasPaused = false,
+    required this.nextIndex,
+    required this.walkedMeters,
+    required this.elevGainMeters,
+    this.lastPos,
+    List<TrackPoint>? track,
+  }) : track = track ?? [];
+
+  final int trailId;
+  final String trailName;
+  final DateTime startedAt;
+
+  /// Total paused duration so far, so resumed elapsed time stays correct.
+  final int pausedTotalSec;
+
+  /// Whether the walk was mid-pause when this checkpoint was written — a
+  /// resumed session reopens paused too, rather than silently restarting
+  /// GPS tracking without the walker's fresh say-so.
+  final bool wasPaused;
+
+  /// Index into the trail's sorted cue list of the next expected cue.
+  final int nextIndex;
+  final double walkedMeters;
+  final double elevGainMeters;
+  final LatLng? lastPos;
+  final List<TrackPoint> track;
+
+  Map<String, Object?> toRow() => {
+        'trail_id': trailId,
+        'trail_name': trailName,
+        'started_at': startedAt.millisecondsSinceEpoch,
+        'paused_total_sec': pausedTotalSec,
+        'was_paused': wasPaused ? 1 : 0,
+        'next_index': nextIndex,
+        'walked_meters': walkedMeters,
+        'elev_gain_meters': elevGainMeters,
+        'last_lat': lastPos?.latitude,
+        'last_lng': lastPos?.longitude,
+        'track': _encodeTrack(track),
+        'updated_at': DateTime.now().millisecondsSinceEpoch,
+      };
+
+  factory WalkCheckpoint.fromRow(Map<String, Object?> r) => WalkCheckpoint(
+        trailId: r['trail_id'] as int,
+        trailName: (r['trail_name'] as String?) ?? 'Walk',
+        startedAt: DateTime.fromMillisecondsSinceEpoch(r['started_at'] as int),
+        pausedTotalSec: (r['paused_total_sec'] as int?) ?? 0,
+        wasPaused: (r['was_paused'] as int?) == 1,
+        nextIndex: (r['next_index'] as int?) ?? 0,
+        walkedMeters: (r['walked_meters'] as num?)?.toDouble() ?? 0,
+        elevGainMeters: (r['elev_gain_meters'] as num?)?.toDouble() ?? 0,
+        lastPos: r['last_lat'] != null && r['last_lng'] != null
+            ? LatLng((r['last_lat'] as num).toDouble(),
+                (r['last_lng'] as num).toDouble())
+            : null,
+        track: _decodeTrack(r['track'] as String?),
       );
 }

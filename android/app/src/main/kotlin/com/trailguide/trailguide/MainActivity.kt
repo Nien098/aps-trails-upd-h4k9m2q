@@ -75,6 +75,17 @@ class MainActivity : FlutterActivity() {
                         stopService(Intent(this, TrackingService::class.java))
                         result.success(null)
                     }
+                    "updateTrackingNotification" -> {
+                        val paused = call.argument<Boolean>("paused") ?: false
+                        val svc = Intent(this, TrackingService::class.java)
+                            .putExtra(TrackingService.EXTRA_PAUSED, paused)
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            startForegroundService(svc)
+                        } else {
+                            startService(svc)
+                        }
+                        result.success(null)
+                    }
                     "sendSms" -> sendSms(
                         call.argument<String>("phone") ?: "",
                         call.argument<String>("message") ?: "",

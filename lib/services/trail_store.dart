@@ -17,7 +17,7 @@ class TrailStore {
     final dir = await getDatabasesPath();
     _db = await openDatabase(
       p.join(dir, 'trailguide.db'),
-      version: 7,
+      version: 8,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE trails (
@@ -35,6 +35,7 @@ class TrailStore {
           )
         ''');
         await _createActivities(db);
+        await _createWalkProgress(db);
       },
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) {
@@ -62,6 +63,9 @@ class TrailStore {
         if (oldVersion < 7) {
           await _createActivities(db);
         }
+        if (oldVersion < 8) {
+          await _createWalkProgress(db);
+        }
       },
     );
     return _db!;
@@ -78,6 +82,27 @@ class TrailStore {
         distance_meters REAL NOT NULL,
         elev_gain_meters REAL NOT NULL,
         track TEXT
+      )
+    ''');
+  }
+
+  /// One row per in-progress walk, keyed by trail — only one walk is ever
+  /// active, so this also caps it to a single checkpoint. See [WalkCheckpoint].
+  static Future<void> _createWalkProgress(Database db) async {
+    await db.execute('''
+      CREATE TABLE walk_progress (
+        trail_id INTEGER PRIMARY KEY,
+        trail_name TEXT NOT NULL,
+        started_at INTEGER NOT NULL,
+        paused_total_sec INTEGER NOT NULL DEFAULT 0,
+        was_paused INTEGER NOT NULL DEFAULT 0,
+        next_index INTEGER NOT NULL DEFAULT 0,
+        walked_meters REAL NOT NULL DEFAULT 0,
+        elev_gain_meters REAL NOT NULL DEFAULT 0,
+        last_lat REAL,
+        last_lng REAL,
+        track TEXT,
+        updated_at INTEGER NOT NULL
       )
     ''');
   }
@@ -158,6 +183,26 @@ class TrailStore {
   Future<void> deleteActivity(int id) async {
     final db = await _database;
     await db.delete('activities', where: 'id = ?', whereArgs: [id]);
+  }
+
+  /// Upserts the in-progress-walk checkpoint for [c.trailId].
+  Future<void> saveWalkCheckpoint(WalkCheckpoint c) async {
+    final db = await _database;
+    await db.insert('walk_progress', c.toRow(),
+        conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  /// The single active walk checkpoint, if any (only one walk is ever active).
+  Future<WalkCheckpoint?> loadWalkCheckpoint() async {
+    final db = await _database;
+    final rows = await db.query('walk_progress', limit: 1);
+    if (rows.isEmpty) return null;
+    return WalkCheckpoint.fromRow(rows.first);
+  }
+
+  Future<void> clearWalkCheckpoint(int trailId) async {
+    final db = await _database;
+    await db.delete('walk_progress', where: 'trail_id = ?', whereArgs: [trailId]);
   }
 
   Trail _fromRow(Map<String, Object?> r) {

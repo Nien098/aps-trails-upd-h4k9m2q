@@ -85,6 +85,11 @@
         <receiver
             android:name=".StillnessAckReceiver"
             android:exported="false"/>
+        <!-- Pause/Resume action on the walk-tracking notification — only
+             ever invoked via our own PendingIntent, never by another app. -->
+        <receiver
+            android:name=".WalkControlReceiver"
+            android:exported="false"/>
         <!-- Exposes the downloaded update APK (app-private storage) to the
              system package installer via a content:// URI. -->
         <provider

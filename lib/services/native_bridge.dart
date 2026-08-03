@@ -14,11 +14,23 @@ class NativeBridge {
   /// way snoozing an alarm doesn't require unlocking the phone.
   static void Function()? onAcknowledgeStillness;
 
+  /// Called when the Pause/Resume action on the walk-tracking notification is
+  /// tapped (see MainActivity/WalkControlReceiver) — GuideScreen sets these so
+  /// a walk can be paused/resumed from the notification shade without opening
+  /// the app.
+  static void Function()? onPauseWalk;
+  static void Function()? onResumeWalk;
+
   /// Registers the native→Dart callback handler. Call once at app startup.
   static void init() {
     _ch.setMethodCallHandler((call) async {
-      if (call.method == 'acknowledgeStillness') {
-        onAcknowledgeStillness?.call();
+      switch (call.method) {
+        case 'acknowledgeStillness':
+          onAcknowledgeStillness?.call();
+        case 'pauseWalk':
+          onPauseWalk?.call();
+        case 'resumeWalk':
+          onResumeWalk?.call();
       }
     });
   }
@@ -50,6 +62,15 @@ class NativeBridge {
   static Future<void> stopTracking() async {
     try {
       await _ch.invokeMethod('stopTracking');
+    } catch (_) {}
+  }
+
+  /// Updates the tracking notification's text and Pause/Resume action to
+  /// match the current pause state — called whenever it changes, whichever
+  /// side (in-app button or the notification action) triggered the change.
+  static Future<void> updateTrackingNotification(bool paused) async {
+    try {
+      await _ch.invokeMethod('updateTrackingNotification', {'paused': paused});
     } catch (_) {}
   }
 

@@ -39,7 +39,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _reload();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _checkImport());
+    // Resume check first (safety-adjacent — an interrupted walk) so it isn't
+    // racing a second dialog if a shared file is also pending.
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await _checkResume();
+      if (mounted) await _checkImport();
+    });
     // Quiet on-launch check; downloads automatically if a newer build exists
     // AND we're on WiFi (see Updater.check). Never installs without a tap.
     Updater.instance.check(autoDownloadOnWifi: true);
@@ -196,6 +201,113 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     );
     // Refresh so the walk we just finished shows in the trail's totals.
     if (mounted) setState(_reload);
+  }
+
+  /// Checks for a walk checkpoint left behind by an interruption (the app
+  /// killed by Android, not a deliberate Stop — see GuideScreen/WalkCheckpoint)
+  /// and offers to resume it.
+  Future<void> _checkResume() async {
+    final cp = await TrailStore.instance.loadWalkCheckpoint();
+    if (cp == null || !mounted) return;
+    final trails = await TrailStore.instance.all();
+    Trail? trail;
+    for (final t in trails) {
+      if (t.id == cp.trailId) {
+        trail = t;
+        break;
+      }
+    }
+    final found = trail;
+    if (found == null) {
+      // The trail was deleted since — nothing sensible left to resume into.
+      await TrailStore.instance.clearWalkCheckpoint(cp.trailId);
+      return;
+    }
+    if (!mounted) return;
+    final resume = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Resume unfinished walk?'),
+        content: Text(
+            'It looks like "${found.name}" didn\'t get a chance to finish '
+            'properly last time. Pick up where you left off?'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Discard')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Resume')),
+        ],
+      ),
+    );
+    if (!mounted) return;
+    if (resume == true) {
+      await Navigator.push(
+        context,
+        MaterialPageRoute(
+            builder: (_) => GuideScreen(trail: found, resume: cp)),
+      );
+      if (mounted) setState(_reload);
+    } else {
+      await TrailStore.instance.clearWalkCheckpoint(cp.trailId);
+    }
+  }
+
+  /// Flips a trail's walking direction in place: reverses the path/anchors,
+  /// flips each cue's stack order (so firing sequence reverses too,
+  /// including stacked cues at the same spot), and swaps left⇄right and
+  /// start⇄finish cue types so turn-by-turn directions stay correct walking
+  /// it the other way. Positions are left untouched — a start/finish cue
+  /// already sits at the path's old endpoint, so swapping its type alone
+  /// correctly relabels it for the new (swapped) endpoint.
+  Future<void> _reverseDirection(Trail t) async {
+    if (t.path.length < 2) {
+      _toast('Nothing to reverse yet — draw or generate a path first');
+      return;
+    }
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Reverse "${t.name}"?'),
+        content: const Text(
+            'Flips the walking direction — turn-by-turn directions and the '
+            'start/finish will swap to match.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Reverse')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+
+    t.path = t.path.reversed.toList();
+    if (t.anchors.isNotEmpty) t.anchors = t.anchors.reversed.toList();
+
+    if (t.cues.isNotEmpty) {
+      final maxOrder =
+          t.cues.map((c) => c.order).reduce((a, b) => a > b ? a : b);
+      for (final cue in t.cues) {
+        cue.order = maxOrder - cue.order;
+        cue.type = switch (cue.type) {
+          CueType.left => CueType.right,
+          CueType.right => CueType.left,
+          CueType.start => CueType.finish,
+          CueType.finish => CueType.start,
+          _ => cue.type,
+        };
+      }
+    }
+
+    await TrailStore.instance.save(t);
+    if (!mounted) return;
+    setState(_reload);
+    _toast('Reversed "${t.name}"');
   }
 
   Future<void> _restoreBackup(String data) async {
@@ -538,6 +650,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   onSelected: (v) {
                     if (v == 'edit') _edit(t);
                     if (v == 'progress') _progress(t);
+                    if (v == 'reverse') _reverseDirection(t);
                     if (v == 'share') TrailShare.shareTrail(t);
                     if (v == 'delete') _delete(t);
                   },
@@ -546,6 +659,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     if (t.walkCount > 0)
                       const PopupMenuItem(
                           value: 'progress', child: Text('Progress')),
+                    const PopupMenuItem(
+                        value: 'reverse', child: Text('Reverse direction')),
                     const PopupMenuItem(
                         value: 'share', child: Text('Share / send')),
                     const PopupMenuItem(value: 'delete', child: Text('Delete')),

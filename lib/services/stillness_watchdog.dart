@@ -142,6 +142,25 @@ class StillnessWatchdog {
     phase = StillnessPhase.normal;
   }
 
+  /// Suspends stillness checking for a deliberate walk pause — without this,
+  /// [_checkTimer] (needed so a genuinely stationary phone still gets
+  /// checked on a wall clock, see the constructor) would keep counting a
+  /// legitimate rest break as unexplained inactivity and eventually nudge or
+  /// even text the emergency contact.
+  void pause() {
+    _retryTimer?.cancel();
+    _checkTimer?.cancel();
+  }
+
+  /// Resumes checking with a fresh clock — the paused duration never counts
+  /// as stillness.
+  void resume() {
+    if (!Settings.instance.safetyEnabled.value) return;
+    _anchorTime = DateTime.now();
+    _checkTimer =
+        Timer.periodic(const Duration(seconds: 10), (_) => _evaluate());
+  }
+
   void _reset() {
     _retryTimer?.cancel();
     phase = StillnessPhase.normal;

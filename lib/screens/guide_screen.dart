@@ -26,9 +26,15 @@ import 'activity_detail_screen.dart';
 /// cue as a giant card + spoken voice + buzz. Designed for low vision — big,
 /// high-contrast, and audible so the walker barely needs to read.
 class GuideScreen extends StatefulWidget {
-  const GuideScreen({super.key, required this.trail});
+  const GuideScreen({super.key, required this.trail, this.resume});
 
   final Trail trail;
+
+  /// A crash-safe checkpoint to resume from (see [WalkCheckpoint]) instead of
+  /// starting a fresh walk — set when the walker chose "Resume" from the
+  /// unfinished-walk prompt shown after the app was reopened following an
+  /// interruption (killed process, phone restart) rather than a deliberate Stop.
+  final WalkCheckpoint? resume;
 
   @override
   State<GuideScreen> createState() => _GuideScreenState();
@@ -66,8 +72,23 @@ class _GuideScreenState extends State<GuideScreen> {
   DateTime? _startedAt; // when tracking began, for duration + timestamps
   final List<TrackPoint> _track = []; // recorded GPS track for this walk
 
-  int get _elapsedSec =>
-      _startedAt == null ? 0 : DateTime.now().difference(_startedAt!).inSeconds;
+  // --- Pause/resume state ---
+  bool _paused = false;
+  DateTime? _pausedAt;
+  Duration _pausedTotal = Duration.zero; // accumulated across every pause
+  Timer? _checkpointTimer;
+
+  /// Elapsed walking time, excluding time spent paused (both banked pauses
+  /// and, if currently paused, the one in progress).
+  int get _elapsedSec {
+    if (_startedAt == null) return 0;
+    final pausedSoFar = _pausedTotal +
+        (_paused && _pausedAt != null
+            ? DateTime.now().difference(_pausedAt!)
+            : Duration.zero);
+    return DateTime.now().difference(_startedAt!).inSeconds -
+        pausedSoFar.inSeconds;
+  }
 
   /// Minimum gap between two cue announcements, so overlapping outbound/return
   /// cues can't pop two cards (and speak over each other) on the same tick.
@@ -90,6 +111,19 @@ class _GuideScreenState extends State<GuideScreen> {
     super.initState();
     WakelockPlus.enable(); // keep the screen on while walking
     NativeBridge.onAcknowledgeStillness = _acknowledgeStillness;
+    NativeBridge.onPauseWalk = _pauseWalk;
+    NativeBridge.onResumeWalk = _resumeWalk;
+    final r = widget.resume;
+    if (r != null) {
+      _nextIndex = r.nextIndex.clamp(0, _cues.length);
+      _walkMeters = r.walkedMeters;
+      _elevGain = r.elevGainMeters;
+      _track.addAll(r.track);
+      _startedAt = r.startedAt;
+      _pausedTotal = Duration(seconds: r.pausedTotalSec);
+      _paused = r.wasPaused;
+      _lastPos = r.lastPos;
+    }
     _initTts();
     _startLocation();
   }
@@ -116,15 +150,21 @@ class _GuideScreenState extends State<GuideScreen> {
       return;
     }
     setState(() => _status = 'Walking');
-    _startedAt = DateTime.now();
+    _startedAt ??= DateTime.now(); // already set when resuming a checkpoint
     await _ensureBackgroundCapability();
     await NativeBridge.startTracking();
+    if (_paused) await NativeBridge.updateTrackingNotification(true);
     _posSub = Geolocator.getPositionStream(
       locationSettings: const LocationSettings(
         accuracy: LocationAccuracy.best,
         distanceFilter: 3,
       ),
     ).listen(_onPosition);
+    // Resumed into a paused checkpoint — freeze immediately rather than
+    // silently resuming GPS tracking without a fresh Resume tap.
+    if (_paused) _posSub?.pause();
+    _checkpointTimer =
+        Timer.periodic(const Duration(seconds: 15), (_) => _writeCheckpoint());
     if (Settings.instance.debugStillness.value) {
       _debugTick = Timer.periodic(const Duration(seconds: 1), (_) {
         if (mounted) setState(() {});
@@ -172,6 +212,78 @@ class _GuideScreenState extends State<GuideScreen> {
     NativeBridge.cancelNudgeNotification();
     if (!mounted) return;
     setState(() {});
+  }
+
+  /// Pauses GPS-driven processing (distance/elevation/cue-firing/off-route/
+  /// camera-follow all flow through the same position stream, so pausing it
+  /// is enough — no separate guard needed in [_onPosition]) and the
+  /// stillness watchdog (otherwise a deliberate rest break would eventually
+  /// look identical to an actual stillness emergency). Callable from the
+  /// on-screen button or the tracking notification's action.
+  void _pauseWalk() {
+    if (_paused || _startedAt == null) return;
+    setState(() {
+      _paused = true;
+      _pausedAt = DateTime.now();
+    });
+    _posSub?.pause();
+    _watchdog.pause();
+    _tts.stop();
+    NativeBridge.updateTrackingNotification(true);
+    _writeCheckpoint();
+  }
+
+  void _resumeWalk() {
+    if (!_paused) return;
+    setState(() {
+      _pausedTotal += DateTime.now().difference(_pausedAt!);
+      _paused = false;
+      _pausedAt = null;
+    });
+    _posSub?.resume();
+    _watchdog.resume();
+    NativeBridge.updateTrackingNotification(false);
+    _writeCheckpoint();
+  }
+
+  /// Advances past the next cue without firing it — for when a resumed walk
+  /// lands at a slightly-off position and the walker (or whoever's helping)
+  /// knows a cue or several have already genuinely been passed. Deliberately
+  /// dumb and repeatable (tap once per cue to skip) rather than an
+  /// auto-"jump to nearest cue" guess.
+  void _skipCue() {
+    if (_nextIndex >= _cues.length) return;
+    final skipped = _cues[_nextIndex];
+    setState(() => _nextIndex++);
+    _toast('Skipped: ${skipped.label}');
+    _writeCheckpoint();
+  }
+
+  void _toast(String msg) {
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+    }
+  }
+
+  /// Checkpoints the walk so far so it can be resumed if the app is killed
+  /// before a deliberate Stop — see [WalkCheckpoint]. Cheap single-row
+  /// upsert; called on every cue fire, on pause/resume, and periodically
+  /// (see [_checkpointTimer]) while walking.
+  Future<void> _writeCheckpoint() async {
+    final id = widget.trail.id;
+    if (id == null || _startedAt == null) return;
+    await TrailStore.instance.saveWalkCheckpoint(WalkCheckpoint(
+      trailId: id,
+      trailName: widget.trail.name,
+      startedAt: _startedAt!,
+      pausedTotalSec: _pausedTotal.inSeconds,
+      wasPaused: _paused,
+      nextIndex: _nextIndex,
+      walkedMeters: _walkMeters,
+      elevGainMeters: _elevGain,
+      lastPos: _lastPos,
+      track: _track,
+    ));
   }
 
   void _onPosition(Position pos) {
@@ -265,6 +377,7 @@ class _GuideScreenState extends State<GuideScreen> {
     if (cue.spoken.trim().isNotEmpty) _speak(cue.spoken);
     // Passing a node may flip a dual marker to its return direction.
     _drawCues();
+    _writeCheckpoint();
   }
 
   void _announceOffRoute() {
@@ -351,8 +464,10 @@ class _GuideScreenState extends State<GuideScreen> {
   Region get _region => regionById(widget.trail.regionId);
 
   CameraPosition get _initialCamera {
-    final target =
-        widget.trail.path.isNotEmpty ? widget.trail.path.first : _region.center;
+    // Resuming a checkpoint centres on where the walk actually was, not the
+    // trailhead.
+    final target = widget.resume?.lastPos ??
+        (widget.trail.path.isNotEmpty ? widget.trail.path.first : _region.center);
     return CameraPosition(target: target, zoom: 16);
   }
 
@@ -375,8 +490,12 @@ class _GuideScreenState extends State<GuideScreen> {
   Future<Activity?> _saveWalk() async {
     if (_walkSaved) return null;
     _walkSaved = true;
-    if (_walkMeters < 20) return null; // accidental open / barely moved
     final id = widget.trail.id;
+    // Any path that reaches here — Stop or the dispose() backstop — means
+    // this walk session is over one way or another, so whatever checkpoint
+    // exists is stale from this point on.
+    if (id != null) await TrailStore.instance.clearWalkCheckpoint(id);
+    if (_walkMeters < 20) return null; // accidental open / barely moved
     if (id != null) {
       await TrailStore.instance.recordWalk(id, _walkMeters, _elevGain);
     }
@@ -414,10 +533,17 @@ class _GuideScreenState extends State<GuideScreen> {
     _saveWalk(); // backstop for the system back button
     _posSub?.cancel();
     _debugTick?.cancel();
+    _checkpointTimer?.cancel();
     _tts.stop();
     _watchdog.dispose();
     if (identical(NativeBridge.onAcknowledgeStillness, _acknowledgeStillness)) {
       NativeBridge.onAcknowledgeStillness = null;
+    }
+    if (identical(NativeBridge.onPauseWalk, _pauseWalk)) {
+      NativeBridge.onPauseWalk = null;
+    }
+    if (identical(NativeBridge.onResumeWalk, _resumeWalk)) {
+      NativeBridge.onResumeWalk = null;
     }
     NativeBridge.cancelNudgeNotification();
     NativeBridge.stopTracking();
@@ -464,6 +590,7 @@ class _GuideScreenState extends State<GuideScreen> {
                 child: _NextCueStrip(
                   nextCue: _nextIndex < _cues.length ? _cues[_nextIndex] : null,
                   distance: _distToNext,
+                  onSkip: _nextIndex < _cues.length ? _skipCue : null,
                 ),
               ),
             ),
@@ -542,11 +669,13 @@ class _GuideScreenState extends State<GuideScreen> {
               child: _TopBar(
                 title: widget.trail.name,
                 walking: _status == 'Walking',
+                paused: _paused,
                 statusText: _status,
                 elapsedSec: _elapsedSec,
                 meters: _walkMeters,
                 elevGain: _elevGain,
                 onStop: _stop,
+                onPauseResume: _paused ? _resumeWalk : _pauseWalk,
                 debugText: _debugText(),
               ),
             ),
@@ -616,21 +745,25 @@ class _TopBar extends StatelessWidget {
   const _TopBar({
     required this.title,
     required this.walking,
+    required this.paused,
     required this.statusText,
     required this.elapsedSec,
     required this.meters,
     required this.elevGain,
     required this.onStop,
+    required this.onPauseResume,
     this.debugText,
   });
 
   final String title;
   final bool walking;
+  final bool paused;
   final String statusText;
   final int elapsedSec;
   final double meters;
   final double elevGain;
   final VoidCallback onStop;
+  final VoidCallback onPauseResume;
   final String? debugText;
 
   @override
@@ -660,6 +793,23 @@ class _TopBar extends StatelessWidget {
                   Text(statusText,
                       style:
                           const TextStyle(fontSize: 13, color: Colors.black54))
+                else if (paused)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(Icons.pause_circle_filled,
+                            size: 18, color: Color(0xFFF57F17)),
+                        const SizedBox(width: 6),
+                        Text('Paused — ${Settings.formatDuration(elapsedSec)}',
+                            style: const TextStyle(
+                                fontSize: 15,
+                                fontWeight: FontWeight.w700,
+                                color: Color(0xFFF57F17))),
+                      ],
+                    ),
+                  )
                 else
                   Padding(
                     padding: const EdgeInsets.only(top: 4),
@@ -688,14 +838,31 @@ class _TopBar extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 8),
+          if (walking)
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: FilledButton.icon(
+                style: FilledButton.styleFrom(
+                  backgroundColor: paused
+                      ? const Color(0xFF2E7D32)
+                      : const Color(0xFFF57F17),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                ),
+                onPressed: onPauseResume,
+                icon: Icon(paused ? Icons.play_arrow : Icons.pause, size: 22),
+                label: Text(paused ? 'Resume' : 'Pause',
+                    style: const TextStyle(fontSize: 15)),
+              ),
+            ),
           FilledButton.icon(
             style: FilledButton.styleFrom(
               backgroundColor: const Color(0xFFC62828),
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
             ),
             onPressed: onStop,
-            icon: const Icon(Icons.stop, size: 24),
-            label: const Text('Stop', style: TextStyle(fontSize: 16)),
+            icon: const Icon(Icons.stop, size: 22),
+            label: const Text('Stop', style: TextStyle(fontSize: 15)),
           ),
         ],
       ),
@@ -717,10 +884,16 @@ class _TopBar extends StatelessWidget {
 }
 
 class _NextCueStrip extends StatelessWidget {
-  const _NextCueStrip({required this.nextCue, required this.distance});
+  const _NextCueStrip(
+      {required this.nextCue, required this.distance, this.onSkip});
 
   final Cue? nextCue;
   final double? distance;
+
+  /// Advances past this cue without firing it — for a resumed walk that
+  /// landed at a slightly-off position where a cue (or several) genuinely
+  /// already passed. Null (no button shown) when there's no next cue.
+  final VoidCallback? onSkip;
 
   @override
   Widget build(BuildContext context) {
@@ -757,6 +930,12 @@ class _NextCueStrip extends StatelessWidget {
                   Text(Settings.instance.formatDistance(distance!),
                       style: const TextStyle(
                           fontSize: 30, fontWeight: FontWeight.bold)),
+                if (onSkip != null)
+                  IconButton(
+                    tooltip: 'Skip this cue',
+                    onPressed: onSkip,
+                    icon: const Icon(Icons.skip_next),
+                  ),
               ],
             ),
     );
