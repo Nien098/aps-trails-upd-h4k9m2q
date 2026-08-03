@@ -10,6 +10,7 @@ enum CueType {
   start('Start', '🏁', 'You are at the start of the trail'),
   left('Turn left', '⬅️', 'Turn left here'),
   right('Turn right', '➡️', 'Turn right here'),
+  uturn('U-turn', '↩️', 'Turn around and head back the way you came'),
   straight('Stay straight', '⬆️', 'Stay straight'),
   bridge('Bridge', '🌉', 'Cross the bridge'),
   caution('Caution', '⚠️', 'Careful here'),

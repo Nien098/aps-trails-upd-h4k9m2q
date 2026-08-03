@@ -12,6 +12,8 @@ Color cueColor(CueType t) {
       return const Color(0xFF1565C0); // blue
     case CueType.right:
       return const Color(0xFFE65100); // orange
+    case CueType.uturn:
+      return const Color(0xFF795548); // brown
     case CueType.straight:
       return const Color(0xFF00838F); // teal
     case CueType.bridge:
@@ -46,6 +48,8 @@ IconData cueIcon(CueType t) {
       return Icons.turn_left;
     case CueType.right:
       return Icons.turn_right;
+    case CueType.uturn:
+      return Icons.u_turn_left;
     case CueType.straight:
       return Icons.straight;
     case CueType.bridge:

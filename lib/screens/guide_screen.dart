@@ -122,6 +122,13 @@ class _GuideScreenState extends State<GuideScreen> {
       _startedAt = r.startedAt;
       _pausedTotal = Duration(seconds: r.pausedTotalSec);
       _paused = r.wasPaused;
+      // If it was paused when it died, _pausedAt needs a real value too —
+      // _resumeWalk() unconditionally reads it, and leaving it null would
+      // crash that call (silently, inside setState) the moment Resume is
+      // tapped. "Now" is also the semantically correct anchor: the entire
+      // time the app was closed should count as paused time, same as the
+      // time spent looking at the resume prompt before tapping Resume.
+      _pausedAt = _paused ? DateTime.now() : null;
       _lastPos = r.lastPos;
     }
     _initTts();
@@ -236,7 +243,11 @@ class _GuideScreenState extends State<GuideScreen> {
   void _resumeWalk() {
     if (!_paused) return;
     setState(() {
-      _pausedTotal += DateTime.now().difference(_pausedAt!);
+      // Fallback (not just !) so a null _pausedAt can never silently crash
+      // this setState and leave the button looking like it does nothing —
+      // that's exactly how a resumed-while-paused checkpoint broke Resume
+      // before _pausedAt was seeded alongside _paused in initState.
+      _pausedTotal += DateTime.now().difference(_pausedAt ?? DateTime.now());
       _paused = false;
       _pausedAt = null;
     });
