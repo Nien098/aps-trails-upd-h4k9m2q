@@ -580,14 +580,22 @@ class _GuideScreenState extends State<GuideScreen> {
   /// This is called from several places in quick succession — firing a cue,
   /// skipping one, turning back — each a separate un-awaited async call, so
   /// two calls can genuinely overlap (e.g. a cue fires right as the walker
-  /// taps Turn back). Since every `addCircle`/`addSymbol` here is itself an
-  /// awaited native call, an older, slower call can otherwise still be
-  /// mid-flight when a newer one finishes, and go on to draw its now-stale
-  /// markers *after* the correct ones — which looks exactly like "the map
-  /// disagrees with itself" (map vs. the freshly-computed, always-correct
-  /// cue card). [_drawGeneration] makes every call check, after each await,
-  /// whether a newer call has since started; if so it stops immediately
-  /// instead of racing a newer call to the finish.
+  /// taps Turn back); [_drawGeneration] makes every call check, after each
+  /// await, whether a newer call has since started, stopping immediately
+  /// instead of racing a newer call to the finish and drawing stale markers
+  /// after it.
+  ///
+  /// Circles and symbols are each added in one batched `addCircles`/
+  /// `addSymbols` call rather than one-at-a-time in the loop below — the
+  /// underlying plugin rebuilds that whole layer's GeoJSON source on *every*
+  /// individual `addCircle`/`addSymbol` call, not incrementally, and text
+  /// layout (glyph shaping + collision) is far more expensive to redo than a
+  /// plain circle repaint. Looping calls one at a time — as this used to —
+  /// meant the symbol layer's string of full-source rebuilds could still be
+  /// catching up after the circle layer's had already finished, which reads
+  /// as exactly "the marker colours updated but the text didn't" (map
+  /// correct on next redraw, but wrong at the moment it mattered). Batching
+  /// to one rebuild each removes that gap entirely.
   Future<void> _drawCues() async {
     final c = _c;
     if (c == null) return;
@@ -614,8 +622,9 @@ class _GuideScreenState extends State<GuideScreen> {
       }
     }
 
+    final circleOptions = <CircleOptions>[];
+    final symbolOptions = <SymbolOptions>[];
     for (final group in groups) {
-      if (myGeneration != _drawGeneration) return;
       final stacked = group.length > 1;
       if (stacked) {
         group.sort((a, b) => (rank[a] ?? 1 << 30).compareTo(rank[b] ?? 1 << 30));
@@ -623,7 +632,7 @@ class _GuideScreenState extends State<GuideScreen> {
       final completed =
           group.every((cue) => (rank[cue] ?? _nextIndex) <= _nextIndex);
       final pos = group.first.position;
-      await c.addCircle(CircleOptions(
+      circleOptions.add(CircleOptions(
         geometry: pos,
         circleRadius: stacked ? 13 : 11,
         circleColor: completed
@@ -632,8 +641,7 @@ class _GuideScreenState extends State<GuideScreen> {
         circleStrokeColor: '#ffffff',
         circleStrokeWidth: stacked ? 4 : 3,
       ));
-      if (myGeneration != _drawGeneration) return;
-      await c.addSymbol(SymbolOptions(
+      symbolOptions.add(SymbolOptions(
         geometry: pos,
         textField: group
             .map((cue) => '${rank[cue] ?? "–"}. ${_shown(cue).label}')
@@ -646,6 +654,11 @@ class _GuideScreenState extends State<GuideScreen> {
         textOffset: const Offset(0, 1.1),
       ));
     }
+
+    if (myGeneration != _drawGeneration) return;
+    if (circleOptions.isNotEmpty) await c.addCircles(circleOptions);
+    if (myGeneration != _drawGeneration) return;
+    if (symbolOptions.isNotEmpty) await c.addSymbols(symbolOptions);
   }
 
   Region get _region => regionById(widget.trail.regionId);
