@@ -32,26 +32,22 @@ import 'activity_detail_screen.dart';
 /// after turning back on a real walk.
 ///
 /// Only left/right cues ever need this — every other type reads the same
-/// either direction. If the label/spoken still match that type's
-/// auto-generated defaults — true for every auto-generated or "suggest turn
-/// cues" cue, and the common case overall — they're regenerated from the
-/// reversed type's defaults, same as the cue editor already does when you
-/// change a cue's type by hand. If they were customized with different
-/// wording, we can't safely rewrite arbitrary authored text, so as a
-/// best-effort fallback this swaps whole "left"/"right" words in place
-/// (case-preserving) rather than leaving it silently backwards.
+/// either direction. Swaps whole "left"/"right" words in place
+/// (case-preserving) rather than trying to detect and regenerate "still the
+/// auto-generated default" text: an equality check against the current
+/// default string is brittle in practice — a cue saved under an older
+/// version of the app (even a minor wording tweak to a default phrase since
+/// then) would no longer match, and silently falling back inconsistently
+/// between left and right is exactly the asymmetric bug this replaced (left
+/// cues swapping correctly, right cues staying stuck on their original
+/// wording, or vice versa). A direct word-swap has no such dependency and
+/// behaves identically for both directions.
 (String label, String spoken) effectiveCueText(Cue cue, bool turnedBack) {
   final type = cue.type;
   if (!turnedBack || (type != CueType.left && type != CueType.right)) {
     return (cue.label, cue.spoken);
   }
-  final reversed = reversedCueType(type);
-  final label =
-      cue.label == type.label ? reversed.label : _swapLeftRight(cue.label);
-  final spoken = cue.spoken == type.defaultSpoken
-      ? reversed.defaultSpoken
-      : _swapLeftRight(cue.spoken);
-  return (label, spoken);
+  return (_swapLeftRight(cue.label), _swapLeftRight(cue.spoken));
 }
 
 final _leftRightWord = RegExp(r'\b(left|right)\b', caseSensitive: false);
