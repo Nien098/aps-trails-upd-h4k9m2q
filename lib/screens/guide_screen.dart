@@ -23,6 +23,51 @@ import '../widgets/base_map.dart';
 import '../widgets/big_action_card.dart';
 import 'activity_detail_screen.dart';
 
+/// The label/spoken text to actually show and speak for [cue] when
+/// [turnedBack] (see [_GuideScreenState._turnBack]) — swapped alongside its
+/// icon/colour ([reversedCueType]). This is the part that actually matters
+/// most: TrailGuide is voice-first (built for low vision), so a left/right
+/// cue whose *icon* flips but whose *spoken words* still say the original
+/// direction is actively wrong, not cosmetic — exactly what was reported
+/// after turning back on a real walk.
+///
+/// Only left/right cues ever need this — every other type reads the same
+/// either direction. If the label/spoken still match that type's
+/// auto-generated defaults — true for every auto-generated or "suggest turn
+/// cues" cue, and the common case overall — they're regenerated from the
+/// reversed type's defaults, same as the cue editor already does when you
+/// change a cue's type by hand. If they were customized with different
+/// wording, we can't safely rewrite arbitrary authored text, so as a
+/// best-effort fallback this swaps whole "left"/"right" words in place
+/// (case-preserving) rather than leaving it silently backwards.
+(String label, String spoken) effectiveCueText(Cue cue, bool turnedBack) {
+  final type = cue.type;
+  if (!turnedBack || (type != CueType.left && type != CueType.right)) {
+    return (cue.label, cue.spoken);
+  }
+  final reversed = reversedCueType(type);
+  final label =
+      cue.label == type.label ? reversed.label : _swapLeftRight(cue.label);
+  final spoken = cue.spoken == type.defaultSpoken
+      ? reversed.defaultSpoken
+      : _swapLeftRight(cue.spoken);
+  return (label, spoken);
+}
+
+final _leftRightWord = RegExp(r'\b(left|right)\b', caseSensitive: false);
+
+String _swapLeftRight(String text) {
+  return text.replaceAllMapped(_leftRightWord, (m) {
+    final word = m[0]!;
+    final swapped = word.toLowerCase() == 'left' ? 'right' : 'left';
+    if (word == word.toUpperCase()) return swapped.toUpperCase();
+    if (word[0] == word[0].toUpperCase()) {
+      return swapped[0].toUpperCase() + swapped.substring(1);
+    }
+    return swapped;
+  });
+}
+
 /// Walking mode: follows the user's GPS along a saved trail and delivers each
 /// cue as a giant card + spoken voice + buzz. Designed for low vision — big,
 /// high-contrast, and audible so the walker barely needs to read.
@@ -91,6 +136,26 @@ class _GuideScreenState extends State<GuideScreen> {
   /// instances as [Trail.cues] (just reordered), and [_drawCues]'s completed-
   /// marker lookup depends on that shared identity.
   CueType _effType(CueType t) => _turnedBack ? reversedCueType(t) : t;
+
+  /// The label/spoken text to actually show and speak for [cue] — swapped
+  /// for the return leg, same as [_effType]. This is the part that actually
+  /// matters most: this app is voice-first (built for low vision), so a
+  /// left/right cue whose *icon* flips but whose *spoken words* still say
+  /// the original direction is actively wrong, not just a cosmetic miss —
+  /// exactly what was reported after turning back on a real walk.
+  ///
+  /// Only left/right cues ever need this (every other type reads the same
+  /// either direction). If the label/spoken still match that type's
+  /// auto-generated defaults — true for every auto-generated or
+  /// "suggest turn cues" cue, and the common case overall — they're
+  /// regenerated from the reversed type's defaults, same as the cue editor
+  /// already does when you change a cue's type by hand. If they were
+  /// customized with different wording, we can't safely rewrite arbitrary
+  /// authored text, so as a best-effort fallback this swaps whole
+  /// "left"/"right" words in place (case-preserving) rather than leaving it
+  /// silently backwards.
+  (String label, String spoken) _effText(Cue cue) =>
+      effectiveCueText(cue, _turnedBack);
 
   /// Elapsed walking time, excluding time spent paused (both banked pauses
   /// and, if currently paused, the one in progress).
@@ -280,7 +345,7 @@ class _GuideScreenState extends State<GuideScreen> {
     if (_nextIndex >= _cues.length) return;
     final skipped = _cues[_nextIndex];
     setState(() => _nextIndex++);
-    _toast('Skipped: ${skipped.label}');
+    _toast('Skipped: ${_effText(skipped).$1}');
     _drawCues(); // grey out the skipped marker immediately
     _writeCheckpoint();
   }
@@ -475,7 +540,8 @@ class _GuideScreenState extends State<GuideScreen> {
       _offRouteCardShown = false;
     });
     _buzz();
-    if (cue.spoken.trim().isNotEmpty) _speak(cue.spoken);
+    final spoken = _effText(cue).$2;
+    if (spoken.trim().isNotEmpty) _speak(spoken);
     // Passing a node may flip a dual marker to its return direction.
     _drawCues();
     _writeCheckpoint();
@@ -585,7 +651,7 @@ class _GuideScreenState extends State<GuideScreen> {
       await c.addSymbol(SymbolOptions(
         geometry: pos,
         textField: group
-            .map((cue) => '${rank[cue] ?? "–"}. ${cue.label}')
+            .map((cue) => '${rank[cue] ?? "–"}. ${_effText(cue).$1}')
             .join('\n'),
         textSize: 15,
         textColor: completed ? '#757575' : '#1a1a1a',
@@ -782,18 +848,18 @@ class _GuideScreenState extends State<GuideScreen> {
               onDismiss: () => setState(() => _offRouteCardShown = false),
             )
           else if (_activeCard != null)
-            BigActionCard(
-              color: cueColor(_effType(_activeCard!.type)),
-              icon: cueIcon(_effType(_activeCard!.type)),
-              text: _activeCard!.spoken.trim().isEmpty
-                  ? _activeCard!.label
-                  : _activeCard!.spoken,
-              onRepeat: () => _speak(_activeCard!.spoken.trim().isEmpty
-                  ? _activeCard!.label
-                  : _activeCard!.spoken),
-              onDismiss: () => setState(() => _activeCard = null),
-              number: _cues.indexOf(_activeCard!) + 1,
-            )
+            Builder(builder: (context) {
+              final (label, spoken) = _effText(_activeCard!);
+              final text = spoken.trim().isEmpty ? label : spoken;
+              return BigActionCard(
+                color: cueColor(_effType(_activeCard!.type)),
+                icon: cueIcon(_effType(_activeCard!.type)),
+                text: text,
+                onRepeat: () => _speak(text),
+                onDismiss: () => setState(() => _activeCard = null),
+                number: _cues.indexOf(_activeCard!) + 1,
+              );
+            })
           else if (stillnessVisible)
             _stillnessCard(),
 
@@ -1100,7 +1166,7 @@ class _NextCueStrip extends StatelessWidget {
                       Text(rank == null ? 'Next' : 'Next · #$rank',
                           style: const TextStyle(
                               fontSize: 15, color: Colors.black54)),
-                      Text(cue.label,
+                      Text(effectiveCueText(cue, turnedBack).$1,
                           style: const TextStyle(
                               fontSize: 26, fontWeight: FontWeight.bold)),
                     ],
