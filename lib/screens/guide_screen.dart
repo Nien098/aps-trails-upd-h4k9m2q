@@ -23,45 +23,34 @@ import '../widgets/base_map.dart';
 import '../widgets/big_action_card.dart';
 import 'activity_detail_screen.dart';
 
-/// The label/spoken text to actually show and speak for [cue] when
-/// [turnedBack] (see [_GuideScreenState._turnBack]) — swapped alongside its
-/// icon/colour ([reversedCueType]). This is the part that actually matters
-/// most: TrailGuide is voice-first (built for low vision), so a left/right
-/// cue whose *icon* flips but whose *spoken words* still say the original
-/// direction is actively wrong, not cosmetic — exactly what was reported
-/// after turning back on a real walk.
+/// The cue to actually show, speak, and colour for [cue] on the return leg
+/// (see [_GuideScreenState._turnBack]): [cue] itself, unchanged, unless it's
+/// a left/right cue and the walker has turned back — in which case this
+/// returns a brand-new [Cue] of the *opposite* type at the same spot, so its
+/// icon, colour, label, and spoken phrase all come from that type's own
+/// canonical definition (`CueType.label`/`defaultSpoken`) together, as one
+/// consistent unit.
 ///
-/// Only left/right cues ever need this — every other type reads the same
-/// either direction. Swaps whole "left"/"right" words in place
-/// (case-preserving) rather than trying to detect and regenerate "still the
-/// auto-generated default" text: an equality check against the current
-/// default string is brittle in practice — a cue saved under an older
-/// version of the app (even a minor wording tweak to a default phrase since
-/// then) would no longer match, and silently falling back inconsistently
-/// between left and right is exactly the asymmetric bug this replaced (left
-/// cues swapping correctly, right cues staying stuck on their original
-/// wording, or vice versa). A direct word-swap has no such dependency and
-/// behaves identically for both directions.
-(String label, String spoken) effectiveCueText(Cue cue, bool turnedBack) {
-  final type = cue.type;
-  if (!turnedBack || (type != CueType.left && type != CueType.right)) {
-    return (cue.label, cue.spoken);
+/// This replaced two rounds of trying to edit the original cue's *wording*
+/// in place (matching against today's default text, then a regex word-swap)
+/// — both left real bugs, because a cue's saved text and its type can drift
+/// out of sync in ways that are hard to fully predict. Building a fresh cue
+/// straight from the reversed type sidesteps that entirely: there's nothing
+/// to get out of sync. The trade-off is that any custom wording the trail's
+/// author wrote (e.g. "at the big oak tree") isn't carried over — there's no
+/// reliable way to un-say a custom forward-direction phrase for the opposite
+/// direction, so this intentionally falls back to the type's plain default
+/// phrasing instead, which is always correct.
+Cue effectiveCue(Cue cue, bool turnedBack) {
+  if (!turnedBack || (cue.type != CueType.left && cue.type != CueType.right)) {
+    return cue;
   }
-  return (_swapLeftRight(cue.label), _swapLeftRight(cue.spoken));
-}
-
-final _leftRightWord = RegExp(r'\b(left|right)\b', caseSensitive: false);
-
-String _swapLeftRight(String text) {
-  return text.replaceAllMapped(_leftRightWord, (m) {
-    final word = m[0]!;
-    final swapped = word.toLowerCase() == 'left' ? 'right' : 'left';
-    if (word == word.toUpperCase()) return swapped.toUpperCase();
-    if (word[0] == word[0].toUpperCase()) {
-      return swapped[0].toUpperCase() + swapped.substring(1);
-    }
-    return swapped;
-  });
+  return Cue(
+    type: reversedCueType(cue.type),
+    position: cue.position,
+    order: cue.order,
+    radiusMeters: cue.radiusMeters,
+  );
 }
 
 /// Walking mode: follows the user's GPS along a saved trail and delivers each
@@ -126,32 +115,12 @@ class _GuideScreenState extends State<GuideScreen> {
   /// unaffected.
   bool _turnedBack = false;
 
-  /// The colour/icon a cue should currently show — its real type normally,
-  /// or its direction-flipped type after [_turnedBack] (see [reversedCueType]).
-  /// [Cue.type] itself is never mutated: [_cues] reuses the same [Cue]
-  /// instances as [Trail.cues] (just reordered), and [_drawCues]'s completed-
-  /// marker lookup depends on that shared identity.
-  CueType _effType(CueType t) => _turnedBack ? reversedCueType(t) : t;
-
-  /// The label/spoken text to actually show and speak for [cue] — swapped
-  /// for the return leg, same as [_effType]. This is the part that actually
-  /// matters most: this app is voice-first (built for low vision), so a
-  /// left/right cue whose *icon* flips but whose *spoken words* still say
-  /// the original direction is actively wrong, not just a cosmetic miss —
-  /// exactly what was reported after turning back on a real walk.
-  ///
-  /// Only left/right cues ever need this (every other type reads the same
-  /// either direction). If the label/spoken still match that type's
-  /// auto-generated defaults — true for every auto-generated or
-  /// "suggest turn cues" cue, and the common case overall — they're
-  /// regenerated from the reversed type's defaults, same as the cue editor
-  /// already does when you change a cue's type by hand. If they were
-  /// customized with different wording, we can't safely rewrite arbitrary
-  /// authored text, so as a best-effort fallback this swaps whole
-  /// "left"/"right" words in place (case-preserving) rather than leaving it
-  /// silently backwards.
-  (String label, String spoken) _effText(Cue cue) =>
-      effectiveCueText(cue, _turnedBack);
+  /// The cue to actually show/speak/colour for [cue] — see [effectiveCue].
+  /// [Cue.type] on the *original* objects in [_cues]/[Trail.cues] is never
+  /// mutated: [_drawCues]'s completed-marker lookup depends on those staying
+  /// the same shared identity, so only the rendered/spoken representation
+  /// swaps, never the underlying data.
+  Cue _shown(Cue cue) => effectiveCue(cue, _turnedBack);
 
   /// Elapsed walking time, excluding time spent paused (both banked pauses
   /// and, if currently paused, the one in progress).
@@ -341,7 +310,7 @@ class _GuideScreenState extends State<GuideScreen> {
     if (_nextIndex >= _cues.length) return;
     final skipped = _cues[_nextIndex];
     setState(() => _nextIndex++);
-    _toast('Skipped: ${_effText(skipped).$1}');
+    _toast('Skipped: ${_shown(skipped).label}');
     _drawCues(); // grey out the skipped marker immediately
     _writeCheckpoint();
   }
@@ -536,7 +505,7 @@ class _GuideScreenState extends State<GuideScreen> {
       _offRouteCardShown = false;
     });
     _buzz();
-    final spoken = _effText(cue).$2;
+    final spoken = _shown(cue).spoken;
     if (spoken.trim().isNotEmpty) _speak(spoken);
     // Passing a node may flip a dual marker to its return direction.
     _drawCues();
@@ -640,14 +609,14 @@ class _GuideScreenState extends State<GuideScreen> {
         circleRadius: stacked ? 13 : 11,
         circleColor: completed
             ? _completedColorHex
-            : (stacked ? stackedCueColorHex : cueColorHex(_effType(group.first.type))),
+            : (stacked ? stackedCueColorHex : cueColorHex(_shown(group.first).type)),
         circleStrokeColor: '#ffffff',
         circleStrokeWidth: stacked ? 4 : 3,
       ));
       await c.addSymbol(SymbolOptions(
         geometry: pos,
         textField: group
-            .map((cue) => '${rank[cue] ?? "–"}. ${_effText(cue).$1}')
+            .map((cue) => '${rank[cue] ?? "–"}. ${_shown(cue).label}')
             .join('\n'),
         textSize: 15,
         textColor: completed ? '#757575' : '#1a1a1a',
@@ -845,11 +814,11 @@ class _GuideScreenState extends State<GuideScreen> {
             )
           else if (_activeCard != null)
             Builder(builder: (context) {
-              final (label, spoken) = _effText(_activeCard!);
-              final text = spoken.trim().isEmpty ? label : spoken;
+              final shown = _shown(_activeCard!);
+              final text = shown.spoken.trim().isEmpty ? shown.label : shown.spoken;
               return BigActionCard(
-                color: cueColor(_effType(_activeCard!.type)),
-                icon: cueIcon(_effType(_activeCard!.type)),
+                color: cueColor(shown.type),
+                icon: cueIcon(shown.type),
                 text: text,
                 onRepeat: () => _speak(text),
                 onDismiss: () => setState(() => _activeCard = null),
@@ -1118,8 +1087,8 @@ class _NextCueStrip extends StatelessWidget {
   final Cue? nextCue;
   final double? distance;
 
-  /// Shows this cue's direction-flipped type (icon/colour) instead of its
-  /// stored one — see [_GuideScreenState._effType].
+  /// Shows this cue's direction-flipped type/text instead of its stored
+  /// one — see [effectiveCue].
   final bool turnedBack;
 
   /// This cue's 1-based position in the trail's stack order, matching the
@@ -1136,6 +1105,7 @@ class _NextCueStrip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cue = nextCue;
+    final shown = cue == null ? null : effectiveCue(cue, turnedBack);
     return Container(
       margin: const EdgeInsets.all(12),
       padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
@@ -1144,16 +1114,13 @@ class _NextCueStrip extends StatelessWidget {
         borderRadius: BorderRadius.circular(16),
         boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 6)],
       ),
-      child: cue == null
+      child: shown == null
           ? const Text('Follow the trail',
               style: TextStyle(fontSize: 24, fontWeight: FontWeight.w600),
               textAlign: TextAlign.center)
           : Row(
               children: [
-                Icon(cueIcon(turnedBack ? reversedCueType(cue.type) : cue.type),
-                    size: 44,
-                    color: cueColor(
-                        turnedBack ? reversedCueType(cue.type) : cue.type)),
+                Icon(cueIcon(shown.type), size: 44, color: cueColor(shown.type)),
                 const SizedBox(width: 14),
                 Expanded(
                   child: Column(
@@ -1162,7 +1129,7 @@ class _NextCueStrip extends StatelessWidget {
                       Text(rank == null ? 'Next' : 'Next · #$rank',
                           style: const TextStyle(
                               fontSize: 15, color: Colors.black54)),
-                      Text(effectiveCueText(cue, turnedBack).$1,
+                      Text(shown.label,
                           style: const TextStyle(
                               fontSize: 26, fontWeight: FontWeight.bold)),
                     ],
