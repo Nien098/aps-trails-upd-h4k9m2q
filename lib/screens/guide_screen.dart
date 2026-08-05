@@ -563,6 +563,10 @@ class _GuideScreenState extends State<GuideScreen> {
   /// after a run of skips.
   static const _completedColorHex = '#9E9E9E';
 
+  /// Bumped on every [_drawCues] call and checked between each await inside
+  /// it — see that method's doc for why.
+  int _drawGeneration = 0;
+
   /// Draws the cue markers, each labelled with its stack position so the map
   /// reads consistently with the cue list. Cues sharing (almost) the same
   /// spot stay at that one spot — drawn as a single marker in a distinct
@@ -572,11 +576,25 @@ class _GuideScreenState extends State<GuideScreen> {
   /// already passed (index < _nextIndex — fired naturally or skipped) draw
   /// grey instead of their normal colour; a stacked spot only greys out once
   /// every cue there is done.
+  ///
+  /// This is called from several places in quick succession — firing a cue,
+  /// skipping one, turning back — each a separate un-awaited async call, so
+  /// two calls can genuinely overlap (e.g. a cue fires right as the walker
+  /// taps Turn back). Since every `addCircle`/`addSymbol` here is itself an
+  /// awaited native call, an older, slower call can otherwise still be
+  /// mid-flight when a newer one finishes, and go on to draw its now-stale
+  /// markers *after* the correct ones — which looks exactly like "the map
+  /// disagrees with itself" (map vs. the freshly-computed, always-correct
+  /// cue card). [_drawGeneration] makes every call check, after each await,
+  /// whether a newer call has since started; if so it stops immediately
+  /// instead of racing a newer call to the finish.
   Future<void> _drawCues() async {
     final c = _c;
     if (c == null) return;
+    final myGeneration = ++_drawGeneration;
     await c.clearSymbols();
     await c.clearCircles();
+    if (myGeneration != _drawGeneration) return;
 
     // _cues is already sorted by order — that sort position is the display
     // rank, always a clean 1..N regardless of gaps in the raw order values.
@@ -597,6 +615,7 @@ class _GuideScreenState extends State<GuideScreen> {
     }
 
     for (final group in groups) {
+      if (myGeneration != _drawGeneration) return;
       final stacked = group.length > 1;
       if (stacked) {
         group.sort((a, b) => (rank[a] ?? 1 << 30).compareTo(rank[b] ?? 1 << 30));
@@ -613,6 +632,7 @@ class _GuideScreenState extends State<GuideScreen> {
         circleStrokeColor: '#ffffff',
         circleStrokeWidth: stacked ? 4 : 3,
       ));
+      if (myGeneration != _drawGeneration) return;
       await c.addSymbol(SymbolOptions(
         geometry: pos,
         textField: group
