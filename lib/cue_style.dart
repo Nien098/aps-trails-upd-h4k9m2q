@@ -31,6 +31,18 @@ String cueColorHex(CueType t) {
   return '#${(c.toARGB32() & 0xFFFFFF).toRadixString(16).padLeft(6, '0')}';
 }
 
+/// The type a cue becomes when a trail (or the remaining leg of one) is
+/// walked in the opposite direction — left/right and start/finish swap since
+/// they're direction-dependent; everything else means the same thing either
+/// way (a U-turn is still a U-turn, a caution spot is still a caution spot).
+CueType reversedCueType(CueType t) => switch (t) {
+      CueType.left => CueType.right,
+      CueType.right => CueType.left,
+      CueType.start => CueType.finish,
+      CueType.finish => CueType.start,
+      _ => t,
+    };
+
 /// Marker colour for a spot where two or more cues are stacked (e.g. a 4-way
 /// crossing) — distinct from every [cueColor] so a stack reads as "multiple
 /// cues here" at a glance, before the author or hiker even reads the label.

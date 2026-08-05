@@ -210,6 +210,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
               'in "Sleeping apps" or "Deep sleeping apps".',
               style: TextStyle(fontSize: 13, color: Color(0xFF4A4A4A))),
           const Divider(height: 40),
+          const Text('Trail drawing',
+              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 6),
+          const Text(
+              'How far "Follow trails" (in the trail editor) will detour to '
+              "trace a real trail's bends between two taps, before giving up "
+              'and drawing a straight line instead.',
+              style: TextStyle(fontSize: 14, color: Color(0xFF4A4A4A))),
+          const SizedBox(height: 12),
+          const _DetourFactorControl(),
+          const Divider(height: 40),
           const Text('Map trail lines',
               style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
           const SizedBox(height: 6),
@@ -248,6 +259,87 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ? 'Dashed — off for a solid line, easier to follow where '
                       'trails cross or run close together.'
                   : 'Solid line.'),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Slider + exact-value text box for [Settings.detourFactor], kept in sync
+/// with each other and with the persisted setting.
+class _DetourFactorControl extends StatefulWidget {
+  const _DetourFactorControl();
+
+  @override
+  State<_DetourFactorControl> createState() => _DetourFactorControlState();
+}
+
+class _DetourFactorControlState extends State<_DetourFactorControl> {
+  late final TextEditingController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController(text: _fmt(Settings.instance.detourFactor.value));
+    Settings.instance.detourFactor.addListener(_onExternalChange);
+  }
+
+  @override
+  void dispose() {
+    Settings.instance.detourFactor.removeListener(_onExternalChange);
+    _controller.dispose();
+    super.dispose();
+  }
+
+  static String _fmt(double v) => v.toStringAsFixed(2);
+
+  void _onExternalChange() {
+    final text = _fmt(Settings.instance.detourFactor.value);
+    if (_controller.text != text) _controller.text = text;
+  }
+
+  void _submitText(String text) {
+    final v = double.tryParse(text.trim());
+    if (v != null) {
+      Settings.instance.setDetourFactor(v);
+    } else {
+      _controller.text = _fmt(Settings.instance.detourFactor.value);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<double>(
+      valueListenable: Settings.instance.detourFactor,
+      builder: (context, value, _) => Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Expanded(
+            child: Slider(
+              value: value,
+              min: 1.5,
+              max: 6.0,
+              divisions: 18, // 0.25x steps
+              label: '${value.toStringAsFixed(2)}x',
+              onChanged: (v) => Settings.instance.setDetourFactor(v),
+            ),
+          ),
+          const SizedBox(width: 12),
+          SizedBox(
+            width: 76,
+            child: TextField(
+              controller: _controller,
+              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+              textAlign: TextAlign.center,
+              decoration: const InputDecoration(
+                suffixText: 'x',
+                isDense: true,
+                border: OutlineInputBorder(),
+              ),
+              onSubmitted: _submitText,
+              onTapOutside: (_) => _submitText(_controller.text),
             ),
           ),
         ],

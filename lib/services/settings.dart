@@ -19,6 +19,7 @@ class Settings {
   static const _kSendEmergencySms = 'send_emergency_sms';
   static const _kTrailLineColor = 'basemap_trail_line_color';
   static const _kTrailLineDashed = 'basemap_trail_line_dashed';
+  static const _kDetourFactor = 'trail_router_detour_factor';
 
   /// true = metric (m / km), false = imperial (ft / mi). Defaults to metric.
   final ValueNotifier<bool> metric = ValueNotifier(true);
@@ -66,6 +67,13 @@ class Settings {
   /// trails run close together.
   final ValueNotifier<bool> trailLineDashed = ValueNotifier(false);
 
+  /// How far (as a multiple of the straight-line distance) "Follow trails"
+  /// will detour to trace real trail geometry between two drawn points,
+  /// before giving up and falling back to a straight segment. Higher values
+  /// follow tighter switchbacks/bends but risk occasionally cutting through
+  /// an unrelated nearby trail loop. Defaults to 2.5x.
+  final ValueNotifier<double> detourFactor = ValueNotifier(2.5);
+
   Future<void> load() async {
     final p = await SharedPreferences.getInstance();
     metric.value = p.getBool(_kMetric) ?? true;
@@ -80,6 +88,7 @@ class Settings {
     sendEmergencySms.value = p.getBool(_kSendEmergencySms) ?? true;
     trailLineColor.value = p.getString(_kTrailLineColor) ?? '#3F51B5';
     trailLineDashed.value = p.getBool(_kTrailLineDashed) ?? false;
+    detourFactor.value = p.getDouble(_kDetourFactor) ?? 2.5;
   }
 
   Future<void> setMetric(bool value) async {
@@ -140,6 +149,12 @@ class Settings {
     trailLineDashed.value = value;
     final p = await SharedPreferences.getInstance();
     await p.setBool(_kTrailLineDashed, value);
+  }
+
+  Future<void> setDetourFactor(double value) async {
+    detourFactor.value = value.clamp(1.5, 6.0);
+    final p = await SharedPreferences.getInstance();
+    await p.setDouble(_kDetourFactor, detourFactor.value);
   }
 
   /// Adds a finished walk's distance and elevation gain to the lifetime totals.

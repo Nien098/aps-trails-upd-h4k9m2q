@@ -5,6 +5,7 @@ import 'dart:ui' show Rect;
 import 'package:maplibre_gl/maplibre_gl.dart';
 
 import 'geo.dart';
+import 'settings.dart';
 
 /// A trail route generated automatically from the visible trail network.
 class GeneratedRoute {
@@ -59,11 +60,13 @@ class TrailRouter {
   static const _snapMeters = 30.0;
 
   /// Reject routed detours longer than this multiple of the straight distance.
-  /// Kept tight because [record_trail_screen]'s cleanup calls [connect] on
-  /// closely-spaced simplified points — a loose factor here lets the
-  /// shortest-path search wander through a nearby loop/cul-de-sac that's
-  /// technically connected but nothing like the real walked path.
-  static const _maxDetourFactor = 2.5;
+  /// User-adjustable (Settings → Safety & battery) since a tight factor is
+  /// safe for [record_trail_screen]'s cleanup pass (closely-spaced simplified
+  /// points, where a loose factor lets the shortest-path search wander through
+  /// a nearby loop/cul-de-sac) but too strict for hand-drawn taps around a
+  /// real switchback or bend, which can legitimately be 3-4x+ the straight
+  /// line distance.
+  static double get _maxDetourFactor => Settings.instance.detourFactor.value;
 
   /// Connects a new [to] tap to the network, routing from [from] if given.
   Future<TrailConnection> connect({LatLng? from, required LatLng to}) async {
@@ -231,6 +234,15 @@ class TrailRouter {
         }
       }
     }
+    // A single real-world trail can arrive as several separate LineString
+    // features (e.g. split around a line-label's placement point, or by tile
+    // clipping) whose "shared" endpoint differs by a few metres between
+    // fragments — just outside addLine's ~1m key-rounding tolerance. Left
+    // alone, that gap forces routing to detour via whatever junction node IS
+    // connected, producing an odd kink right at the split (often exactly
+    // under the trail's name label). Merge close-enough fragment endpoints
+    // so the trail reads as one continuous edge again.
+    graph._mergeNearbyNodes(4.0);
     return graph;
   }
 
@@ -285,6 +297,57 @@ class _Graph {
       prev = p;
       prevKey = k;
     }
+  }
+
+  /// Union-finds together any two nodes within [toleranceMeters] of each
+  /// other, then rewrites nodes/edges/segments onto the canonical (root) key
+  /// of each group. Fixes near-miss disconnects between fragments of what is
+  /// really one continuous trail (see [_buildGraph]).
+  void _mergeNearbyNodes(double toleranceMeters) {
+    final keys = nodes.keys.toList();
+    final parent = <String, String>{for (final k in keys) k: k};
+    String find(String k) {
+      var r = k;
+      while (parent[r] != r) {
+        r = parent[r]!;
+      }
+      parent[k] = r;
+      return r;
+    }
+
+    for (var i = 0; i < keys.length; i++) {
+      for (var j = i + 1; j < keys.length; j++) {
+        if (metersBetween(nodes[keys[i]]!, nodes[keys[j]]!) <=
+            toleranceMeters) {
+          final ri = find(keys[i]), rj = find(keys[j]);
+          if (ri != rj) parent[ri] = rj;
+        }
+      }
+    }
+
+    final newNodes = <String, LatLng>{};
+    for (final k in keys) {
+      newNodes.putIfAbsent(find(k), () => nodes[k]!);
+    }
+    final newAdj = <String, List<_Edge>>{};
+    for (final entry in adj.entries) {
+      final fromRoot = find(entry.key);
+      for (final e in entry.value) {
+        final toRoot = find(e.to);
+        if (fromRoot == toRoot) continue;
+        (newAdj[fromRoot] ??= []).add(_Edge(toRoot, e.weight));
+      }
+    }
+    for (var i = 0; i < _segments.length; i++) {
+      final s = _segments[i];
+      _segments[i] = _Seg(find(s.aKey), find(s.bKey), s.a, s.b);
+    }
+    nodes
+      ..clear()
+      ..addAll(newNodes);
+    adj
+      ..clear()
+      ..addAll(newAdj);
   }
 
   ({LatLng point, double meters, _Seg seg})? _nearestSeg(LatLng p) {

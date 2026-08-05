@@ -1,0 +1,1017 @@
+<title>APS Trails — Guides</title>
+<style>
+  :root {
+    --brand: #C0272D; --brand-soft: #E1A2A5;
+    --forest: #2B5D45; --forest-soft: #DCEAE1;
+    --sky: #3E8FB0; --sky-soft: #DDEEF3;
+    --amber: #F57F17; --amber-soft: #FBE7C9;
+    --resume: #2E7D32; --resume-soft: #DCEEDD;
+    --uturn: #795548; --uturn-soft: #E9DFDA;
+    --done-grey: #9E9E9E;
+
+    --paper: #FBF6EA; --paper-raised: #FFFDF7; --card: #F3ECD9; --card-border: #E4D8B9;
+    --ink: #2A2620; --ink-soft: #665F4F;
+    --line: repeating-linear-gradient(to bottom, var(--forest) 0 9px, transparent 9px 18px);
+    --shadow: 0 3px 0 rgba(42, 38, 32, 0.14);
+    --ring: #3E8FB0;
+    --tabbar-h: 54px;
+
+    --font-display: "Segoe UI Rounded", "Segoe UI Variable Display", ui-rounded, "Varela Round", "Segoe UI", sans-serif;
+    --font-body: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+    --font-mono: "Cascadia Code", "Consolas", ui-monospace, "SFMono-Regular", monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --brand: #E1585C; --brand-soft: #5A2E30;
+      --forest: #63B08D; --forest-soft: #1E3A2C;
+      --sky: #6FBBD8; --sky-soft: #1B3742;
+      --amber: #F6A13F; --amber-soft: #4A3416;
+      --resume: #5FBB65; --resume-soft: #1E3A20;
+      --uturn: #C1998A; --uturn-soft: #3B2E27;
+      --done-grey: #8A8A8A;
+      --paper: #171310; --paper-raised: #1E1A15; --card: #221D17; --card-border: #362D22;
+      --ink: #F1E9D8; --ink-soft: #B9AF98;
+      --shadow: 0 3px 0 rgba(0, 0, 0, 0.4);
+    }
+  }
+  :root[data-theme="dark"] {
+    --brand: #E1585C; --brand-soft: #5A2E30;
+    --forest: #63B08D; --forest-soft: #1E3A2C;
+    --sky: #6FBBD8; --sky-soft: #1B3742;
+    --amber: #F6A13F; --amber-soft: #4A3416;
+    --resume: #5FBB65; --resume-soft: #1E3A20;
+    --uturn: #C1998A; --uturn-soft: #3B2E27;
+    --done-grey: #8A8A8A;
+    --paper: #171310; --paper-raised: #1E1A15; --card: #221D17; --card-border: #362D22;
+    --ink: #F1E9D8; --ink-soft: #B9AF98;
+    --shadow: 0 3px 0 rgba(0, 0, 0, 0.4);
+  }
+  :root[data-theme="light"] {
+    --brand: #C0272D; --brand-soft: #E1A2A5;
+    --forest: #2B5D45; --forest-soft: #DCEAE1;
+    --sky: #3E8FB0; --sky-soft: #DDEEF3;
+    --amber: #F57F17; --amber-soft: #FBE7C9;
+    --resume: #2E7D32; --resume-soft: #DCEEDD;
+    --uturn: #795548; --uturn-soft: #E9DFDA;
+    --done-grey: #9E9E9E;
+    --paper: #FBF6EA; --paper-raised: #FFFDF7; --card: #F3ECD9; --card-border: #E4D8B9;
+    --ink: #2A2620; --ink-soft: #665F4F;
+    --shadow: 0 3px 0 rgba(42, 38, 32, 0.14);
+  }
+  /* Real in-app cue-marker / UI colours — fixed, not theme-dependent */
+  :root {
+    --cue-startfinish: #2E7D32; --cue-left: #1565C0; --cue-right: #E65100;
+    --cue-uturn: #795548; --cue-straight: #00838F; --cue-bridge: #6A1B9A;
+    --cue-caution: #C62828; --cue-note: #455A64; --cue-stacked: #AD1457; --cue-done: #9E9E9E;
+  }
+
+  * { box-sizing: border-box; }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--font-body);
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--sky); }
+  a:focus-visible, summary:focus-visible, button:focus-visible {
+    outline: 3px solid var(--ring);
+    outline-offset: 2px;
+    border-radius: 6px;
+  }
+
+  /* ---------- Tab bar ---------- */
+  .tabbar {
+    position: sticky; top: 0; z-index: 20;
+    display: flex; gap: 8px; justify-content: center;
+    padding: 10px 16px;
+    background: var(--paper-raised);
+    border-bottom: 1px solid var(--card-border);
+  }
+  .tabbtn {
+    font-family: var(--font-display); font-weight: 800; font-size: 13.5px;
+    padding: 8px 16px; border-radius: 999px;
+    border: 1px solid var(--card-border);
+    background: var(--card); color: var(--ink-soft);
+    cursor: pointer;
+    display: inline-flex; align-items: center; gap: 7px;
+  }
+  .tabbtn svg { width: 16px; height: 16px; }
+  .tabbtn.active { background: var(--forest); color: #fff; border-color: var(--forest); }
+  .tabbtn:not(.active):hover { border-color: var(--forest); color: var(--forest); }
+  .tabpage[hidden] { display: none; }
+
+  .tab-switch { font-weight: 700; cursor: pointer; }
+
+  /* ---------- Shared doc shell ---------- */
+  .doc { margin: 0 auto; }
+  .doc-kids { max-width: 760px; padding: 28px 20px 80px; }
+  .doc-advanced { max-width: 860px; padding: 24px 20px 90px; }
+
+  /* ---------- Hero (shared base, per-page sizing) ---------- */
+  .hero {
+    display: flex; align-items: center;
+    border-bottom: 3px dashed var(--card-border);
+  }
+  .hero-kids { gap: 18px; padding: 22px 4px 30px; margin-bottom: 30px; }
+  .hero-adv  { gap: 16px; padding: 8px 4px 22px; margin-bottom: 8px; }
+  .hero-badge {
+    flex: none; display: flex; align-items: center; justify-content: center;
+    box-shadow: var(--shadow); overflow: hidden;
+  }
+  .hero-badge svg { width: 100%; height: 100%; display: block; }
+  .hero-kids .hero-badge { width: 68px; height: 68px; border-radius: 20px; }
+  .hero-adv .hero-badge  { width: 54px; height: 54px; border-radius: 15px; }
+  .hero h1 {
+    font-family: var(--font-display); font-weight: 800;
+    margin: 0 0 4px; text-wrap: balance; letter-spacing: -0.01em;
+  }
+  .hero-kids h1 { font-size: clamp(28px, 6vw, 38px); }
+  .hero-adv h1  { font-size: clamp(24px, 5vw, 32px); }
+  .hero-copy p { margin: 0; color: var(--ink-soft); }
+  .hero-kids .hero-copy p { font-size: 16px; max-width: 46ch; }
+  .hero-adv .hero-copy p  { font-size: 15px; max-width: 52ch; }
+
+  .eyebrow {
+    font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.09em;
+    text-transform: uppercase; color: var(--forest); font-weight: 700;
+  }
+
+  .companion {
+    margin: 14px 0 28px; background: var(--sky-soft); border-radius: 12px;
+    padding: 12px 16px; font-size: 14px; display: flex; gap: 10px; align-items: flex-start;
+  }
+  .companion svg { width: 18px; height: 18px; flex: none; margin-top: 2px; color: var(--sky); }
+
+  /* ---------- Quick nav (advanced page) ---------- */
+  .quicknav {
+    position: sticky; top: var(--tabbar-h); z-index: 5;
+    display: flex; gap: 6px; flex-wrap: nowrap; overflow-x: auto;
+    padding: 10px 0 12px; margin-bottom: 30px;
+    background: var(--paper);
+    border-bottom: 1px solid var(--card-border);
+    scrollbar-width: thin;
+  }
+  .quicknav a {
+    flex: none; font-family: var(--font-mono); font-size: 12px; text-decoration: none;
+    color: var(--ink-soft); background: var(--card); border: 1px solid var(--card-border);
+    padding: 6px 11px; border-radius: 999px; white-space: nowrap;
+  }
+  .quicknav a:hover { color: var(--forest); border-color: var(--forest); }
+
+  /* ---------- Cheat sheet (kids) ---------- */
+  .cheatsheet { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 40px; }
+  .cheat-card {
+    background: var(--paper-raised); border: 1px solid var(--card-border);
+    border-radius: 14px; padding: 14px 10px; text-align: center;
+  }
+  .cheat-card svg { width: 26px; height: 26px; color: var(--forest); margin-bottom: 6px; }
+  .cheat-card b { display: block; font-size: 13px; font-family: var(--font-display); }
+  @media (max-width: 560px) { .cheatsheet { grid-template-columns: repeat(2, 1fr); } }
+
+  h2.section-title {
+    font-family: var(--font-display); font-size: 22px; font-weight: 800;
+    margin: 0 0 18px; text-wrap: balance;
+  }
+
+  /* ---------- Trail timeline (kids) ---------- */
+  .trail { position: relative; margin-bottom: 44px; }
+  .trail::before {
+    content: ""; position: absolute; left: 31px; top: 6px; bottom: 30px; width: 4px;
+    background-image: var(--line);
+  }
+  .stop {
+    position: relative; display: grid; grid-template-columns: 64px 1fr;
+    column-gap: 18px; padding-bottom: 34px;
+  }
+  .stop:last-child { padding-bottom: 0; }
+  .marker {
+    position: relative; z-index: 1; width: 64px; height: 64px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center; color: #fff;
+    box-shadow: var(--shadow); border: 3px solid var(--paper);
+  }
+  .marker svg { width: 28px; height: 28px; }
+  .marker .num {
+    position: absolute; top: -6px; right: -6px; width: 22px; height: 22px; border-radius: 50%;
+    background: var(--paper-raised); color: var(--ink); font-family: var(--font-mono);
+    font-size: 12px; font-weight: 700; display: flex; align-items: center; justify-content: center;
+    border: 2px solid var(--card-border);
+  }
+  .stop-content {
+    background: var(--paper-raised); border: 1px solid var(--card-border);
+    border-radius: 16px; padding: 16px 18px;
+  }
+  .stop-content h3 { font-family: var(--font-display); font-size: 18px; margin: 0 0 8px; }
+  .stop-content p, .stop-content li { margin: 0 0 8px; }
+  .stop-content ul { padding-left: 20px; margin: 8px 0; }
+  .stop-content li:last-child { margin-bottom: 0; }
+
+  /* ---------- kbd chips (shared) ---------- */
+  .kbd {
+    font-family: var(--font-mono); font-size: 0.87em; font-weight: 700;
+    padding: 1px 7px; border-radius: 6px; border: 1px solid currentColor; white-space: nowrap;
+  }
+  .kbd.green { color: var(--resume); background: var(--resume-soft); border-color: var(--resume); }
+  .kbd.amber { color: var(--amber); background: var(--amber-soft); border-color: var(--amber); }
+  .kbd.red   { color: var(--brand); background: var(--brand-soft); border-color: var(--brand); }
+  .kbd.blue  { color: var(--sky); background: var(--sky-soft); border-color: var(--sky); }
+  .kbd.grey  { color: var(--ink-soft); background: var(--card); border-color: var(--card-border); }
+
+  .tip, .warn {
+    display: flex; gap: 10px; align-items: flex-start;
+    border-radius: 12px; padding: 10px 12px; margin: 12px 0; font-size: 14.5px;
+  }
+  .tip { background: var(--sky-soft); color: var(--ink); }
+  .warn { background: var(--brand-soft); color: var(--ink); }
+  .tip svg, .warn svg { width: 18px; height: 18px; flex: none; margin-top: 2px; }
+  .tip svg { color: var(--sky); }
+  .warn svg { color: var(--brand); }
+
+  /* ---------- Cue legend (kids) ---------- */
+  .legend { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 10px 0 4px; }
+  @media (max-width: 560px) { .legend { grid-template-columns: repeat(2, 1fr); } }
+  .chip {
+    display: flex; align-items: center; gap: 8px;
+    background: var(--card); border: 1px solid var(--card-border);
+    border-radius: 10px; padding: 7px 9px; font-size: 13px;
+  }
+  .chip .dot {
+    flex: none; width: 26px; height: 26px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center; color: #fff;
+  }
+  .chip .dot svg { width: 15px; height: 15px; }
+
+  /* ---------- Extra signposts (kids) ---------- */
+  .signposts { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 14px; margin-bottom: 44px; }
+  .signpost { background: var(--card); border: 1px solid var(--card-border); border-radius: 16px; padding: 16px; }
+  .signpost .tag {
+    display: inline-block; font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.06em;
+    text-transform: uppercase; color: var(--forest); background: var(--forest-soft);
+    padding: 2px 8px; border-radius: 999px; margin-bottom: 8px;
+  }
+  .signpost h4 {
+    font-family: var(--font-display); font-size: 16px; margin: 0 0 6px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .signpost h4 svg { width: 20px; height: 20px; color: var(--forest); }
+  .signpost p { margin: 0; font-size: 14px; color: var(--ink-soft); }
+
+  /* ---------- FAQ (kids) ---------- */
+  .faq { margin-bottom: 44px; }
+  details {
+    background: var(--paper-raised); border: 1px solid var(--card-border);
+    border-radius: 12px; padding: 12px 16px; margin-bottom: 10px;
+  }
+  summary {
+    cursor: pointer; font-family: var(--font-display); font-weight: 700; font-size: 15px;
+    list-style: none; display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  }
+  summary::-webkit-details-marker { display: none; }
+  summary::after {
+    content: "+"; font-family: var(--font-mono); font-size: 18px; color: var(--forest);
+    transition: transform .15s ease;
+  }
+  details[open] summary::after { transform: rotate(45deg); }
+  details p { margin: 10px 0 2px; color: var(--ink-soft); font-size: 14.5px; }
+
+  /* ---------- Advanced: sections ---------- */
+  section { margin-bottom: 46px; scroll-margin-top: calc(var(--tabbar-h) + 56px); }
+  .sec-head { border-left: 4px solid var(--forest); padding-left: 14px; margin-bottom: 16px; }
+  .sec-head .eyebrow { color: var(--forest); }
+  .sec-head h2 { font-family: var(--font-display); font-weight: 800; font-size: 22px; margin: 2px 0 6px; text-wrap: balance; }
+  .sec-head p { margin: 0; color: var(--ink-soft); font-size: 14.5px; max-width: 62ch; }
+  section > p { max-width: 68ch; }
+
+  .cards2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+  .card { background: var(--paper-raised); border: 1px solid var(--card-border); border-radius: 14px; padding: 16px 18px; }
+  .card h3 { font-family: var(--font-display); font-size: 16px; margin: 0 0 8px; display: flex; align-items: center; gap: 8px; }
+  .card h3 svg { width: 20px; height: 20px; color: var(--forest); }
+  .card ul { margin: 8px 0 0; padding-left: 20px; }
+  .card li { margin-bottom: 5px; }
+
+  .ctrl-list { border-top: 1px solid var(--card-border); }
+  .ctrl {
+    display: grid; grid-template-columns: minmax(150px, 210px) 1fr;
+    gap: 8px 16px; padding: 12px 0; border-bottom: 1px solid var(--card-border); align-items: start;
+  }
+  @media (max-width: 620px) { .ctrl { grid-template-columns: 1fr; } }
+  .ctrl-label { padding-top: 1px; }
+  .ctrl-desc { font-size: 14.5px; color: var(--ink-soft); }
+  .ctrl-desc strong { color: var(--ink); }
+
+  .dialog {
+    background: var(--card); border: 1px solid var(--card-border);
+    border-radius: 12px; padding: 12px 14px; margin: 10px 0; font-size: 13.5px;
+  }
+  .dialog .d-title { font-family: var(--font-display); font-weight: 700; margin-bottom: 4px; }
+  .dialog .d-body { color: var(--ink-soft); margin-bottom: 8px; font-style: italic; }
+  .dialog .d-btns { display: flex; gap: 8px; }
+
+  .tbl-wrap { overflow-x: auto; border: 1px solid var(--card-border); border-radius: 14px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; min-width: 560px; }
+  thead th {
+    text-align: left; font-family: var(--font-mono); font-size: 11px; letter-spacing: .06em;
+    text-transform: uppercase; color: var(--ink-soft);
+    background: var(--card); padding: 10px 12px; border-bottom: 1px solid var(--card-border);
+  }
+  tbody td { padding: 10px 12px; border-bottom: 1px solid var(--card-border); vertical-align: middle; }
+  tbody tr:last-child td { border-bottom: none; }
+  .swatch { display: inline-flex; align-items: center; gap: 8px; }
+  .swatch .dot {
+    width: 26px; height: 26px; border-radius: 50%; display: flex; align-items: center;
+    justify-content: center; color: #fff; flex: none;
+  }
+  .swatch .dot svg { width: 15px; height: 15px; }
+  td.type-name { font-weight: 700; }
+  td.spoken { color: var(--ink-soft); font-style: italic; }
+
+  .swatchstrip { display: flex; gap: 10px; flex-wrap: wrap; margin: 10px 0; }
+  .swatchstrip .sw {
+    display: flex; flex-direction: column; align-items: center; gap: 6px; font-size: 11.5px;
+    color: var(--ink-soft); width: 66px; text-align: center;
+  }
+  .swatchstrip .sw i { width: 34px; height: 34px; border-radius: 50%; display: block; border: 2px solid var(--paper-raised); box-shadow: 0 0 0 1px var(--card-border); }
+
+  h4.subhead { font-family: var(--font-display); font-size: 15.5px; margin: 22px 0 6px; color: var(--forest); }
+  h4.subhead:first-child { margin-top: 0; }
+
+  /* ---------- Footer (shared) ---------- */
+  footer { text-align: center; padding-top: 20px; border-top: 3px dashed var(--card-border); }
+  footer .stamp {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-family: var(--font-display); font-weight: 800; color: var(--forest); font-size: 17px; margin-bottom: 8px;
+  }
+  footer .stamp svg { width: 22px; height: 22px; }
+  footer p { color: var(--ink-soft); font-size: 14px; max-width: 48ch; margin: 0 auto; }
+</style>
+
+<svg style="display:none" aria-hidden="true">
+  <symbol id="i-compass" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.6"/><polygon points="12,7 14,12 12,17 10,12" fill="currentColor"/></symbol>
+  <symbol id="i-pin" viewBox="0 0 24 24"><path d="M12 21s7-7.2 7-12a7 7 0 1 0-14 0c0 4.8 7 12 7 12z" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="9" r="2.4" fill="currentColor"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><polygon points="7,4 20,12 7,20" fill="currentColor"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><rect x="6" y="5" width="4" height="14" rx="1" fill="currentColor"/><rect x="14" y="5" width="4" height="14" rx="1" fill="currentColor"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2" fill="currentColor"/></symbol>
+  <symbol id="i-skip" viewBox="0 0 24 24"><polygon points="5,4 15,12 5,20" fill="currentColor"/><rect x="17" y="4" width="3" height="16" fill="currentColor"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M4 12a8 8 0 0 1 14-5.3M20 12a8 8 0 0 1-14 5.3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><polyline points="18,3 18.5,7 14.5,6.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><polyline points="6,21 5.5,17 9.5,17.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/><line x1="5" y1="20" x2="19" y2="20" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></symbol>
+  <symbol id="i-arrow-up" viewBox="0 0 24 24"><path d="M12 19V6M6 11l6-6 6 6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-turn-left" viewBox="0 0 24 24"><path d="M18 20V10a4 4 0 0 0-4-4H9" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/><polygon points="11,2 4,6 11,10" fill="currentColor"/></symbol>
+  <symbol id="i-turn-right" viewBox="0 0 24 24"><path d="M6 20V10a4 4 0 0 1 4-4h5" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/><polygon points="13,2 20,6 13,10" fill="currentColor"/></symbol>
+  <symbol id="i-uturn" viewBox="0 0 24 24"><path d="M6 18v-6a5 5 0 0 1 5-5h6M13 4l4 3-4 3" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><polygon points="12,4 21,20 3,20" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><rect x="11" y="10" width="2" height="5" fill="currentColor"/><rect x="11" y="16.5" width="2" height="2" fill="currentColor"/></symbol>
+  <symbol id="i-walk" viewBox="0 0 24 24"><circle cx="13.5" cy="4.5" r="2" fill="currentColor"/><path d="M13 7l-2.2 5 3 2 .7 6.5M11 12.3l-4.2 2M14.3 12.5l4 2.8-2 5.2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-pin-note" viewBox="0 0 24 24"><circle cx="12" cy="7.5" r="4.2" fill="currentColor"/><polygon points="8.6,10.6 15.4,10.6 12,17" fill="currentColor"/><line x1="12" y1="17" x2="8" y2="21.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+  <symbol id="i-flag" viewBox="0 0 24 24"><line x1="6" y1="3" x2="6" y2="21" stroke="currentColor" stroke-width="2"/><path d="M6 4h11l-3 3.5L17 11H6" fill="currentColor"/></symbol>
+  <symbol id="i-finish" viewBox="0 0 24 24"><line x1="6" y1="3" x2="6" y2="21" stroke="currentColor" stroke-width="2"/><path d="M6 4h4v3h4v3h-4v3H6z" fill="currentColor"/></symbol>
+  <symbol id="i-stack" viewBox="0 0 24 24"><circle cx="9" cy="9" r="6" fill="currentColor" opacity=".55"/><circle cx="15" cy="15" r="6" fill="currentColor"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><polyline points="4,13 9,18 20,6" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-list" viewBox="0 0 24 24"><rect x="4" y="6" width="16" height="2.4" rx="1.2" fill="currentColor"/><rect x="4" y="11" width="16" height="2.4" rx="1.2" fill="currentColor"/><rect x="4" y="16" width="16" height="2.4" rx="1.2" fill="currentColor"/></symbol>
+  <symbol id="i-edit" viewBox="0 0 24 24"><path d="M4 20l1-4 11-11 3 3-11 11-4 1z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
+  <symbol id="i-walkrec" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="1.8"/><circle cx="12" cy="12" r="3.4" fill="currentColor"/></symbol>
+  <symbol id="i-auto" viewBox="0 0 24 24"><path d="M12 3l1.6 4.2L18 9l-4.4 1.8L12 15l-1.6-4.2L6 9l4.4-1.8z" fill="currentColor"/><circle cx="19" cy="17" r="2" fill="currentColor"/></symbol>
+</svg>
+
+<nav class="tabbar" aria-label="Choose a guide">
+  <button id="tabbtn-kids" class="tabbtn active" data-tab="kids" role="tab" aria-selected="true">
+    <svg><use href="#i-compass"/></svg>Quick-Start Guide
+  </button>
+  <button id="tabbtn-advanced" class="tabbtn" data-tab="advanced" role="tab" aria-selected="false">
+    <svg><use href="#i-edit"/></svg>Advanced Guide
+  </button>
+</nav>
+
+<div id="page-kids" class="tabpage" role="tabpanel">
+  <div class="doc doc-kids">
+
+    <header class="hero hero-kids">
+      <div class="hero-badge">
+        <svg viewBox="0 0 64 64">
+          <rect width="64" height="64" rx="16" fill="var(--brand)"/>
+          <circle cx="47" cy="17" r="7" fill="#fff"/>
+          <polygon points="6,50 20,30 30,42" fill="#fff" opacity=".5"/>
+          <polygon points="58,50 44,30 34,42" fill="#fff" opacity=".5"/>
+          <polygon points="14,50 32,20 50,50" fill="#fff"/>
+          <polygon points="32,20 50,50 32,50" fill="#c9d0d8"/>
+          <path d="M32 22 L27.5 32.5 L31 35.5 L26.5 46.5" fill="none" stroke="#F2A73B" stroke-width="2.2" stroke-linecap="round" stroke-dasharray="3.2 3.2"/>
+        </svg>
+      </div>
+      <div class="hero-copy">
+        <div class="eyebrow">A Field Guide for New Walkers</div>
+        <h1>APS Trails</h1>
+        <p>Your phone knows the trail even when there's no signal. Here's everything you need to find your way, start to finish.</p>
+      </div>
+    </header>
+
+    <div class="cheatsheet">
+      <div class="cheat-card"><svg><use href="#i-list"/></svg><b>Pick a trail</b></div>
+      <div class="cheat-card"><svg><use href="#i-play"/></svg><b>Start walking</b></div>
+      <div class="cheat-card"><svg><use href="#i-pin"/></svg><b>Follow the cues</b></div>
+      <div class="cheat-card"><svg><use href="#i-flag"/></svg><b>Finish up</b></div>
+    </div>
+
+    <h2 class="section-title">Walking the trail, step by step</h2>
+
+    <div class="trail">
+
+      <div class="stop">
+        <div class="marker" style="background:var(--forest)"><svg><use href="#i-list"/></svg></div>
+        <div class="stop-content">
+          <h3>Open the app</h3>
+          <p>Look for the red mountain icon on your home screen — the one labeled <strong>APS Trails</strong> — and tap it.</p>
+          <div class="tip"><svg><use href="#i-check"/></svg><div>The app already has its trail maps saved on your phone, so it still works with <strong>no internet and no phone signal</strong> — perfect for the woods.</div></div>
+        </div>
+      </div>
+
+      <div class="stop">
+        <div class="marker" style="background:var(--forest)"><span class="num">1</span><svg><use href="#i-list"/></svg></div>
+        <div class="stop-content">
+          <h3>Pick a trail to walk</h3>
+          <p>You'll see a list of saved trails on the home screen. Tap the one you want — it'll open up so you can look at it before you head out.</p>
+          <ul>
+            <li>Check the distance and estimated time so you know what you're in for.</li>
+            <li>Not sure which one? Ask whoever made the trail (like Dad) which one is right for today.</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="stop">
+        <div class="marker" style="background:var(--resume)"><span class="num">2</span><svg><use href="#i-play"/></svg></div>
+        <div class="stop-content">
+          <h3>Start your walk</h3>
+          <p>Once you're ready to go, look for the big <span class="kbd green">green Start button</span> and tap it. Your phone will begin tracking your walk with GPS — you'll see a blue line on the map showing exactly where you are on the trail.</p>
+          <div class="tip"><svg><use href="#i-check"/></svg><div>Keep your phone somewhere with a clear view of the sky (like a pocket, not deep in a backpack) so GPS can find you easily.</div></div>
+        </div>
+      </div>
+
+      <div class="stop">
+        <div class="marker" style="background:var(--sky)"><span class="num">3</span><svg><use href="#i-pin"/></svg></div>
+        <div class="stop-content">
+          <h3>Read your cue cards</h3>
+          <p>As you walk, cards will pop up telling you what to do next — like "turn left" or "watch your step." Each card also shows a number, so you always know which stop you're on.</p>
+          <div class="legend">
+            <div class="chip"><span class="dot" style="background:var(--cue-startfinish)"><svg><use href="#i-flag"/></svg></span>Start</div>
+            <div class="chip"><span class="dot" style="background:var(--cue-startfinish)"><svg><use href="#i-finish"/></svg></span>Finish</div>
+            <div class="chip"><span class="dot" style="background:var(--cue-left)"><svg><use href="#i-turn-left"/></svg></span>Turn left</div>
+            <div class="chip"><span class="dot" style="background:var(--cue-right)"><svg><use href="#i-turn-right"/></svg></span>Turn right</div>
+            <div class="chip"><span class="dot" style="background:var(--cue-straight)"><svg><use href="#i-arrow-up"/></svg></span>Stay straight</div>
+            <div class="chip"><span class="dot" style="background:var(--cue-uturn)"><svg><use href="#i-uturn"/></svg></span>U-turn</div>
+            <div class="chip"><span class="dot" style="background:var(--cue-caution)"><svg><use href="#i-alert"/></svg></span>Caution</div>
+            <div class="chip"><span class="dot" style="background:var(--cue-bridge)"><svg><use href="#i-walk"/></svg></span>Bridge</div>
+            <div class="chip"><span class="dot" style="background:var(--cue-note)"><svg><use href="#i-pin-note"/></svg></span>Note</div>
+            <div class="chip"><span class="dot" style="background:var(--cue-stacked)"><svg><use href="#i-stack"/></svg></span>Multiple cues here</div>
+            <div class="chip"><span class="dot" style="background:var(--cue-done)"><svg><use href="#i-check"/></svg></span>Already done</div>
+          </div>
+          <p style="margin-top:10px">Once you've passed a cue, its marker turns <strong>grey</strong> on the map — that's your at-a-glance way to see what's done and what's still ahead.</p>
+        </div>
+      </div>
+
+      <div class="stop">
+        <div class="marker" style="background:var(--amber)"><span class="num">4</span><svg><use href="#i-pause"/></svg></div>
+        <div class="stop-content">
+          <h3>Pause &amp; Resume</h3>
+          <p>Need a water break, or to tie a shoe? Tap <span class="kbd amber">Pause</span> at the top of the screen. The clock stops, the map stops moving, and everything waits for you.</p>
+          <p>Ready to keep going? Tap <span class="kbd green">Resume</span> in that same spot — it'll be green while you're paused.</p>
+          <div class="tip"><svg><use href="#i-check"/></svg><div>You can also pause or resume from the notification at the top of your phone, without even opening the app.</div></div>
+        </div>
+      </div>
+
+      <div class="stop">
+        <div class="marker" style="background:var(--uturn)"><span class="num">5</span><svg><use href="#i-skip"/></svg></div>
+        <div class="stop-content">
+          <h3>Skip a cue (if you need to)</h3>
+          <p>Sometimes GPS can be a little off. If a cue card seems out of place, look for the small <span class="kbd grey">Skip ⏭</span> button next to it and tap it — it moves you on to the next one.</p>
+          <div class="warn"><svg><use href="#i-alert"/></svg><div>Only skip a cue if you're sure you've actually passed that spot. When in doubt, ask a grown-up.</div></div>
+        </div>
+      </div>
+
+      <div class="stop">
+        <div class="marker" style="background:var(--brand)"><span class="num">6</span><svg><use href="#i-refresh"/></svg></div>
+        <div class="stop-content">
+          <h3>If the app closes by itself</h3>
+          <p>Don't worry — your walk isn't lost! Just reopen APS Trails. It will ask: <em>"Resume unfinished walk?"</em></p>
+          <ul>
+            <li>Tap <span class="kbd green">Resume</span> to pick up right where you left off — same spot, same time, same cues.</li>
+            <li>Tap <span class="kbd grey">Discard</span> only if you actually want to start that walk over.</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="stop">
+        <div class="marker" style="background:var(--brand)"><span class="num">7</span><svg><use href="#i-stop"/></svg></div>
+        <div class="stop-content">
+          <h3>Finish your walk</h3>
+          <p>Reached the end? Tap the red <span class="kbd red">Stop</span> button. Your walk gets saved automatically — distance, time, and all — so you can look back on it later.</p>
+        </div>
+      </div>
+
+    </div>
+
+    <h2 class="section-title">A few extra trail signs</h2>
+    <div class="signposts">
+      <div class="signpost">
+        <span class="tag">Grown-up feature</span>
+        <h4><svg><use href="#i-pin"/></svg>Making a trail</h4>
+        <p>Someone can draw a brand-new trail and add their own cue cards, or even let the app auto-generate a route in an area. That's usually a job for whoever manages the trails, like Dad — there's a full <a href="#" class="tab-switch" data-target="advanced">advanced guide</a> for that.</p>
+      </div>
+      <div class="signpost">
+        <span class="tag">Good to know</span>
+        <h4><svg><use href="#i-refresh"/></svg>Reverse direction</h4>
+        <p>Any saved trail can be flipped to walk it backwards — handy for out-and-back routes. Look for <strong>Reverse direction</strong> in a trail's menu.</p>
+      </div>
+      <div class="signpost">
+        <span class="tag">Housekeeping</span>
+        <h4><svg><use href="#i-download"/></svg>Getting updates</h4>
+        <p>Every so often the app will offer a new version. Tap to download, then tap <strong>Install</strong> and <strong>Open</strong> when Android asks — that's it.</p>
+      </div>
+    </div>
+
+    <h2 class="section-title">Quick questions</h2>
+    <div class="faq">
+      <details>
+        <summary>Do I need internet or phone signal to use it? <span></span></summary>
+        <p>Nope! Once a trail is saved on your phone, the map and directions all work offline. That's the whole point — it's built for places without signal.</p>
+      </details>
+      <details>
+        <summary>What if I wander off the trail path?</summary>
+        <p>That's okay — the app keeps tracking you with GPS no matter where you are. Just head back toward the line on the map, and the cue cards will pick back up.</p>
+      </details>
+      <details>
+        <summary>Will pausing mess up my walk time?</summary>
+        <p>No — paused time doesn't count. Your total walking time only adds up while you're actually moving, not while you're taking a break.</p>
+      </details>
+      <details>
+        <summary>What do the grey cue markers mean?</summary>
+        <p>Grey means "already done" — either you walked past it, or you skipped it on purpose. It's just there to help you keep track of where you are.</p>
+      </details>
+      <details>
+        <summary>My phone battery is low — should I worry?</summary>
+        <p>GPS tracking does use some battery. If you're heading out for a long walk, it's smart to start with a full charge or bring a portable charger.</p>
+      </details>
+    </div>
+
+    <footer>
+      <div class="stamp"><svg><use href="#i-compass"/></svg>Happy trails!</div>
+      <p>Testing this guide for the first time? If any step was confusing or something didn't work the way this manual said, that's exactly what we want to hear about.</p>
+    </footer>
+
+  </div>
+</div>
+
+<div id="page-advanced" class="tabpage" role="tabpanel" hidden>
+  <div class="doc doc-advanced">
+
+    <header class="hero hero-adv">
+      <div class="hero-badge">
+        <svg viewBox="0 0 64 64">
+          <rect width="64" height="64" rx="16" fill="var(--brand)"/>
+          <circle cx="47" cy="17" r="7" fill="#fff"/>
+          <polygon points="6,50 20,30 30,42" fill="#fff" opacity=".5"/>
+          <polygon points="58,50 44,30 34,42" fill="#fff" opacity=".5"/>
+          <polygon points="14,50 32,20 50,50" fill="#fff"/>
+          <polygon points="32,20 50,50 32,50" fill="#c9d0d8"/>
+          <path d="M32 22 L27.5 32.5 L31 35.5 L26.5 46.5" fill="none" stroke="#F2A73B" stroke-width="2.2" stroke-linecap="round" stroke-dasharray="3.2 3.2"/>
+        </svg>
+      </div>
+      <div class="hero-copy">
+        <div class="eyebrow">Trail Author's Manual</div>
+        <h1>APS Trails — Advanced Guide</h1>
+        <p>Everything for building routes, wiring up cues, and configuring the app for whoever's walking them.</p>
+      </div>
+    </header>
+
+    <div class="companion">
+      <svg><use href="#i-compass"/></svg>
+      <div>This is the deep-dive reference for whoever manages trails. If you're setting someone up to just walk a finished trail, send them to the <a href="#" class="tab-switch" data-target="kids">kid-friendly quick-start guide</a> instead — it covers Start / Pause / Skip / Finish in about two minutes.</div>
+    </div>
+
+    <nav class="quicknav" aria-label="Jump to section">
+      <a href="#start">Starting a trail</a>
+      <a href="#modebar">Mode bar</a>
+      <a href="#drawing">Drawing a path</a>
+      <a href="#cues">Placing cues</a>
+      <a href="#cue-editor">Cue editor</a>
+      <a href="#generate">Auto-generate</a>
+      <a href="#save">Save &amp; clear</a>
+      <a href="#manage">Trail list</a>
+      <a href="#colors">Trail colours</a>
+      <a href="#safety">Safety &amp; battery</a>
+      <a href="#backup">Backup &amp; restore</a>
+      <a href="#areas">Map areas</a>
+      <a href="#updates">Updates</a>
+      <a href="#units">Units &amp; history</a>
+      <a href="#tracking">Walk history &amp; tracker details</a>
+    </nav>
+
+    <section id="start">
+      <div class="sec-head">
+        <div class="eyebrow">Getting a trail onto the phone</div>
+        <h2>Two ways to start a trail</h2>
+        <p>From the home screen, tap the <span class="kbd green">New trail</span> button and choose one of two starting points.</p>
+      </div>
+      <div class="cards2">
+        <div class="card">
+          <h3><svg><use href="#i-edit"/></svg>Draw on map</h3>
+          <p>"Tap out the path and cues by hand" — build a route from your armchair, or on-site referencing the map.</p>
+          <ul>
+            <li>Full manual control over every point and cue</li>
+            <li>Can optionally follow real mapped trails between taps</li>
+            <li>Best when you already know the route you want</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3><svg><use href="#i-walkrec"/></svg>Record by walking</h3>
+          <p>"Walk the trail now — GPS traces the path and drops cues" — go for the actual walk and let the phone do the drawing.</p>
+          <ul>
+            <li>Recording starts automatically once GPS locks on — there's no separate Start button, just a red <span class="kbd red">Stop</span> when you're done</li>
+            <li>Keeps the screen awake and tracks in the background the whole walk</li>
+            <li>On Stop, your GPS trace is automatically cleaned up and snapped onto the nearest mapped trail, then handed to you in the editor to name, check, and save</li>
+          </ul>
+        </div>
+      </div>
+      <p style="margin-top:14px">Either path lands you in the same trail editor afterward, so cues, colours, and saving all work identically from here regardless of which way you started.</p>
+    </section>
+
+    <section id="modebar">
+      <div class="sec-head">
+        <div class="eyebrow">The trail editor</div>
+        <h2>The mode bar</h2>
+        <p>A card pinned to the bottom of the map controls whether you're drawing path or placing cues.</p>
+      </div>
+      <div class="ctrl-list">
+        <div class="ctrl">
+          <div class="ctrl-label"><span class="kbd blue">Draw path</span> / <span class="kbd blue">Add cue</span></div>
+          <div class="ctrl-desc">A two-way switch in the middle of the bar. Everything you tap on the map behaves differently depending which side is selected — see <a href="#drawing">Drawing a path</a> and <a href="#cues">Placing cues</a>.</div>
+        </div>
+        <div class="ctrl">
+          <div class="ctrl-label"><svg style="width:16px;height:16px;vertical-align:-2px"><use href="#i-auto"/></svg> <strong>Auto-generate icon</strong></div>
+          <div class="ctrl-desc">Leading icon on the bar — opens the generator sheet. See <a href="#generate">Auto-generating a trail</a>.</div>
+        </div>
+        <div class="ctrl">
+          <div class="ctrl-label">Show more / Show less</div>
+          <div class="ctrl-desc">Expands the bar to reveal an extra toggle (<strong>Follow trails</strong> in Draw mode, <strong>Free placement</strong> in Add cue mode) plus a live hint line — or collapses back down to just the mode switch and the running trail length.</div>
+        </div>
+        <div class="ctrl">
+          <div class="ctrl-label">✕ Hide</div>
+          <div class="ctrl-desc">Shrinks the whole bar down to a small round button in the corner, out of the way when you need to see the full map. Tap that button again to bring it back exactly as you left it.</div>
+        </div>
+        <div class="ctrl">
+          <div class="ctrl-label">Trail length</div>
+          <div class="ctrl-desc">Always visible at the bottom of the bar, updating live as you add points.</div>
+        </div>
+      </div>
+    </section>
+
+    <section id="drawing">
+      <div class="sec-head">
+        <div class="eyebrow">Draw path mode</div>
+        <h2>Drawing a path</h2>
+        <p>With the mode bar set to <span class="kbd blue">Draw path</span>:</p>
+      </div>
+      <div class="ctrl-list">
+        <div class="ctrl">
+          <div class="ctrl-label">Tap the map</div>
+          <div class="ctrl-desc">Adds a point. If <strong>Follow trails</strong> is on, the segment bends along real mapped trail geometry between this point and the last one; off, it's a straight line between them.</div>
+        </div>
+        <div class="ctrl">
+          <div class="ctrl-label">Tap an existing point</div>
+          <div class="ctrl-desc">Routes the path <em>through</em> it — handy for retracing part of a loop.</div>
+        </div>
+        <div class="ctrl">
+          <div class="ctrl-label">Long-press a point</div>
+          <div class="ctrl-desc">Opens a sheet: <strong>Move this point</strong>, or <strong>Delete this point</strong> (confirms "Delete this point? — Removes the point and re-joins the trail.").</div>
+        </div>
+        <div class="ctrl">
+          <div class="ctrl-label">Long-press the line</div>
+          <div class="ctrl-desc">Inserts a brand-new point wherever you pressed, splitting that stretch in two.</div>
+        </div>
+        <div class="ctrl">
+          <div class="ctrl-label">Undo icon (app bar)</div>
+          <div class="ctrl-desc">Removes the last point you added.</div>
+        </div>
+        <div class="ctrl">
+          <div class="ctrl-label"><span class="kbd grey">Mark here</span></div>
+          <div class="ctrl-desc">Floating button that drops a point (or opens the cue editor, in Add cue mode) at your own live GPS position — useful when authoring on-site.</div>
+        </div>
+        <div class="ctrl">
+          <div class="ctrl-label">Compass / target FABs</div>
+          <div class="ctrl-desc">Small buttons to reset the map to face north and flat, or to re-centre on your current location.</div>
+        </div>
+      </div>
+    </section>
+
+    <section id="cues">
+      <div class="sec-head">
+        <div class="eyebrow">Add cue mode</div>
+        <h2>Placing and editing cues</h2>
+        <p>Switch the mode bar to <span class="kbd blue">Add cue</span> to work with cue markers instead of the path.</p>
+      </div>
+      <div class="ctrl-list">
+        <div class="ctrl">
+          <div class="ctrl-label">Tap empty map</div>
+          <div class="ctrl-desc">Opens the <a href="#cue-editor">cue editor</a> at that spot, ready to create a new cue.</div>
+        </div>
+        <div class="ctrl">
+          <div class="ctrl-label">Tap an existing cue</div>
+          <div class="ctrl-desc">Reopens the same editor pre-filled, to change or delete it.</div>
+        </div>
+        <div class="ctrl">
+          <div class="ctrl-label">Tap a stacked cue</div>
+          <div class="ctrl-desc">When two or more cues sit within a metre of each other, tapping shows "<strong>{N} cues stacked here</strong>" — a list to pick which one to edit, plus an option to <strong>Add another cue at this same spot</strong>.</div>
+        </div>
+        <div class="ctrl">
+          <div class="ctrl-label">Long-press a cue</div>
+          <div class="ctrl-desc">Starts moving it — an amber banner reads 'Moving "{label}" — tap the map to place it'. The new spot snaps onto the drawn path by default, or drops exactly where you tap if <strong>Free placement</strong> is switched on.</div>
+        </div>
+      </div>
+    </section>
+
+    <section id="cue-editor">
+      <div class="sec-head">
+        <div class="eyebrow">The cue editor sheet</div>
+        <h2>Setting up a single cue</h2>
+        <p>Opens as <strong>New cue</strong> or <strong>Edit cue</strong> depending on context, with these fields top to bottom:</p>
+      </div>
+      <div class="ctrl-list">
+        <div class="ctrl">
+          <div class="ctrl-label">Position in list</div>
+          <div class="ctrl-desc">New cues only. 1 = first; defaults to the end of the list. Type a smaller number to insert it earlier — everything after shifts up automatically.</div>
+        </div>
+        <div class="ctrl">
+          <div class="ctrl-label">Cue type</div>
+          <div class="ctrl-desc">A row of type chips — see the full table below. Picking a type auto-fills the map label and spoken text with sensible defaults (only if you haven't already typed your own).</div>
+        </div>
+        <div class="ctrl">
+          <div class="ctrl-label">Map label (short)</div>
+          <div class="ctrl-desc">The short text shown on the marker/card, e.g. "Turn left".</div>
+        </div>
+        <div class="ctrl">
+          <div class="ctrl-label">Spoken direction</div>
+          <div class="ctrl-desc">What gets read aloud when the walker reaches this cue.</div>
+        </div>
+        <div class="ctrl">
+          <div class="ctrl-label">Trigger distance</div>
+          <div class="ctrl-desc">A slider, 10–60 m (default 25 m) — how close the walker needs to be for the cue to fire.</div>
+        </div>
+      </div>
+
+      <h4 class="subhead">The 9 cue types</h4>
+      <div class="tbl-wrap">
+        <table>
+          <thead><tr><th>Marker</th><th>Type</th><th>Default spoken text</th></tr></thead>
+          <tbody>
+            <tr><td><span class="swatch"><span class="dot" style="background:var(--cue-startfinish)"><svg><use href="#i-flag"/></svg></span>Start</span></td><td class="type-name">Start</td><td class="spoken">"You are at the start of the trail"</td></tr>
+            <tr><td><span class="swatch"><span class="dot" style="background:var(--cue-startfinish)"><svg><use href="#i-finish"/></svg></span>Finish</span></td><td class="type-name">Finish</td><td class="spoken">"You have arrived. This is the end of the trail"</td></tr>
+            <tr><td><span class="swatch"><span class="dot" style="background:var(--cue-left)"><svg><use href="#i-turn-left"/></svg></span>Turn left</span></td><td class="type-name">Turn left</td><td class="spoken">"Turn left here"</td></tr>
+            <tr><td><span class="swatch"><span class="dot" style="background:var(--cue-right)"><svg><use href="#i-turn-right"/></svg></span>Turn right</span></td><td class="type-name">Turn right</td><td class="spoken">"Turn right here"</td></tr>
+            <tr><td><span class="swatch"><span class="dot" style="background:var(--cue-straight)"><svg><use href="#i-arrow-up"/></svg></span>Stay straight</span></td><td class="type-name">Stay straight</td><td class="spoken">"Stay straight"</td></tr>
+            <tr><td><span class="swatch"><span class="dot" style="background:var(--cue-uturn)"><svg><use href="#i-uturn"/></svg></span>U-turn</span></td><td class="type-name">U-turn</td><td class="spoken">"Turn around and head back the way you came"</td></tr>
+            <tr><td><span class="swatch"><span class="dot" style="background:var(--cue-bridge)"><svg><use href="#i-walk"/></svg></span>Bridge</span></td><td class="type-name">Bridge</td><td class="spoken">"Cross the bridge"</td></tr>
+            <tr><td><span class="swatch"><span class="dot" style="background:var(--cue-caution)"><svg><use href="#i-alert"/></svg></span>Caution</span></td><td class="type-name">Caution</td><td class="spoken">"Careful here"</td></tr>
+            <tr><td><span class="swatch"><span class="dot" style="background:var(--cue-note)"><svg><use href="#i-pin-note"/></svg></span>Note</span></td><td class="type-name">Note</td><td class="spoken">(blank — free text)</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p style="margin-top:14px">Buttons at the bottom: <span class="kbd grey">Add another cue at this same spot</span> (editing only), <span class="kbd red">Delete</span> (editing only), <span class="kbd grey">Cancel</span>, and <span class="kbd green">Save cue</span> — the same label whether you're creating or editing.</p>
+      <div class="tip"><svg><use href="#i-check"/></svg><div><strong>Reversing a trail</strong> automatically swaps left↔right and start↔finish cues so directions still read correctly walking the other way. Straight, U-turn, bridge, caution and note cues are left untouched since they mean the same thing either direction.</div></div>
+    </section>
+
+    <section id="generate">
+      <div class="sec-head">
+        <div class="eyebrow">Shortcut for new routes</div>
+        <h2>Auto-generating a trail</h2>
+        <p>Tap the auto-generate icon in the mode bar to build a route from whatever trails are visible on screen right now — pan/zoom to the area first.</p>
+      </div>
+      <div class="ctrl-list">
+        <div class="ctrl">
+          <div class="ctrl-label">Length</div>
+          <div class="ctrl-desc">Slider from 500 m to 15,000 m, in ~250 m steps (default 4,000 m), with <strong>Short / Medium / Long</strong> reference labels below it.</div>
+        </div>
+        <div class="ctrl">
+          <div class="ctrl-label"><span class="kbd blue">Loop</span> / <span class="kbd blue">There &amp; back</span></div>
+          <div class="ctrl-desc">Shape of the generated route. Loop is the default.</div>
+        </div>
+        <div class="ctrl">
+          <div class="ctrl-label">Add turn directions</div>
+          <div class="ctrl-desc">Checkbox, on by default — automatically drops spoken "turn left / right" cues along the generated route.</div>
+        </div>
+        <div class="ctrl">
+          <div class="ctrl-label"><span class="kbd green">Generate</span></div>
+          <div class="ctrl-desc">Builds the route. If nothing's found nearby, it'll say so rather than guess — zoom into an area with mapped trails and try again.</div>
+        </div>
+      </div>
+      <div class="warn"><svg><use href="#i-alert"/></svg><div>Generating replaces the trail's current path (and cues, if "Add turn directions" is checked) — you'll be asked to confirm first if one already exists.</div></div>
+    </section>
+
+    <section id="save">
+      <div class="sec-head">
+        <div class="eyebrow">Wrapping up an edit</div>
+        <h2>Saving, undo &amp; clearing</h2>
+      </div>
+      <div class="ctrl-list">
+        <div class="ctrl">
+          <div class="ctrl-label">Save icon (app bar)</div>
+          <div class="ctrl-desc">Saves the trail. If it's still unnamed, you're prompted for a name first.</div>
+        </div>
+        <div class="ctrl">
+          <div class="ctrl-label">Leaving with unsaved changes</div>
+          <div class="ctrl-desc">Prompts <span class="kbd grey">Keep editing</span> / <span class="kbd red">Discard</span> rather than losing work silently.</div>
+        </div>
+        <div class="ctrl">
+          <div class="ctrl-label">Cue order icon</div>
+          <div class="ctrl-desc">Opens a dedicated list screen for reordering cues by drag-and-drop.</div>
+        </div>
+        <div class="ctrl">
+          <div class="ctrl-label">Overflow menu → Suggest turn cues</div>
+          <div class="ctrl-desc">Auto-adds turn cues to an already-drawn path (the same logic auto-generate uses) — asks first if cues already exist.</div>
+        </div>
+        <div class="ctrl">
+          <div class="ctrl-label">Overflow menu → Clear path / Clear all cues / Clear everything</div>
+          <div class="ctrl-desc">Each confirms before wiping — useful for starting a redraw without deleting and recreating the whole trail.</div>
+        </div>
+      </div>
+    </section>
+
+    <section id="manage">
+      <div class="sec-head">
+        <div class="eyebrow">Home screen</div>
+        <h2>Managing trails from the list</h2>
+        <p>Tap a trail's row to go walk it. Tap its <strong>⋮</strong> menu for everything else:</p>
+      </div>
+      <div class="ctrl-list">
+        <div class="ctrl"><div class="ctrl-label">Edit</div><div class="ctrl-desc">Reopens it in the trail editor.</div></div>
+        <div class="ctrl"><div class="ctrl-label">Progress</div><div class="ctrl-desc">Only shown once it's been walked at least once — opens this trail's own history, see <a href="#tracking">Walk history &amp; tracker details</a>.</div></div>
+        <div class="ctrl">
+          <div class="ctrl-label">Reverse direction</div>
+          <div class="ctrl-desc">Flips the walking direction in place — same trail, path and cue order reversed, left/right and start/finish swapped to match.</div>
+        </div>
+        <div class="ctrl"><div class="ctrl-label">Share / send</div><div class="ctrl-desc">Exports the trail as a file another APS Trails install can open and import directly.</div></div>
+        <div class="ctrl"><div class="ctrl-label">Delete</div><div class="ctrl-desc">Confirms first, then removes it for good.</div></div>
+      </div>
+      <div class="dialog">
+        <div class="d-title">Reverse "{name}"?</div>
+        <div class="d-body">Flips the walking direction — turn-by-turn directions and the start/finish will swap to match.</div>
+        <div class="d-btns"><span class="kbd grey">Cancel</span><span class="kbd red">Reverse</span></div>
+      </div>
+      <p>The <span class="kbd green">New trail</span> button offers the same two starting points covered in <a href="#start">Starting a trail</a>.</p>
+    </section>
+
+    <section id="colors">
+      <div class="sec-head">
+        <div class="eyebrow">Two different colour controls — don't mix them up</div>
+        <h2>Trail colours</h2>
+      </div>
+      <h4 class="subhead">This trail's colour (in the editor)</h4>
+      <p>The colour-swatch icon in the trail editor's app bar sets the colour of <em>the trail you're actively drawing or editing</em> — it always draws on top of everything else, in its own colour, so it's never ambiguous which one you're working on.</p>
+      <h4 class="subhead">Map trail lines (in Safety &amp; battery settings)</h4>
+      <p>A separate, app-wide setting controls the colour and pattern of every <em>other</em> mapped trail shown in the background — not the one you're authoring or following. Pick whichever is easiest to tell apart when several trails run close together.</p>
+      <div class="swatchstrip">
+        <div class="sw"><i style="background:#3F51B5"></i>Indigo (default)</div>
+        <div class="sw"><i style="background:#00695C"></i>Deep teal</div>
+        <div class="sw"><i style="background:#B5451F"></i>Red-brown</div>
+        <div class="sw"><i style="background:#4E342E"></i>Dark brown</div>
+        <div class="sw"><i style="background:#212121"></i>Near-black</div>
+        <div class="sw"><i style="background:#6A1B9A"></i>Purple</div>
+      </div>
+      <p><span class="kbd grey">Dashed line</span> toggle — off (solid) by default; switch on for a dashed background trail line instead.</p>
+    </section>
+
+    <section id="safety">
+      <div class="sec-head">
+        <div class="eyebrow">Home menu → Safety &amp; battery settings</div>
+        <h2>Safety &amp; battery settings</h2>
+        <p>If a walker stops moving for a while, this nudges them on-screen and out loud, then — if they don't respond — texts an emergency contact their last known location. Cell signal is required to send; it's a helpful nudge, not a substitute for calling for help.</p>
+      </div>
+      <div class="ctrl-list">
+        <div class="ctrl"><div class="ctrl-label">Enable safety alert</div><div class="ctrl-desc">Off by default. Turning it on will request SMS permission.</div></div>
+        <div class="ctrl"><div class="ctrl-label">Send emergency SMS</div><div class="ctrl-desc">On by default. Switch off to keep this a reminder-only nudge that never texts anyone — it just keeps repeating until acknowledged or the walker moves.</div></div>
+        <div class="ctrl"><div class="ctrl-label">Emergency contact phone number</div><div class="ctrl-desc">Saved as you type.</div></div>
+        <div class="ctrl"><div class="ctrl-label">Nudge after being still for</div><div class="ctrl-desc">2–60 minutes, default 8 — how long before the first nudge.</div></div>
+        <div class="ctrl"><div class="ctrl-label">Then send the alert after another</div><div class="ctrl-desc">Default 8 more minutes before the SMS actually goes out (or the reminder repeats, if SMS is off).</div></div>
+        <div class="ctrl"><div class="ctrl-label"><span class="kbd grey">Send test message</span></div><div class="ctrl-desc">Sends a real test SMS to the configured number, so you can confirm it actually works before relying on it.</div></div>
+        <div class="ctrl"><div class="ctrl-label">Show stillness debug overlay</div><div class="ctrl-desc">Testing only — overlays live phase/timing/GPS-accuracy info on the walk screen.</div></div>
+      </div>
+      <h4 class="subhead">What actually happens on the phone</h4>
+      <p>An ongoing notification appears with an <strong>"I'm OK"</strong> action (can't be swiped away), the phone vibrates, and it speaks aloud. If it escalates, the on-screen card turns red while the SMS sends, then green once it's confirmed sent. Tapping <strong>I'm OK</strong> — on the notification or the in-app card — cancels everything and resets.</p>
+      <h4 class="subhead">Battery settings</h4>
+      <p>Background tracking and the safety alert both need Android to <em>not</em> restrict this app's battery use, or they can stop working with the screen off. This section shows whether the app is currently unrestricted, with a one-tap <span class="kbd grey">Fix</span> if not.</p>
+      <div class="tip"><svg><use href="#i-check"/></svg><div>Samsung phones keep a separate power-saving list. Check <strong>Settings → Battery → Background usage limits</strong> (or <strong>Device care → Battery</strong>) and make sure APS Trails isn't in "Sleeping apps" or "Deep sleeping apps".</div></div>
+    </section>
+
+    <section id="backup">
+      <div class="sec-head">
+        <div class="eyebrow">Home menu</div>
+        <h2>Backing up, restoring &amp; importing</h2>
+      </div>
+      <div class="ctrl-list">
+        <div class="ctrl"><div class="ctrl-label">Back up my data</div><div class="ctrl-desc">Creates a single backup file covering every trail and all walk history, ready to share/save wherever you like (email, Drive, a USB cable, etc.).</div></div>
+        <div class="ctrl"><div class="ctrl-label">Restore from a backup</div><div class="ctrl-desc">Open the saved <span class="kbd grey">.tgbackup</span> file from your Files app, Drive, or an email, and choose APS Trails to open it with — it merges everything back in without deleting anything already on the phone. Duplicates are automatically skipped.</div></div>
+      </div>
+      <p>The app also recognizes a few other files opened with it directly: a shared trail file from another install (imports straight in), or a GPX / Runkeeper <span class="kbd grey">cardioActivities.csv</span> export (merged into walk history).</p>
+    </section>
+
+    <section id="areas">
+      <div class="sec-head">
+        <div class="eyebrow">Toolbar icon</div>
+        <h2>Offline map areas</h2>
+        <p>Add a new area for anywhere in the world — it uses the internet once to download, then works fully offline from then on, same as the rest of the app.</p>
+      </div>
+      <p><span class="kbd green">Download new area</span> to add one; each downloaded area lists with its own delete option (removing the map data only — any trails you made in it stay saved).</p>
+    </section>
+
+    <section id="updates">
+      <div class="sec-head">
+        <div class="eyebrow">Home menu → Check for updates</div>
+        <h2>Keeping the app updated</h2>
+        <p>The app checks quietly every time it opens, and downloads automatically over Wi‑Fi — but per its own design, it never installs anything without a tap from you.</p>
+      </div>
+      <div class="ctrl-list">
+        <div class="ctrl"><div class="ctrl-label">Home screen banner</div><div class="ctrl-desc">Appears once something's available/downloading/ready, e.g. "Update available — tap to download". Tap it to open the full Update screen.</div></div>
+        <div class="ctrl"><div class="ctrl-label"><span class="kbd green">Download update</span></div><div class="ctrl-desc">Requires Wi‑Fi — downloads are deliberately never done over mobile data.</div></div>
+        <div class="ctrl"><div class="ctrl-label"><span class="kbd grey">Allow installs</span></div><div class="ctrl-desc">Only shown the first time — deep-links to the Android permission screen for installing this app's own updates.</div></div>
+        <div class="ctrl"><div class="ctrl-label"><span class="kbd green">Install update</span></div><div class="ctrl-desc">Hands the file to Android's own installer. Android will always ask you to confirm the install itself — that final tap is normal and can't be skipped.</div></div>
+      </div>
+    </section>
+
+    <section id="units">
+      <div class="sec-head">
+        <div class="eyebrow">Home app bar</div>
+        <h2>Units &amp; history</h2>
+      </div>
+      <div class="ctrl-list">
+        <div class="ctrl"><div class="ctrl-label"><span class="kbd grey">km</span> / <span class="kbd grey">mi</span></div><div class="ctrl-desc">One tap switches every distance shown in the app between metric and imperial.</div></div>
+        <div class="ctrl"><div class="ctrl-label">History icon</div><div class="ctrl-desc">Opens overall walk history across every trail — see <a href="#tracking">Walk history &amp; tracker details</a>.</div></div>
+        <div class="ctrl"><div class="ctrl-label">Map areas icon</div><div class="ctrl-desc">Opens the offline-area manager — see <a href="#areas">Map areas</a>.</div></div>
+      </div>
+    </section>
+
+    <section id="tracking">
+      <div class="sec-head">
+        <div class="eyebrow">History icon (home) · Progress (per-trail menu)</div>
+        <h2>Walk history &amp; tracker details</h2>
+        <p>Every walk is saved automatically, and there are three linked places to review it — overall, per-trail, and per-walk.</p>
+      </div>
+
+      <h4 class="subhead">Overall History screen</h4>
+      <div class="ctrl-list">
+        <div class="ctrl"><div class="ctrl-label">All time header</div><div class="ctrl-desc">Total walks, total distance, and total elevation gained across every trail ever walked.</div></div>
+        <div class="ctrl"><div class="ctrl-label">Last 7 days</div><div class="ctrl-desc">Rolling weekly walk count and distance, right below the all-time header.</div></div>
+        <div class="ctrl"><div class="ctrl-label">Calories use weight</div><div class="ctrl-desc">Tap this line to set body weight (kg or lb, matching your units setting) — used only to estimate calories burned; nothing else in the app depends on it.</div></div>
+        <div class="ctrl"><div class="ctrl-label">Walk list</div><div class="ctrl-desc">Every walk ever recorded, newest first — trail name, date, distance, time, pace, and elevation gain at a glance. Tap one to open its full detail.</div></div>
+        <div class="ctrl"><div class="ctrl-label">Trends &amp; records icon</div><div class="ctrl-desc">Top-right of the History screen — opens longer-term trend charts and personal records across all trails.</div></div>
+      </div>
+
+      <h4 class="subhead">Per-trail Progress screen</h4>
+      <p>Opened from a trail's <strong>⋮ → Progress</strong> menu item — only every walk <em>on that one trail</em>, so you can see whether a specific route is getting easier over time.</p>
+      <div class="ctrl-list">
+        <div class="ctrl"><div class="ctrl-label">Best pace / best time</div><div class="ctrl-desc">Your fastest walk on this trail, marked with a 🏆 trophy icon further down in the list.</div></div>
+        <div class="ctrl"><div class="ctrl-label">Trend note</div><div class="ctrl-desc">Once there are 2+ walks: "X% faster/slower than your first walk here" — a plain-language read on whether you're improving on this specific route.</div></div>
+        <div class="ctrl"><div class="ctrl-label">Time per walk chart</div><div class="ctrl-desc">A bar per walk, shortest bar = fastest — an at-a-glance shape of your history on this trail.</div></div>
+        <div class="ctrl"><div class="ctrl-label">Every walk</div><div class="ctrl-desc">Full list for this trail only, newest first, each showing distance/time/pace. Tap any entry for its full detail.</div></div>
+      </div>
+
+      <h4 class="subhead">Single-walk detail</h4>
+      <p>Opened by tapping any walk from either screen above (also the summary screen shown right after finishing a walk).</p>
+      <div class="ctrl-list">
+        <div class="ctrl"><div class="ctrl-label">Stat grid</div><div class="ctrl-desc">Distance, time, average pace, average speed, elevation gained, estimated calories, moving time, and moving pace (moving time/pace exclude long standing-still stretches, e.g. a paused break).</div></div>
+        <div class="ctrl"><div class="ctrl-label">Route map</div><div class="ctrl-desc">The actual path walked, drawn on the map from the recorded GPS track.</div></div>
+        <div class="ctrl"><div class="ctrl-label">Your progress on this trail</div><div class="ctrl-desc">Jumps straight to that trail's Progress screen above.</div></div>
+        <div class="ctrl"><div class="ctrl-label">Elevation &amp; pace charts</div><div class="ctrl-desc">Two graphs plotted against distance along the walk — elevation profile (lightly smoothed) and pace — shown whenever there's enough GPS track data.</div></div>
+        <div class="ctrl"><div class="ctrl-label">Splits</div><div class="ctrl-desc">Time for each completed km/mile (matching your units setting), plus any trailing partial distance.</div></div>
+        <div class="ctrl"><div class="ctrl-label"><span class="kbd red">Delete</span></div><div class="ctrl-desc">Top-right icon (not shown on the just-finished summary screen) — confirms "Delete this walk? Removes it from your history. Trail totals stay." Only removes this one walk record; the trail itself is untouched.</div></div>
+      </div>
+      <div class="tip"><svg><use href="#i-check"/></svg><div>Deleting a trail (from the home list) does not delete its walk history — those records stay in the overall History screen, just no longer linked to a "Progress" shortcut from a trail row that no longer exists.</div></div>
+    </section>
+
+    <footer>
+      <div class="stamp"><svg><use href="#i-compass"/></svg>That's the whole toolbox.</div>
+      <p>Everything above matches the app's actual on-screen wording, so if a label or button doesn't line up with what you see, that's worth flagging — the app may have moved on since this was written.</p>
+    </footer>
+
+  </div>
+</div>
+
+<script>
+  function showTab(name, push) {
+    document.getElementById('page-kids').hidden = name !== 'kids';
+    document.getElementById('page-advanced').hidden = name !== 'advanced';
+    document.getElementById('tabbtn-kids').classList.toggle('active', name === 'kids');
+    document.getElementById('tabbtn-advanced').classList.toggle('active', name === 'advanced');
+    document.getElementById('tabbtn-kids').setAttribute('aria-selected', name === 'kids');
+    document.getElementById('tabbtn-advanced').setAttribute('aria-selected', name === 'advanced');
+    if (push) {
+      history.replaceState(null, '', '#' + name);
+      window.scrollTo(0, 0);
+    }
+  }
+  document.getElementById('tabbtn-kids').addEventListener('click', function () { showTab('kids', true); });
+  document.getElementById('tabbtn-advanced').addEventListener('click', function () { showTab('advanced', true); });
+  document.querySelectorAll('.tab-switch').forEach(function (a) {
+    a.addEventListener('click', function (e) {
+      e.preventDefault();
+      showTab(a.dataset.target, true);
+    });
+  });
+  showTab(location.hash === '#advanced' ? 'advanced' : 'kids', false);
+</script>

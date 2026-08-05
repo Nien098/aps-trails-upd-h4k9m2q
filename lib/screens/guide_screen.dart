@@ -78,6 +78,19 @@ class _GuideScreenState extends State<GuideScreen> {
   Duration _pausedTotal = Duration.zero; // accumulated across every pause
   Timer? _checkpointTimer;
 
+  /// Set once the walker bails out and turns back — see [_turnBack]. Only
+  /// changes how already-fired cues are re-shown (reversed direction); the
+  /// saved [Trail] itself is never touched, so a later normal walk of it is
+  /// unaffected.
+  bool _turnedBack = false;
+
+  /// The colour/icon a cue should currently show — its real type normally,
+  /// or its direction-flipped type after [_turnedBack] (see [reversedCueType]).
+  /// [Cue.type] itself is never mutated: [_cues] reuses the same [Cue]
+  /// instances as [Trail.cues] (just reordered), and [_drawCues]'s completed-
+  /// marker lookup depends on that shared identity.
+  CueType _effType(CueType t) => _turnedBack ? reversedCueType(t) : t;
+
   /// Elapsed walking time, excluding time spent paused (both banked pauses
   /// and, if currently paused, the one in progress).
   int get _elapsedSec {
@@ -271,6 +284,50 @@ class _GuideScreenState extends State<GuideScreen> {
     _writeCheckpoint();
   }
 
+  /// Confirms before [_turnBack] — irreversible for this walk, so worth a
+  /// deliberate second tap rather than a single accidental one.
+  Future<void> _confirmTurnBack() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Turn back to the start?'),
+        content: const Text(
+            'This reverses your remaining cues so they guide you back the '
+            'way you came, and cancels the cues still ahead of you. '
+            "This can't be undone for this walk."),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Turn back')),
+        ],
+      ),
+    );
+    if (ok == true) _turnBack();
+  }
+
+  /// Bails out of the rest of the trail and heads back to the start: the
+  /// cues already fired become the walk's new (and only) remaining cues, in
+  /// reverse order, so they fire correctly heading the other way; every cue
+  /// still ahead is dropped for the rest of this walk. Runtime-only — see
+  /// [_turnedBack].
+  void _turnBack() {
+    final passed = _cues.sublist(0, _nextIndex);
+    setState(() {
+      _cues
+        ..clear()
+        ..addAll(passed.reversed);
+      _nextIndex = 0;
+      _turnedBack = true;
+      _activeCard = null;
+    });
+    _toast('Turned back — guiding you to the start');
+    _drawCues();
+    _writeCheckpoint();
+  }
+
   void _toast(String msg) {
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
@@ -447,6 +504,10 @@ class _GuideScreenState extends State<GuideScreen> {
 
     // _cues is already sorted by order — that sort position is the display
     // rank, always a clean 1..N regardless of gaps in the raw order values.
+    // After a turn-back (see [_turnedBack]), _cues only holds the return
+    // leg's cues, so a cue can genuinely have no rank at all — one that was
+    // cancelled outright rather than merely not-yet-reached; it displays the
+    // same as "completed" (grey, unnumbered) either way.
     final rank = <Cue, int>{for (var i = 0; i < _cues.length; i++) _cues[i]: i + 1};
     final groups = <List<Cue>>[];
     for (final cue in widget.trail.cues) {
@@ -461,21 +522,26 @@ class _GuideScreenState extends State<GuideScreen> {
 
     for (final group in groups) {
       final stacked = group.length > 1;
-      if (stacked) group.sort((a, b) => rank[a]!.compareTo(rank[b]!));
-      final completed = group.every((cue) => rank[cue]! <= _nextIndex);
+      if (stacked) {
+        group.sort((a, b) => (rank[a] ?? 1 << 30).compareTo(rank[b] ?? 1 << 30));
+      }
+      final completed =
+          group.every((cue) => (rank[cue] ?? _nextIndex) <= _nextIndex);
       final pos = group.first.position;
       await c.addCircle(CircleOptions(
         geometry: pos,
         circleRadius: stacked ? 13 : 11,
         circleColor: completed
             ? _completedColorHex
-            : (stacked ? stackedCueColorHex : cueColorHex(group.first.type)),
+            : (stacked ? stackedCueColorHex : cueColorHex(_effType(group.first.type))),
         circleStrokeColor: '#ffffff',
         circleStrokeWidth: stacked ? 4 : 3,
       ));
       await c.addSymbol(SymbolOptions(
         geometry: pos,
-        textField: group.map((cue) => '${rank[cue]}. ${cue.label}').join('\n'),
+        textField: group
+            .map((cue) => '${rank[cue] ?? "–"}. ${cue.label}')
+            .join('\n'),
         textSize: 15,
         textColor: completed ? '#757575' : '#1a1a1a',
         textHaloColor: '#ffffff',
@@ -617,6 +683,7 @@ class _GuideScreenState extends State<GuideScreen> {
                   distance: _distToNext,
                   rank: _nextIndex < _cues.length ? _nextIndex + 1 : null,
                   onSkip: _nextIndex < _cues.length ? _skipCue : null,
+                  turnedBack: _turnedBack,
                 ),
               ),
             ),
@@ -671,8 +738,8 @@ class _GuideScreenState extends State<GuideScreen> {
             )
           else if (_activeCard != null)
             BigActionCard(
-              color: cueColor(_activeCard!.type),
-              icon: cueIcon(_activeCard!.type),
+              color: cueColor(_effType(_activeCard!.type)),
+              icon: cueIcon(_effType(_activeCard!.type)),
               text: _activeCard!.spoken.trim().isEmpty
                   ? _activeCard!.label
                   : _activeCard!.spoken,
@@ -703,6 +770,7 @@ class _GuideScreenState extends State<GuideScreen> {
                 elevGain: _elevGain,
                 onStop: _stop,
                 onPauseResume: _paused ? _resumeWalk : _pauseWalk,
+                onTurnBack: _turnedBack ? null : _confirmTurnBack,
                 debugText: _debugText(),
               ),
             ),
@@ -779,6 +847,7 @@ class _TopBar extends StatelessWidget {
     required this.elevGain,
     required this.onStop,
     required this.onPauseResume,
+    this.onTurnBack,
     this.debugText,
   });
 
@@ -791,6 +860,10 @@ class _TopBar extends StatelessWidget {
   final double elevGain;
   final VoidCallback onStop;
   final VoidCallback onPauseResume;
+
+  /// Null hides the button — used once the walker has already turned back
+  /// (one-way for the rest of this walk, per design).
+  final VoidCallback? onTurnBack;
   final String? debugText;
 
   @override
@@ -865,6 +938,23 @@ class _TopBar extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 8),
+          if (walking && onTurnBack != null)
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: Tooltip(
+                message: 'Turn back to the start',
+                child: FilledButton(
+                  style: FilledButton.styleFrom(
+                    backgroundColor: const Color(0xFF795548),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 10, vertical: 12),
+                    minimumSize: Size.zero,
+                  ),
+                  onPressed: onTurnBack,
+                  child: const Icon(Icons.u_turn_left, size: 22),
+                ),
+              ),
+            ),
           if (walking)
             Padding(
               padding: const EdgeInsets.only(right: 8),
@@ -915,10 +1005,15 @@ class _NextCueStrip extends StatelessWidget {
       {required this.nextCue,
       required this.distance,
       this.rank,
-      this.onSkip});
+      this.onSkip,
+      this.turnedBack = false});
 
   final Cue? nextCue;
   final double? distance;
+
+  /// Shows this cue's direction-flipped type (icon/colour) instead of its
+  /// stored one — see [_GuideScreenState._effType].
+  final bool turnedBack;
 
   /// This cue's 1-based position in the trail's stack order, matching the
   /// number on its map marker — so it's obvious which cue you're looking at
@@ -948,7 +1043,10 @@ class _NextCueStrip extends StatelessWidget {
               textAlign: TextAlign.center)
           : Row(
               children: [
-                Icon(cueIcon(cue.type), size: 44, color: cueColor(cue.type)),
+                Icon(cueIcon(turnedBack ? reversedCueType(cue.type) : cue.type),
+                    size: 44,
+                    color: cueColor(
+                        turnedBack ? reversedCueType(cue.type) : cue.type)),
                 const SizedBox(width: 14),
                 Expanded(
                   child: Column(

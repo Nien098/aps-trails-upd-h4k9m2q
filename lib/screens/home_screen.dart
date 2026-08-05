@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../cue_style.dart';
 import '../models/activity.dart';
 import '../models/region.dart';
 import '../models/trail.dart';
@@ -294,13 +295,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           t.cues.map((c) => c.order).reduce((a, b) => a > b ? a : b);
       for (final cue in t.cues) {
         cue.order = maxOrder - cue.order;
-        cue.type = switch (cue.type) {
-          CueType.left => CueType.right,
-          CueType.right => CueType.left,
-          CueType.start => CueType.finish,
-          CueType.finish => CueType.start,
-          _ => cue.type,
-        };
+        cue.type = reversedCueType(cue.type);
       }
     }
 
