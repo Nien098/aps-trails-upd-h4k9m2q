@@ -10,6 +10,7 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../models/region.dart';
 import '../models/trail.dart';
+import '../services/crash_log.dart';
 import '../services/cue_gen.dart';
 import '../services/geo.dart';
 import '../services/native_bridge.dart';
@@ -80,10 +81,28 @@ class _RecordTrailScreenState extends State<RecordTrailScreen> {
     _sub = Geolocator.getPositionStream(
       locationSettings: const LocationSettings(
           accuracy: LocationAccuracy.best, distanceFilter: 3),
-    ).listen(_onPosition);
+    ).listen(_onPosition, onError: _onPositionError);
     _clock = Timer.periodic(const Duration(seconds: 1), (_) {
       if (mounted) setState(() {});
     });
+  }
+
+  /// See GuideScreen's identical handler for why this matters: without an
+  /// `onError`, a position-*stream* error (GPS/location-services dropping
+  /// out, permission revoked mid-recording) would otherwise be an uncaught
+  /// exception with nowhere to go.
+  void _onPositionError(Object error, StackTrace stack) {
+    CrashLog.log('Position stream (recording)', error, stack);
+    if (!mounted) return;
+    final String msg;
+    if (error is LocationServiceDisabledException) {
+      msg = 'Location services turned off — turn them back on to keep recording.';
+    } else if (error is PermissionDeniedException) {
+      msg = 'Location permission was lost — re-grant it to keep recording.';
+    } else {
+      msg = 'Lost GPS signal — trying to reconnect…';
+    }
+    setState(() => _status = msg);
   }
 
   /// Requests the permissions needed for recording/alerts to survive a locked
@@ -104,10 +123,31 @@ class _RecordTrailScreenState extends State<RecordTrailScreen> {
     NativeBridge.showNudgeNotification('Still there?', spoken);
     if (!mounted) return;
     setState(() {});
-    Vibration.hasVibrator().then((v) {
-      if (v == true) Vibration.vibrate(duration: 900);
-    });
-    _tts.speak(spoken);
+    _buzz(long: true);
+    _speakSafe(spoken);
+  }
+
+  /// Wraps flutter_tts calls, which can throw/reject on devices with no TTS
+  /// engine installed or a broken default voice — a real condition on older
+  /// phones, and one that would otherwise be an unhandled async exception
+  /// (these calls are fire-and-forget from callbacks, not awaited by callers).
+  Future<void> _speakSafe(String text) async {
+    try {
+      await _tts.stop();
+      await _tts.speak(text);
+    } catch (e, st) {
+      CrashLog.log('TTS', e, st);
+    }
+  }
+
+  Future<void> _buzz({bool long = false}) async {
+    try {
+      if (await Vibration.hasVibrator()) {
+        Vibration.vibrate(duration: long ? 900 : 400);
+      }
+    } catch (e, st) {
+      CrashLog.log('Vibration', e, st);
+    }
   }
 
   Future<bool> _sendStillnessAlert() async {
@@ -364,7 +404,7 @@ class _RecordTrailScreenState extends State<RecordTrailScreen> {
           text: "Haven't moved in a while.\nStill there?",
           dismissIcon: Icons.check_circle,
           dismissTooltip: "I'm OK",
-          onRepeat: () => _tts.speak(Settings.instance.sendEmergencySms.value
+          onRepeat: () => _speakSafe(Settings.instance.sendEmergencySms.value
               ? "Are you still there? Tap I'm OK, or an alert will be sent."
               : "Are you still there? Tap I'm OK, or you'll keep being reminded."),
           onDismiss: _acknowledgeStillness,
@@ -377,7 +417,7 @@ class _RecordTrailScreenState extends State<RecordTrailScreen> {
           dismissIcon: Icons.check_circle,
           dismissTooltip: "I'm OK",
           onRepeat: () =>
-              _tts.speak('Sending an alert to your emergency contact.'),
+              _speakSafe('Sending an alert to your emergency contact.'),
           onDismiss: _acknowledgeStillness,
         );
       case StillnessPhase.sent:
@@ -388,7 +428,7 @@ class _RecordTrailScreenState extends State<RecordTrailScreen> {
           dismissIcon: Icons.close,
           dismissTooltip: 'Dismiss',
           onRepeat: () =>
-              _tts.speak('An alert was sent to your emergency contact.'),
+              _speakSafe('An alert was sent to your emergency contact.'),
           onDismiss: _acknowledgeStillness,
         );
       case StillnessPhase.normal:

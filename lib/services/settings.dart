@@ -20,6 +20,7 @@ class Settings {
   static const _kTrailLineColor = 'basemap_trail_line_color';
   static const _kTrailLineDashed = 'basemap_trail_line_dashed';
   static const _kDetourFactor = 'trail_router_detour_factor';
+  static const _kBatteryWarningShown = 'battery_warning_shown';
 
   /// true = metric (m / km), false = imperial (ft / mi). Defaults to metric.
   final ValueNotifier<bool> metric = ValueNotifier(true);
@@ -74,6 +75,14 @@ class Settings {
   /// an unrelated nearby trail loop. Defaults to 2.5x.
   final ValueNotifier<double> detourFactor = ValueNotifier(2.5);
 
+  /// Whether the one-time "keep tracking reliable" battery-optimization
+  /// prompt has already been shown at the start of a walk (see
+  /// HomeScreen._maybeWarnBattery). Shown once ever, regardless of the
+  /// walker's choice — this isn't meant to nag every walk, just make sure
+  /// they see it once; Settings → Safety & battery covers it permanently
+  /// after that.
+  final ValueNotifier<bool> batteryWarningShown = ValueNotifier(false);
+
   Future<void> load() async {
     final p = await SharedPreferences.getInstance();
     metric.value = p.getBool(_kMetric) ?? true;
@@ -89,6 +98,7 @@ class Settings {
     trailLineColor.value = p.getString(_kTrailLineColor) ?? '#3F51B5';
     trailLineDashed.value = p.getBool(_kTrailLineDashed) ?? false;
     detourFactor.value = p.getDouble(_kDetourFactor) ?? 2.5;
+    batteryWarningShown.value = p.getBool(_kBatteryWarningShown) ?? false;
   }
 
   Future<void> setMetric(bool value) async {
@@ -155,6 +165,12 @@ class Settings {
     detourFactor.value = value.clamp(1.5, 6.0);
     final p = await SharedPreferences.getInstance();
     await p.setDouble(_kDetourFactor, detourFactor.value);
+  }
+
+  Future<void> setBatteryWarningShown(bool value) async {
+    batteryWarningShown.value = value;
+    final p = await SharedPreferences.getInstance();
+    await p.setBool(_kBatteryWarningShown, value);
   }
 
   /// Adds a finished walk's distance and elevation gain to the lifetime totals.

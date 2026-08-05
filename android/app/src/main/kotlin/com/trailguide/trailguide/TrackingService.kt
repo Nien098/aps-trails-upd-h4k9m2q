@@ -1,15 +1,19 @@
 package com.trailguide.trailguide
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 
 /**
  * A foreground service whose main job is to raise this app's process
@@ -26,31 +30,67 @@ class TrackingService : Service() {
     companion object {
         private const val CHANNEL_ID = "tracking_channel"
         private const val NOTIF_ID = 1001
+        private const val TAG = "TrackingService"
         const val EXTRA_PAUSED = "paused"
     }
 
     override fun onCreate() {
         super.onCreate()
-        val mgr = getSystemService(NotificationManager::class.java)
-        if (mgr.getNotificationChannel(CHANNEL_ID) == null) {
-            mgr.createNotificationChannel(
-                NotificationChannel(
-                    CHANNEL_ID, "Trail recording", NotificationManager.IMPORTANCE_LOW
+        try {
+            val mgr = getSystemService(NotificationManager::class.java)
+            if (mgr.getNotificationChannel(CHANNEL_ID) == null) {
+                mgr.createNotificationChannel(
+                    NotificationChannel(
+                        CHANNEL_ID, "Trail recording", NotificationManager.IMPORTANCE_LOW
+                    )
                 )
-            )
+            }
+        } catch (e: Exception) {
+            // Same reasoning as onStartCommand: system-invoked, no MethodChannel
+            // safety net, so an uncaught exception here is a real process crash.
+            Log.e(TAG, "onCreate failed", e)
         }
     }
 
+    // This method is invoked directly by Android (ActivityManagerService), not
+    // through the trailguide/native MethodChannel — Flutter's own try/catch
+    // around channel calls (which is why every NativeBridge call is silently
+    // swallow-on-failure) does NOT cover this method. Anything thrown here
+    // uncaught is a true, whole-process crash, e.g. via a START_STICKY
+    // restart with no Activity/UI present and location permission revoked or
+    // auto-revoked since the walk began. Stopping just this service instead
+    // is a far smaller failure than taking down the app the walker is
+    // actively relying on.
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val paused = intent?.getBooleanExtra(EXTRA_PAUSED, false) ?: false
-        val notification = buildNotification(paused)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIF_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
-        } else {
-            startForeground(NOTIF_ID, notification)
+        return try {
+            val paused = intent?.getBooleanExtra(EXTRA_PAUSED, false) ?: false
+            val notification = buildNotification(paused)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                if (!hasLocationPermission()) {
+                    // Manifest-declared as foregroundServiceType="location" — starting
+                    // without the permission it needs would throw, and there's nothing
+                    // useful to track without it anyway.
+                    Log.w(TAG, "No location permission; stopping instead of starting foreground")
+                    stopSelf()
+                    return START_NOT_STICKY
+                }
+                startForeground(NOTIF_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
+            } else {
+                startForeground(NOTIF_ID, notification)
+            }
+            START_STICKY
+        } catch (e: Exception) {
+            Log.e(TAG, "startForeground failed", e)
+            stopSelf()
+            START_NOT_STICKY
         }
-        return START_STICKY
     }
+
+    private fun hasLocationPermission(): Boolean =
+        ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) ==
+            PackageManager.PERMISSION_GRANTED ||
+            ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) ==
+                PackageManager.PERMISSION_GRANTED
 
     private fun buildNotification(paused: Boolean): Notification {
         val flags =

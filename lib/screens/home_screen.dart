@@ -8,6 +8,7 @@ import '../models/trail.dart';
 import '../services/backup.dart';
 import '../services/geo.dart';
 import '../services/import_fit.dart';
+import '../services/native_bridge.dart';
 import '../services/settings.dart';
 import '../services/trail_share.dart';
 import '../services/trail_store.dart';
@@ -173,7 +174,40 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
   }
 
+  /// Shown once ever, the first time a walk (or recording) actually starts —
+  /// not buried in a settings menu the walker has no reason to visit. Some
+  /// OEM battery managers (and plain Android Doze) can freeze or kill the
+  /// app mid-walk despite the foreground service, which to a non-technical
+  /// walker looks exactly like "the app crashed."
+  Future<void> _maybeWarnBattery() async {
+    if (Settings.instance.batteryWarningShown.value) return;
+    await Settings.instance.setBatteryWarningShown(true);
+    final ok = await NativeBridge.isIgnoringBatteryOptimizations();
+    if (ok || !mounted) return;
+    final fix = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Keep tracking reliable'),
+        content: const Text(
+            "Some phones can stop APS Trails in the background during a "
+            "long walk unless it's excluded from battery optimization. You "
+            'can turn that on now, or later from Safety & battery settings.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Not now')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Fix now')),
+        ],
+      ),
+    );
+    if (fix == true) await NativeBridge.requestIgnoreBatteryOptimizations();
+  }
+
   Future<void> _recordTrail() async {
+    await _maybeWarnBattery();
+    if (!mounted) return;
     final draft = await Navigator.push<Trail>(
       context,
       MaterialPageRoute(
@@ -196,6 +230,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _walk(Trail trail) async {
+    await _maybeWarnBattery();
+    if (!mounted) return;
     await Navigator.push(
       context,
       MaterialPageRoute(builder: (_) => GuideScreen(trail: trail)),

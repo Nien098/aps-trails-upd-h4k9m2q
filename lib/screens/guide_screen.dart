@@ -12,6 +12,7 @@ import '../cue_style.dart';
 import '../models/activity.dart';
 import '../models/region.dart';
 import '../models/trail.dart';
+import '../services/crash_log.dart';
 import '../services/geo.dart';
 import '../services/native_bridge.dart';
 import '../services/route_layer.dart';
@@ -179,7 +180,7 @@ class _GuideScreenState extends State<GuideScreen> {
         accuracy: LocationAccuracy.best,
         distanceFilter: 3,
       ),
-    ).listen(_onPosition);
+    ).listen(_onPosition, onError: _onPositionError);
     // Resumed into a paused checkpoint — freeze immediately rather than
     // silently resuming GPS tracking without a fresh Resume tap.
     if (_paused) _posSub?.pause();
@@ -341,18 +342,25 @@ class _GuideScreenState extends State<GuideScreen> {
   Future<void> _writeCheckpoint() async {
     final id = widget.trail.id;
     if (id == null || _startedAt == null) return;
-    await TrailStore.instance.saveWalkCheckpoint(WalkCheckpoint(
-      trailId: id,
-      trailName: widget.trail.name,
-      startedAt: _startedAt!,
-      pausedTotalSec: _pausedTotal.inSeconds,
-      wasPaused: _paused,
-      nextIndex: _nextIndex,
-      walkedMeters: _walkMeters,
-      elevGainMeters: _elevGain,
-      lastPos: _lastPos,
-      track: _track,
-    ));
+    try {
+      await TrailStore.instance.saveWalkCheckpoint(WalkCheckpoint(
+        trailId: id,
+        trailName: widget.trail.name,
+        startedAt: _startedAt!,
+        pausedTotalSec: _pausedTotal.inSeconds,
+        wasPaused: _paused,
+        nextIndex: _nextIndex,
+        walkedMeters: _walkMeters,
+        elevGainMeters: _elevGain,
+        lastPos: _lastPos,
+        track: _track,
+      ));
+    } catch (e, st) {
+      // A transient disk/sqflite error here shouldn't take down an in-progress
+      // walk — it just means this particular checkpoint write is lost; the
+      // next periodic write (or the final save on Stop) tries again.
+      CrashLog.log('Checkpoint write', e, st);
+    }
   }
 
   void _onPosition(Position pos) {
@@ -436,6 +444,30 @@ class _GuideScreenState extends State<GuideScreen> {
     }
   }
 
+  /// Handles a stream *error* from the position stream — as opposed to a
+  /// position update — which `.listen(_onPosition)` alone would otherwise
+  /// leave uncaught (Dart rethrows an unhandled stream error as an async
+  /// exception with nowhere to go). On a real trail this is a real
+  /// condition, not a hypothetical: GPS/location-services can genuinely drop
+  /// out under tree cover or in a canyon, or location permission can be
+  /// revoked mid-walk. Keeps the walk alive rather than crashing — the
+  /// stream itself keeps listening for a position once the underlying
+  /// condition clears.
+  void _onPositionError(Object error, StackTrace stack) {
+    CrashLog.log('Position stream', error, stack);
+    if (!mounted) return;
+    final String msg;
+    if (error is LocationServiceDisabledException) {
+      msg = 'Location services turned off — turn them back on to keep tracking.';
+    } else if (error is PermissionDeniedException) {
+      msg = 'Location permission was lost — re-grant it to keep tracking.';
+    } else {
+      msg = 'Lost GPS signal — trying to reconnect…';
+    }
+    setState(() => _status = msg);
+    _toast(msg);
+  }
+
   void _fireCue(Cue cue) {
     _lastFire = DateTime.now();
     setState(() {
@@ -454,16 +486,29 @@ class _GuideScreenState extends State<GuideScreen> {
     _speak('You are off the trail. Turn around to get back on the trail.');
   }
 
+  /// Wraps flutter_tts calls, which can throw/reject on devices with no TTS
+  /// engine installed or a broken default voice — a real condition on older
+  /// phones, and one that would otherwise be an unhandled async exception
+  /// (every call site here is fire-and-forget from a stream/timer callback,
+  /// not awaited by its caller).
   Future<void> _speak(String text) async {
     _lastSpoken = text;
     if (mounted) setState(() {});
-    await _tts.stop();
-    await _tts.speak(text);
+    try {
+      await _tts.stop();
+      await _tts.speak(text);
+    } catch (e, st) {
+      CrashLog.log('TTS', e, st);
+    }
   }
 
   Future<void> _buzz({bool long = false}) async {
-    if (await Vibration.hasVibrator()) {
-      Vibration.vibrate(duration: long ? 900 : 400);
+    try {
+      if (await Vibration.hasVibrator()) {
+        Vibration.vibrate(duration: long ? 900 : 400);
+      }
+    } catch (e, st) {
+      CrashLog.log('Vibration', e, st);
     }
   }
 
