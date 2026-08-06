@@ -476,16 +476,22 @@ class _GuideScreenState extends State<GuideScreen> {
     // for a nearby author-screen tap, but the start is often well outside
     // that box here, hiding trail branches (like a shortcut fork) that sit
     // just off the direct line between the two. Use the full visible map
-    // instead, matching _routeToNearestRoad.
+    // instead, matching _routeToNearestRoad. The trailhead itself is very
+    // often off-screen entirely though (the camera follows the walker, not
+    // the start), so nothing currently rendered may connect to it at all —
+    // seed the graph with the trail's own already-known path as a
+    // guaranteed fallback, on top of whatever's visible for a real shortcut.
     final router = TrailRouter(c);
     final connection = await router.connect(
       from: pos,
       to: start,
       rect: await router.visibleViewportRect(),
+      seedPath: widget.trail.path,
     );
     if (!connection.followed) {
-      _toast("Couldn't find a mapped route back to the start — "
-          'reversing your course instead');
+      final why = connection.debugReason;
+      _toast("Couldn't find a mapped route back to the start"
+          '${why != null ? ' ($why)' : ''} — reversing your course instead');
       _reverseCourse();
       return;
     }

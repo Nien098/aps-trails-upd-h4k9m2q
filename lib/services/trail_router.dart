@@ -33,7 +33,7 @@ class GeneratedRoute {
 
 /// Result of connecting a new anchor to the trail network.
 class TrailConnection {
-  TrailConnection(this.end, this.polyline, this.followed);
+  TrailConnection(this.end, this.polyline, this.followed, {this.debugReason});
 
   /// The (possibly snapped-to-trail) position of the new anchor.
   final LatLng end;
@@ -44,6 +44,11 @@ class TrailConnection {
 
   /// Whether the segment traced actual trail geometry (vs a straight fallback).
   final bool followed;
+
+  /// Set when [followed] is false, explaining which of the two rejection
+  /// paths fired and with what numbers — surfaced in the UI so a real-device
+  /// test reports a concrete cause instead of just "didn't work".
+  final String? debugReason;
 }
 
 /// Builds a routable graph from the trail/road line features currently drawn
@@ -75,9 +80,29 @@ class TrailRouter {
   /// distant trailhead: only geometry actually rendered inside the query
   /// rect is visible to the graph, so a caller chasing a far-off point
   /// should pass the full current map viewport instead).
-  Future<TrailConnection> connect({LatLng? from, required LatLng to, Rect? rect}) async {
+  ///
+  /// [seedPath], if given, is added to the graph as a guaranteed-connected
+  /// chain of edges before routing — e.g. the trail's own already-known
+  /// path back to [to]. `queryRenderedFeaturesInRect` can only see geometry
+  /// that's actually rendered on screen right now, and [to] is very often
+  /// well outside that (the camera follows the walker, not the trailhead
+  /// they're routing back to), so without a seed there may be no rendered
+  /// path from [from] to [to] at all even though a perfectly good one is
+  /// already known. With it, Dijkstra still prefers a genuine shortcut
+  /// found in whatever IS currently rendered, but always has the known
+  /// path as a fallback instead of failing outright.
+  Future<TrailConnection> connect({
+    LatLng? from,
+    required LatLng to,
+    Rect? rect,
+    List<LatLng>? seedPath,
+  }) async {
     final r = rect ?? await _rectAround(from, to);
     final graph = await _buildGraph(r);
+    if (seedPath != null && seedPath.length >= 2) {
+      graph.addLatLngChain(seedPath);
+      graph._mergeNearbyNodes(_mergeToleranceMeters);
+    }
 
     // Snap the new anchor onto the nearest trail (Level A).
     final snap = graph.nearestOnEdge(to);
@@ -90,14 +115,17 @@ class TrailRouter {
     // Trace the trail between the two anchors (Level B).
     final line = graph.route(from, end);
     if (line == null) {
-      return TrailConnection(end, [from, end], false);
+      return TrailConnection(end, [from, end], false,
+          debugReason: 'no connected path in the queried area');
     }
 
     // Guard against absurd detours (disconnected-but-nearby trails).
     final straight = metersBetween(from, end);
     final routed = _polylineLength(line);
     if (straight > 5 && routed > straight * _maxDetourFactor) {
-      return TrailConnection(end, [from, end], false);
+      return TrailConnection(end, [from, end], false,
+          debugReason: 'route ${routed.round()}m vs straight-line '
+              '${straight.round()}m exceeds ${_maxDetourFactor}x cap');
     }
     return TrailConnection(end, line, true);
   }
@@ -377,6 +405,26 @@ class _Graph {
           roadNodeKeys.add(prevKey);
           roadNodeKeys.add(k);
         }
+      }
+      prev = p;
+      prevKey = k;
+    }
+  }
+
+  /// Same idea as [addLine], but for an already-decoded [LatLng] chain
+  /// (e.g. a known trail's `path`) rather than raw GeoJSON coordinates —
+  /// see [TrailRouter.connect]'s `seedPath` parameter.
+  void addLatLngChain(List<LatLng> pts) {
+    LatLng? prev;
+    String? prevKey;
+    for (final p in pts) {
+      final k = _key(p.latitude, p.longitude);
+      nodes.putIfAbsent(k, () => p);
+      if (prev != null && prevKey != null && prevKey != k) {
+        final w = metersBetween(prev, p);
+        (adj[prevKey] ??= []).add(_Edge(k, w));
+        (adj[k] ??= []).add(_Edge(prevKey, w));
+        _segments.add(_Seg(prevKey, k, prev, p, false));
       }
       prev = p;
       prevKey = k;
