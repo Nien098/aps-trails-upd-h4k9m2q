@@ -187,6 +187,31 @@ class TrailRouter {
     return shared / (a.length - 1);
   }
 
+  /// Screen-space rect covering the whole visible map, in the same pixel
+  /// space [queryRenderedFeaturesInRect] expects. Deliberately goes via
+  /// [toScreenLocation] on the camera's visible bounds rather than e.g.
+  /// `MediaQuery.size` — that reports Flutter's logical/dp pixels, but the
+  /// native query rect is in the MapView's own (device) pixels, same as
+  /// [toScreenLocation]'s output. On a phone with devicePixelRatio ~2.6x, a
+  /// MediaQuery-sized rect only covers roughly the top-left third of the
+  /// real viewport, silently hiding anything further down or right on
+  /// screen — exactly the failure mode seen routing to a real destination.
+  Future<Rect> visibleViewportRect() async {
+    final bounds = await controller.getVisibleRegion();
+    final corners = await Future.wait([
+      controller.toScreenLocation(bounds.northeast),
+      controller.toScreenLocation(bounds.southwest),
+      controller.toScreenLocation(
+          LatLng(bounds.northeast.latitude, bounds.southwest.longitude)),
+      controller.toScreenLocation(
+          LatLng(bounds.southwest.latitude, bounds.northeast.longitude)),
+    ]);
+    final xs = corners.map((p) => p.x.toDouble());
+    final ys = corners.map((p) => p.y.toDouble());
+    return Rect.fromLTRB(
+        xs.reduce(math.min), ys.reduce(math.min), xs.reduce(math.max), ys.reduce(math.max));
+  }
+
   /// Screen-space rect enclosing the endpoints (with padding), used to bound
   /// the feature query. Uses toScreenLocation so the coordinate space matches
   /// what queryRenderedFeaturesInRect expects.

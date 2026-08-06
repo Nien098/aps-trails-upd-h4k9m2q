@@ -477,11 +477,11 @@ class _GuideScreenState extends State<GuideScreen> {
     // that box here, hiding trail branches (like a shortcut fork) that sit
     // just off the direct line between the two. Use the full visible map
     // instead, matching _routeToNearestRoad.
-    final size = MediaQuery.of(context).size;
-    final connection = await TrailRouter(c).connect(
+    final router = TrailRouter(c);
+    final connection = await router.connect(
       from: pos,
       to: start,
-      rect: Rect.fromLTWH(0, 0, size.width, size.height),
+      rect: await router.visibleViewportRect(),
     );
     if (!connection.followed) {
       _toast("Couldn't find a mapped route back to the start — "
@@ -504,10 +504,10 @@ class _GuideScreenState extends State<GuideScreen> {
       _reverseCourse();
       return;
     }
-    final size = MediaQuery.of(context).size;
-    final connection = await TrailRouter(c).nearestRoad(
+    final router = TrailRouter(c);
+    final connection = await router.nearestRoad(
       from: pos,
-      viewport: Rect.fromLTWH(0, 0, size.width, size.height),
+      viewport: await router.visibleViewportRect(),
     );
     if (connection == null) {
       _toast("Couldn't find a nearby road — reversing your course instead");
