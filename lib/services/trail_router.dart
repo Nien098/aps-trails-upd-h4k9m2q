@@ -137,13 +137,13 @@ class TrailRouter {
   static const _maxEdgeVisitsForPadding = 4;
 
   /// Auto-generates a walkable route from the trails currently visible in
-  /// [viewport] (a screen-pixel rect covering the map), or — when [boundary]
-  /// is given — only from trails inside that geographic box, regardless of
-  /// what else the query happens to pick up nearby (see
-  /// [_Graph.restrictToBounds]). Starts near [center], aims for
-  /// [targetMeters] total length, and returns a loop when [preferLoop] is set
-  /// and a reasonable different-return path exists — otherwise an
-  /// out-and-back.
+  /// [viewport] (a screen-pixel rect covering the map), or — when
+  /// [boundaryPolygon] is given — only from trails inside that (possibly
+  /// irregular, user-drawn) geographic outline, regardless of what else the
+  /// query happens to pick up nearby (see [_Graph.restrictToPolygon]).
+  /// Starts near [center], aims for [targetMeters] total length, and
+  /// returns a loop when [preferLoop] is set and a reasonable
+  /// different-return path exists — otherwise an out-and-back.
   ///
   /// When the reachable network is shorter than [targetMeters] (common for a
   /// small boxed-in area), the route pads itself out by deliberately
@@ -155,11 +155,12 @@ class TrailRouter {
     required Rect viewport,
     required double targetMeters,
     bool preferLoop = true,
-    LatLngBounds? boundary,
+    List<LatLng>? boundaryPolygon,
   }) async {
-    final graph = await _buildGraph(
-        boundary != null ? await _screenRectForBounds(boundary) : viewport);
-    if (boundary != null) graph.restrictToBounds(boundary);
+    final graph = await _buildGraph(boundaryPolygon != null
+        ? await _screenRectForPolygon(boundaryPolygon)
+        : viewport);
+    if (boundaryPolygon != null) graph.restrictToPolygon(boundaryPolygon);
 
     final start = graph.spliceTempNode(center, 'GEN');
     if (start.isEmpty) return null;
@@ -268,6 +269,20 @@ class TrailRouter {
       controller.toScreenLocation(
           LatLng(bounds.southwest.latitude, bounds.northeast.longitude)),
     ]);
+    final xs = corners.map((p) => p.x.toDouble());
+    final ys = corners.map((p) => p.y.toDouble());
+    return Rect.fromLTRB(
+        xs.reduce(math.min), ys.reduce(math.min), xs.reduce(math.max), ys.reduce(math.max));
+  }
+
+  /// Same idea as [_screenRectForBounds], but for an arbitrary (possibly
+  /// concave) polygon outline instead of a fixed 4-corner box — the query
+  /// rect is only ever axis-aligned regardless (queryRenderedFeaturesInRect
+  /// doesn't support an arbitrary shape), so this is just the bounding box
+  /// of every vertex; [_Graph.restrictToPolygon] is what actually enforces
+  /// the real outline afterward.
+  Future<Rect> _screenRectForPolygon(List<LatLng> polygon) async {
+    final corners = await Future.wait(polygon.map(controller.toScreenLocation));
     final xs = corners.map((p) => p.x.toDouble());
     final ys = corners.map((p) => p.y.toDouble());
     return Rect.fromLTRB(
@@ -521,14 +536,14 @@ class _Graph {
   }
 
   /// Drops every node (and any edge/segment touching it) that falls outside
-  /// [bounds] — a hard geographic guarantee that generation never leaves a
-  /// user-drawn boundary box, regardless of how imprecise the screen-rect
-  /// query that built the graph was (see [TrailRouter.generate]'s
-  /// `boundary` param).
-  void restrictToBounds(LatLngBounds bounds) {
+  /// [polygon] (via [_pointInPolygon]) — a hard geographic guarantee that
+  /// generation never leaves a user-drawn boundary outline, regardless of
+  /// how imprecise the screen-rect query that built the graph was (see
+  /// [TrailRouter.generate]'s `boundaryPolygon` param).
+  void restrictToPolygon(List<LatLng> polygon) {
     final keep = {
       for (final e in nodes.entries)
-        if (bounds.contains(e.value)) e.key,
+        if (_pointInPolygon(e.value, polygon)) e.key,
     };
     nodes.removeWhere((k, _) => !keep.contains(k));
     adj.removeWhere((k, _) => !keep.contains(k));
@@ -804,6 +819,25 @@ class _Graph {
     if (keys.isEmpty) return null;
     return [from, for (final key in keys) nodes[key]!, bestPoint!];
   }
+}
+
+/// Standard ray-casting point-in-polygon test — correct for both convex and
+/// concave outlines, which matters here since a freehand-drawn boundary is
+/// rarely convex. [polygon] doesn't need to be explicitly closed (first
+/// point repeated at the end); the wraparound edge (last → first) is
+/// included regardless.
+bool _pointInPolygon(LatLng p, List<LatLng> polygon) {
+  var inside = false;
+  for (var i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    final yi = polygon[i].latitude, xi = polygon[i].longitude;
+    final yj = polygon[j].latitude, xj = polygon[j].longitude;
+    final crosses = (yi > p.latitude) != (yj > p.latitude);
+    if (crosses &&
+        p.longitude < (xj - xi) * (p.latitude - yi) / (yj - yi) + xi) {
+      inside = !inside;
+    }
+  }
+  return inside;
 }
 
 /// Nearest point on segment [a]–[b] to [p] via local equirectangular projection.

@@ -1,9 +1,9 @@
 import 'package:maplibre_gl/maplibre_gl.dart';
 
-/// Draws a translucent rectangle with a dashed outline marking the boundary
-/// box a user has drawn to constrain auto-generation (see
+/// Draws a translucent freeform outline (with a dashed border) marking the
+/// boundary area a user has drawn to constrain auto-generation (see
 /// [author_screen.dart]'s draw-boundary mode and
-/// [trail_router.dart]'s `TrailRouter.generate` `boundary` param).
+/// [trail_router.dart]'s `TrailRouter.generate` `boundaryPolygon` param).
 /// Structured the same way as [RouteLayer] (a single GeoJSON source,
 /// live-updated via `setGeoJsonSource`) — see lib/services/route_layer.dart.
 class BoundaryLayer {
@@ -24,7 +24,7 @@ class BoundaryLayer {
     'features': <dynamic>[],
   };
 
-  /// Adds the source and layers. Call once before the first [setBounds].
+  /// Adds the source and layers. Call once before the first [setPolygon].
   Future<void> ensure() async {
     if (_ready) return;
     await controller.addGeoJsonSource(_sourceId, Map.of(_empty));
@@ -59,21 +59,18 @@ class BoundaryLayer {
     _ready = true;
   }
 
-  /// Draws (or replaces) the rectangle for [bounds]. Clears when null.
-  Future<void> setBounds(LatLngBounds? bounds) async {
+  /// Draws (or replaces) the outline for [points] — an arbitrary ring, not
+  /// necessarily a rectangle; closed automatically if not already (first
+  /// point repeated at the end). Clears when null or too short to form an
+  /// area.
+  Future<void> setPolygon(List<LatLng>? points) async {
     if (!_ready) return;
-    if (bounds == null) {
+    if (points == null || points.length < 3) {
       await controller.setGeoJsonSource(_sourceId, Map.of(_empty));
       return;
     }
-    final sw = bounds.southwest, ne = bounds.northeast;
-    final ring = [
-      [sw.longitude, sw.latitude],
-      [ne.longitude, sw.latitude],
-      [ne.longitude, ne.latitude],
-      [sw.longitude, ne.latitude],
-      [sw.longitude, sw.latitude],
-    ];
+    final closed = points.first == points.last ? points : [...points, points.first];
+    final ring = [for (final p in closed) [p.longitude, p.latitude]];
     await controller.setGeoJsonSource(_sourceId, {
       'type': 'FeatureCollection',
       'features': [

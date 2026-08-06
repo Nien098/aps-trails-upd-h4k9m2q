@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'dart:math' show Point, sqrt;
+import 'dart:math' show Point, max, min, sqrt;
 
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
@@ -42,21 +42,23 @@ class _AuthorScreenState extends State<AuthorScreen> {
   RouteLayer? _routeLayer;
   BoundaryLayer? _boundaryLayer;
 
-  /// While true, a drag on the map draws a generation-boundary box instead
-  /// of panning the camera or placing an anchor/cue — see
+  /// While true, a drag on the map draws a generation-boundary outline
+  /// instead of panning the camera or placing an anchor/cue — see
   /// [_onBoundaryPanStart]/[_onBoundaryPanEnd] and [BaseMap.gesturesEnabled].
   bool _drawBoundaryMode = false;
 
-  /// Screen-space drag-in-progress corners (only set while actively
-  /// dragging), used to paint a live preview without any platform-channel
-  /// round trips — converted to a geographic [_genBoundary] once the drag
-  /// ends.
-  Offset? _dragStart;
-  Offset? _dragCurrent;
+  /// Screen-space drag-in-progress trace (only non-empty while actively
+  /// dragging), used to paint a live freeform preview without any
+  /// platform-channel round trips per frame — converted to a geographic
+  /// [_genBoundary] once the drag ends. Points are recorded with a minimum
+  /// spacing (see [_onBoundaryPanUpdate]) so a slow drag doesn't blow this
+  /// list, and the eventual polygon, up unnecessarily.
+  final List<Offset> _dragPoints = [];
 
-  /// The drawn boundary box constraining auto-generation, or null to fall
-  /// back to whatever's currently on screen (existing behaviour).
-  LatLngBounds? _genBoundary;
+  /// The drawn boundary outline (closed ring) constraining auto-generation,
+  /// or null to fall back to whatever's currently on screen (existing
+  /// behaviour).
+  List<LatLng>? _genBoundary;
 
   bool _cueMode = false;
   bool _dirty = false;
@@ -275,59 +277,72 @@ class _AuthorScreenState extends State<AuthorScreen> {
     await _redraw();
   }
 
+  /// Minimum spacing (logical px) between recorded drag points — keeps a
+  /// slow/jittery drag from ballooning the point count, and caps how big
+  /// the resulting polygon (and its point-in-polygon test) can get.
+  static const _dragPointSpacing = 6.0;
+  static const _dragPointCap = 150;
+
   void _toggleDrawBoundary() {
     setState(() {
       _drawBoundaryMode = !_drawBoundaryMode;
-      _dragStart = null;
-      _dragCurrent = null;
+      _dragPoints.clear();
     });
   }
 
   void _onBoundaryPanStart(DragStartDetails d) {
     setState(() {
-      _dragStart = d.localPosition;
-      _dragCurrent = d.localPosition;
+      _dragPoints
+        ..clear()
+        ..add(d.localPosition);
     });
   }
 
   void _onBoundaryPanUpdate(DragUpdateDetails d) {
-    setState(() => _dragCurrent = d.localPosition);
+    if (_dragPoints.isNotEmpty &&
+        (_dragPoints.length >= _dragPointCap ||
+            (d.localPosition - _dragPoints.last).distance < _dragPointSpacing)) {
+      return;
+    }
+    setState(() => _dragPoints.add(d.localPosition));
   }
 
   Future<void> _onBoundaryPanEnd(DragEndDetails _) async {
     final c = _c;
-    final start = _dragStart, end = _dragCurrent;
-    setState(() {
-      _dragStart = null;
-      _dragCurrent = null;
-    });
-    // A negligible drag (an accidental tap while in this mode) isn't a
-    // deliberate box — ignore it rather than setting a degenerate boundary
-    // that would empty the graph out entirely.
-    if (c == null || start == null || end == null || (end - start).distance < 20) {
-      return;
-    }
-    final corners = await Future.wait([
-      c.toLatLng(Point(start.dx, start.dy)),
-      c.toLatLng(Point(end.dx, end.dy)),
-    ]);
-    final lats = [corners[0].latitude, corners[1].latitude]..sort();
-    final lngs = [corners[0].longitude, corners[1].longitude]..sort();
-    final boundary = LatLngBounds(
-      southwest: LatLng(lats.first, lngs.first),
-      northeast: LatLng(lats.last, lngs.last),
-    );
+    final points = List<Offset>.of(_dragPoints);
+    setState(() => _dragPoints.clear());
+    // A negligible/near-straight-line drag (an accidental tap or flick
+    // while in this mode) isn't a deliberate outline — ignore it rather
+    // than setting a degenerate boundary that would empty the graph out
+    // entirely.
+    if (c == null || points.length < 3) return;
+    final minX = points.map((p) => p.dx).reduce(min);
+    final maxX = points.map((p) => p.dx).reduce(max);
+    final minY = points.map((p) => p.dy).reduce(min);
+    final maxY = points.map((p) => p.dy).reduce(max);
+    if (maxX - minX < 20 && maxY - minY < 20) return;
+
+    // GestureDetector reports Flutter's logical/dp pixels, but toLatLng —
+    // like queryRenderedFeaturesInRect and toScreenLocation elsewhere in
+    // this codebase — expects the MapView's native device pixels. Scaling
+    // by devicePixelRatio is the exact, documented conversion between the
+    // two (this is what produced a boundary shrunk toward the top-left on
+    // a real device: the raw logical coordinates were being read as if
+    // they were already native pixels).
+    final dpr = MediaQuery.of(context).devicePixelRatio;
+    final boundary = await Future.wait(
+        points.map((p) => c.toLatLng(Point(p.dx * dpr, p.dy * dpr))));
     if (!mounted) return;
     setState(() {
       _genBoundary = boundary;
       _drawBoundaryMode = false;
     });
-    await _boundaryLayer?.setBounds(boundary);
+    await _boundaryLayer?.setPolygon(boundary);
   }
 
   Future<void> _clearBoundary() async {
     setState(() => _genBoundary = null);
-    await _boundaryLayer?.setBounds(null);
+    await _boundaryLayer?.setPolygon(null);
   }
 
   /// Flattens the per-anchor segments into the full route polyline.
@@ -953,23 +968,34 @@ class _AuthorScreenState extends State<AuthorScreen> {
       final router = TrailRouter(c);
       final boundary = _genBoundary;
       // With a drawn boundary, center inside it rather than the camera's
-      // (possibly much larger, or off-boundary) current view.
-      final bounds = boundary ?? await c.getVisibleRegion();
-      final center = LatLng(
-        (bounds.southwest.latitude + bounds.northeast.latitude) / 2,
-        (bounds.southwest.longitude + bounds.northeast.longitude) / 2,
-      );
+      // (possibly much larger, or off-boundary) current view. The outline
+      // can be concave, so its bounding-box midpoint (not a true centroid)
+      // is used — spliceTempNode just needs a reasonable starting point
+      // near the drawn area, not one guaranteed inside it.
+      LatLng center;
+      if (boundary != null) {
+        final lats = boundary.map((p) => p.latitude);
+        final lngs = boundary.map((p) => p.longitude);
+        center = LatLng((lats.reduce(min) + lats.reduce(max)) / 2,
+            (lngs.reduce(min) + lngs.reduce(max)) / 2);
+      } else {
+        final bounds = await c.getVisibleRegion();
+        center = LatLng(
+          (bounds.southwest.latitude + bounds.northeast.latitude) / 2,
+          (bounds.southwest.longitude + bounds.northeast.longitude) / 2,
+        );
+      }
       final route = await router.generate(
         center: center,
         viewport: await router.visibleViewportRect(),
         targetMeters: choice.meters,
         preferLoop: choice.loop,
-        boundary: boundary,
+        boundaryPolygon: boundary,
       );
       if (!mounted) return;
       if (route == null) {
         _toast(boundary != null
-            ? 'No trails found in your drawn area — try a bigger box'
+            ? 'No trails found in your drawn area — try a bigger outline'
             : 'No trails found here — zoom to a trail area and try again');
         return;
       }
@@ -1312,12 +1338,12 @@ class _AuthorScreenState extends State<AuthorScreen> {
               myLocationEnabled: true, // show the author's position dot
               gesturesEnabled: !_drawBoundaryMode,
             ),
-            // Absorbs drag input while drawing a generation-boundary box —
-            // only present in that mode, so it never steals ordinary taps
-            // (path/cue placement) the rest of the time. The live rectangle
-            // is a plain screen-space overlay (no platform-channel calls per
-            // drag frame); only the two final corners get converted to
-            // LatLng, in _onBoundaryPanEnd.
+            // Absorbs drag input while drawing a generation-boundary outline
+            // — only present in that mode, so it never steals ordinary taps
+            // (path/cue placement) the rest of the time. The live trace is a
+            // plain screen-space overlay (no platform-channel calls per drag
+            // frame); only the recorded points get converted to LatLng, in
+            // _onBoundaryPanEnd.
             if (_drawBoundaryMode)
               Positioned.fill(
                 child: GestureDetector(
@@ -1325,12 +1351,11 @@ class _AuthorScreenState extends State<AuthorScreen> {
                   onPanStart: _onBoundaryPanStart,
                   onPanUpdate: _onBoundaryPanUpdate,
                   onPanEnd: _onBoundaryPanEnd,
-                  child: _dragStart == null || _dragCurrent == null
+                  child: _dragPoints.length < 2
                       ? const SizedBox.expand()
                       : CustomPaint(
                           size: Size.infinite,
-                          painter: _BoundaryPreviewPainter(
-                              _dragStart!, _dragCurrent!),
+                          painter: _BoundaryPreviewPainter(_dragPoints),
                         ),
                 ),
               ),
@@ -1347,9 +1372,9 @@ class _AuthorScreenState extends State<AuthorScreen> {
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          const Icon(Icons.crop_free),
+                          const Icon(Icons.draw),
                           const SizedBox(width: 10),
-                          const Text('Drag to draw a boundary box'),
+                          const Text('Drag to outline a boundary area'),
                           const SizedBox(width: 10),
                           TextButton(
                             onPressed: _toggleDrawBoundary,
@@ -1376,10 +1401,10 @@ class _AuthorScreenState extends State<AuthorScreen> {
                         horizontal: 14, vertical: 10),
                     child: Row(
                       children: [
-                        const Icon(Icons.crop_free),
+                        const Icon(Icons.draw),
                         const SizedBox(width: 10),
                         const Expanded(
-                          child: Text('Boundary box set',
+                          child: Text('Boundary area set',
                               style: TextStyle(fontWeight: FontWeight.w600)),
                         ),
                         TextButton(
@@ -1621,10 +1646,10 @@ class _ModeBar extends StatelessWidget {
                 IconButton(
                   visualDensity: VisualDensity.compact,
                   tooltip: drawBoundaryActive
-                      ? 'Cancel drawing boundary box'
-                      : 'Draw a boundary box to constrain generation',
+                      ? 'Cancel drawing boundary area'
+                      : 'Draw a boundary area to constrain generation',
                   isSelected: drawBoundaryActive,
-                  icon: const Icon(Icons.crop_free),
+                  icon: const Icon(Icons.draw),
                   onPressed: onToggleDrawBoundary,
                 ),
                 Expanded(
@@ -1728,20 +1753,27 @@ class _ModeBar extends StatelessWidget {
   }
 }
 
-/// Live screen-space preview of the boundary box while dragging — plain
-/// Flutter painting, no platform-channel calls, so it tracks the finger
-/// smoothly regardless of drag speed (see [_AuthorScreenState._onBoundaryPanUpdate]).
+/// Live screen-space preview of the freeform boundary outline while
+/// dragging — plain Flutter painting, no platform-channel calls, so it
+/// tracks the finger smoothly regardless of drag speed (see
+/// [_AuthorScreenState._onBoundaryPanUpdate]). Drawn as a closed shape (the
+/// eventual boundary always closes the ring) even mid-drag, so it reads as
+/// "the area you're outlining" rather than an open line.
 class _BoundaryPreviewPainter extends CustomPainter {
-  _BoundaryPreviewPainter(this.a, this.b);
-  final Offset a;
-  final Offset b;
+  _BoundaryPreviewPainter(this.points);
+  final List<Offset> points;
 
   @override
   void paint(Canvas canvas, Size size) {
-    final rect = Rect.fromPoints(a, b);
-    canvas.drawRect(rect, Paint()..color = const Color(0x263E8FB0));
-    canvas.drawRect(
-      rect,
+    if (points.length < 2) return;
+    final path = Path()..moveTo(points.first.dx, points.first.dy);
+    for (final p in points.skip(1)) {
+      path.lineTo(p.dx, p.dy);
+    }
+    path.close();
+    canvas.drawPath(path, Paint()..color = const Color(0x263E8FB0));
+    canvas.drawPath(
+      path,
       Paint()
         ..color = const Color(0xFF3E8FB0)
         ..style = PaintingStyle.stroke
@@ -1751,7 +1783,7 @@ class _BoundaryPreviewPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(_BoundaryPreviewPainter oldDelegate) =>
-      oldDelegate.a != a || oldDelegate.b != b;
+      oldDelegate.points != points;
 }
 
 /// A chosen target length + shape for auto-generation.
@@ -1814,7 +1846,7 @@ class _GeneratorSheetState extends State<_GeneratorSheet> {
                   Text(
                       widget.hasBoundary
                           ? 'Builds a route using only the trails inside your '
-                              'drawn boundary box, looping back over them if '
+                              'drawn boundary area, looping back over them if '
                               'needed to reach the target length.'
                           : 'Builds a route from the trails shown on screen now.',
                       style: text.bodyMedium),
