@@ -13,11 +13,13 @@ import '../models/activity.dart';
 import '../models/region.dart';
 import '../models/trail.dart';
 import '../services/crash_log.dart';
+import '../services/cue_gen.dart';
 import '../services/geo.dart';
 import '../services/native_bridge.dart';
 import '../services/route_layer.dart';
 import '../services/settings.dart';
 import '../services/stillness_watchdog.dart';
+import '../services/trail_router.dart';
 import '../services/trail_store.dart';
 import '../widgets/base_map.dart';
 import '../widgets/big_action_card.dart';
@@ -52,6 +54,10 @@ Cue effectiveCue(Cue cue, bool turnedBack) {
     radiusMeters: cue.radiusMeters,
   );
 }
+
+/// The three ways a walker can bail out partway through a walk — see
+/// [_GuideScreenState._openBailOutMenu].
+enum _BailOutMode { reverse, toStart, toRoad }
 
 /// Walking mode: follows the user's GPS along a saved trail and delivers each
 /// cue as a giant card + spoken voice + buzz. Designed for low vision — big,
@@ -109,18 +115,38 @@ class _GuideScreenState extends State<GuideScreen> {
   Duration _pausedTotal = Duration.zero; // accumulated across every pause
   Timer? _checkpointTimer;
 
-  /// Set once the walker bails out and turns back — see [_turnBack]. Only
-  /// changes how already-fired cues are re-shown (reversed direction); the
-  /// saved [Trail] itself is never touched, so a later normal walk of it is
-  /// unaffected.
+  /// Set once the walker bails out via any of the three Turn-back options
+  /// (see [_openBailOutMenu]) — hides the Turn-back button (one-way for the
+  /// rest of this walk) regardless of which option they picked. The saved
+  /// [Trail] itself is never touched by any of the three, so a later normal
+  /// walk of it is unaffected.
   bool _turnedBack = false;
+
+  /// True only for the "reverse course" option — the other two bail-out
+  /// options install a freshly computed route with its own freshly
+  /// generated cues (see [_installComputedRoute]), already correctly
+  /// oriented for walking it start-to-end, so they must NOT go through the
+  /// left/right flip below a second time.
+  bool _reverseDirectionSwap = false;
+
+  /// A second, distinctly-coloured route line for the "shortest way back to
+  /// start" / "nearest road" bail-out options — kept separate from
+  /// [_routeLayer] (which keeps showing the original trail, greyed) so both
+  /// can be on screen together. Lazily created only if one of those options
+  /// is actually used.
+  RouteLayer? _escapeRouteLayer;
+
+  /// The path the off-route check compares against — null (meaning
+  /// [Trail.path]) until a computed escape route is installed, from then on
+  /// that route's own path.
+  List<LatLng>? _activePath;
 
   /// The cue to actually show/speak/colour for [cue] — see [effectiveCue].
   /// [Cue.type] on the *original* objects in [_cues]/[Trail.cues] is never
   /// mutated: [_drawCues]'s completed-marker lookup depends on those staying
   /// the same shared identity, so only the rendered/spoken representation
   /// swaps, never the underlying data.
-  Cue _shown(Cue cue) => effectiveCue(cue, _turnedBack);
+  Cue _shown(Cue cue) => effectiveCue(cue, _reverseDirectionSwap);
 
   /// Elapsed walking time, excluding time spent paused (both banked pauses
   /// and, if currently paused, the one in progress).
@@ -315,28 +341,100 @@ class _GuideScreenState extends State<GuideScreen> {
     _writeCheckpoint();
   }
 
-  /// Confirms before [_turnBack] — irreversible for this walk, so worth a
-  /// deliberate second tap rather than a single accidental one.
-  Future<void> _confirmTurnBack() async {
+  /// Opens the three bail-out choices, then confirms and executes whichever
+  /// one is picked. Reached from the Turn-back button — hidden once
+  /// [_turnedBack] regardless of which option was used, since all three are
+  /// one-way for the rest of this walk.
+  Future<void> _openBailOutMenu() async {
+    final mode = await showModalBottomSheet<_BailOutMode>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Padding(
+              padding: EdgeInsets.fromLTRB(20, 16, 20, 4),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text('How do you want to get back?',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.u_turn_left, color: Color(0xFF795548)),
+              title: const Text('Reverse course'),
+              subtitle: const Text('Retrace your steps exactly back to the start.'),
+              onTap: () => Navigator.pop(ctx, _BailOutMode.reverse),
+            ),
+            ListTile(
+              leading: const Icon(Icons.near_me, color: Color(0xFFE91E63)),
+              title: const Text('Shortest way back to start'),
+              subtitle: const Text(
+                  "Find the quickest mapped path back to the trailhead — "
+                  "may not be the way you came."),
+              onTap: () => Navigator.pop(ctx, _BailOutMode.toStart),
+            ),
+            ListTile(
+              leading: const Icon(Icons.directions_car_outlined, color: Color(0xFFE91E63)),
+              title: const Text('Nearest road'),
+              subtitle: const Text('Find the quickest mapped path out to the nearest road.'),
+              onTap: () => Navigator.pop(ctx, _BailOutMode.toRoad),
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+    if (mode != null) await _confirmBailOut(mode);
+  }
+
+  /// Confirms the chosen option — irreversible for this walk, so worth a
+  /// deliberate second tap rather than a single accidental one — then runs it.
+  Future<void> _confirmBailOut(_BailOutMode mode) async {
+    final (String title, String body) = switch (mode) {
+      _BailOutMode.reverse => (
+          'Turn back to the start?',
+          'This reverses your remaining cues so they guide you back the '
+              'way you came, and cancels the cues still ahead of you. '
+              "This can't be undone for this walk."
+        ),
+      _BailOutMode.toStart => (
+          'Find the shortest way back?',
+          'This finds the quickest mapped path back to the trailhead — it '
+              "may not be the path you walked in on. This can't be undone "
+              'for this walk.'
+        ),
+      _BailOutMode.toRoad => (
+          'Exit to the nearest road?',
+          'This finds the quickest mapped path out to the nearest road, '
+              "whichever direction that is. This can't be undone for this "
+              'walk.'
+        ),
+    };
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Turn back to the start?'),
-        content: const Text(
-            'This reverses your remaining cues so they guide you back the '
-            'way you came, and cancels the cues still ahead of you. '
-            "This can't be undone for this walk."),
+        title: Text(title),
+        content: Text(body),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(ctx, false),
               child: const Text('Cancel')),
           FilledButton(
               onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('Turn back')),
+              child: const Text('Continue')),
         ],
       ),
     );
-    if (ok == true) _turnBack();
+    if (ok != true) return;
+    switch (mode) {
+      case _BailOutMode.reverse:
+        _reverseCourse();
+      case _BailOutMode.toStart:
+        await _routeToStart();
+      case _BailOutMode.toRoad:
+        await _routeToNearestRoad();
+    }
   }
 
   /// Bails out of the rest of the trail and heads back to the start: the
@@ -344,7 +442,7 @@ class _GuideScreenState extends State<GuideScreen> {
   /// reverse order, so they fire correctly heading the other way; every cue
   /// still ahead is dropped for the rest of this walk. Runtime-only — see
   /// [_turnedBack].
-  void _turnBack() {
+  void _reverseCourse() {
     final passed = _cues.sublist(0, _nextIndex);
     setState(() {
       _cues
@@ -352,9 +450,91 @@ class _GuideScreenState extends State<GuideScreen> {
         ..addAll(passed.reversed);
       _nextIndex = 0;
       _turnedBack = true;
+      _reverseDirectionSwap = true;
       _activeCard = null;
     });
     _toast('Turned back — guiding you to the start');
+    _drawCues();
+    _writeCheckpoint();
+  }
+
+  /// Computes the shortest mapped path from here back to the trail's start
+  /// point — not necessarily retracing the walked path — and installs it as
+  /// the walk's new route. Falls back to [_reverseCourse] with a plain
+  /// explanation if no mapped route can be found (off the edge of the
+  /// downloaded map area, or genuinely no connected trail/road nearby).
+  Future<void> _routeToStart() async {
+    final pos = _lastPos;
+    final c = _c;
+    final start = widget.trail.path.isNotEmpty ? widget.trail.path.first : null;
+    if (pos == null || c == null || start == null) {
+      _toast("Couldn't find a mapped route — reversing your course instead");
+      _reverseCourse();
+      return;
+    }
+    final connection = await TrailRouter(c).connect(from: pos, to: start);
+    if (!connection.followed) {
+      _toast("Couldn't find a mapped route back to the start — "
+          'reversing your course instead');
+      _reverseCourse();
+      return;
+    }
+    await _installComputedRoute(connection.polyline,
+        toast: 'Guiding you the shortest way back to the start');
+  }
+
+  /// Computes the shortest mapped path from here to the nearest point
+  /// classified as a road — whichever direction that is — and installs it
+  /// as the walk's new route. Same not-found fallback as [_routeToStart].
+  Future<void> _routeToNearestRoad() async {
+    final pos = _lastPos;
+    final c = _c;
+    if (pos == null || c == null || !mounted) {
+      _toast("Couldn't find a mapped route — reversing your course instead");
+      _reverseCourse();
+      return;
+    }
+    final size = MediaQuery.of(context).size;
+    final connection = await TrailRouter(c).nearestRoad(
+      from: pos,
+      viewport: Rect.fromLTWH(0, 0, size.width, size.height),
+    );
+    if (connection == null) {
+      _toast("Couldn't find a nearby road — reversing your course instead");
+      _reverseCourse();
+      return;
+    }
+    await _installComputedRoute(connection.polyline,
+        toast: 'Guiding you the shortest way to the nearest road');
+  }
+
+  /// Shared by [_routeToStart]/[_routeToNearestRoad]: draws [path] as a
+  /// second, distinctly-coloured route line (the original trail's line
+  /// greys out rather than disappearing, so it's clear it's no longer the
+  /// active route), and replaces the walk's cues with freshly generated
+  /// turn-by-turn cues for this new path — already correctly oriented for
+  /// walking it start-to-end, so unlike [_reverseCourse] these must NOT go
+  /// through the left/right swap (see [_reverseDirectionSwap]).
+  Future<void> _installComputedRoute(List<LatLng> path, {required String toast}) async {
+    final c = _c;
+    if (c == null) return;
+    await _routeLayer?.setRoute(widget.trail.path, '#9E9E9E');
+    _escapeRouteLayer ??= RouteLayer(c, id: 'escape-route');
+    await _escapeRouteLayer!.ensure();
+    await _escapeRouteLayer!.setRoute(path, '#E91E63');
+    final cues = suggestCues(path);
+    setState(() {
+      _cues
+        ..clear()
+        ..addAll(cues);
+      _nextIndex = 0;
+      _turnedBack = true;
+      _activeCard = null;
+      _activePath = path;
+      _offRoute = false;
+      _offRouteCardShown = false;
+    });
+    _toast(toast);
     _drawCues();
     _writeCheckpoint();
   }
@@ -455,10 +635,16 @@ class _GuideScreenState extends State<GuideScreen> {
       setState(() => _distToNext = null);
     }
 
-    // Off-route check against the drawn path (skipped on a tick that fired a
-    // cue). Announcements are fire-and-forget so they never block updates.
-    if (!firedCue && widget.trail.path.length >= 2) {
-      final d = distanceToPath(me, widget.trail.path);
+    // Off-route check against whichever path is actually active — the
+    // trail's own drawn path normally, or a computed escape route once one
+    // has been installed (see _installComputedRoute); otherwise a walker
+    // correctly following a "shortest way back" route that legitimately
+    // leaves the original trail would be endlessly told they're off-trail.
+    // Skipped on a tick that fired a cue. Announcements are fire-and-forget
+    // so they never block updates.
+    final activePath = _activePath ?? widget.trail.path;
+    if (!firedCue && activePath.length >= 2) {
+      final d = distanceToPath(me, activePath);
       if (!_offRoute && d > _offRouteMeters) {
         _offRoute = true;
         setState(() {
@@ -641,18 +827,24 @@ class _GuideScreenState extends State<GuideScreen> {
         circleStrokeColor: '#ffffff',
         circleStrokeWidth: stacked ? 4 : 3,
       ));
-      symbolOptions.add(SymbolOptions(
-        geometry: pos,
-        textField: group
-            .map((cue) => '${rank[cue] ?? "–"}. ${_shown(cue).label}')
-            .join('\n'),
-        textSize: 15,
-        textColor: completed ? '#757575' : '#1a1a1a',
-        textHaloColor: '#ffffff',
-        textHaloWidth: 2,
-        textAnchor: 'top',
-        textOffset: const Offset(0, 1.1),
-      ));
+      // One symbol per cue rather than one joined multi-line symbol for a
+      // stack — multi-line text field rendering has proven fragile here (a
+      // combined "1. Start\n6. Finish" label could end up not drawing at
+      // all), where plain single-line labels have been reliable. Each line
+      // gets its own vertical offset so a stack still reads as one list.
+      for (var i = 0; i < group.length; i++) {
+        final cue = group[i];
+        symbolOptions.add(SymbolOptions(
+          geometry: pos,
+          textField: '${rank[cue] ?? "–"}. ${_shown(cue).label}',
+          textSize: 15,
+          textColor: completed ? '#757575' : '#1a1a1a',
+          textHaloColor: '#ffffff',
+          textHaloWidth: 2,
+          textAnchor: 'top',
+          textOffset: Offset(0, 1.1 + i * 0.95),
+        ));
+      }
     }
 
     if (myGeneration != _drawGeneration) return;
@@ -888,7 +1080,7 @@ class _GuideScreenState extends State<GuideScreen> {
                 elevGain: _elevGain,
                 onStop: _stop,
                 onPauseResume: _paused ? _resumeWalk : _pauseWalk,
-                onTurnBack: _turnedBack ? null : _confirmTurnBack,
+                onTurnBack: _turnedBack ? null : _openBailOutMenu,
                 debugText: _debugText(),
               ),
             ),

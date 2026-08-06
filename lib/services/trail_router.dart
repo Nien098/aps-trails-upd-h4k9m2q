@@ -213,27 +213,8 @@ class TrailRouter {
   }
 
   Future<_Graph> _buildGraph(Rect rect) async {
-    final raw = await controller.queryRenderedFeaturesInRect(
-      rect,
-      _walkableLayers,
-      null,
-    );
     final graph = _Graph();
-    for (final f in raw) {
-      final feature = f is String ? jsonDecode(f) : f;
-      if (feature is! Map) continue;
-      final geom = feature['geometry'];
-      if (geom is! Map) continue;
-      final type = geom['type'];
-      final coords = geom['coordinates'];
-      if (type == 'LineString') {
-        graph.addLine(coords);
-      } else if (type == 'MultiLineString') {
-        for (final line in coords) {
-          graph.addLine(line);
-        }
-      }
-    }
+    await _addFeaturesToGraph(graph, rect, _walkableLayers, isRoad: false);
     // A single real-world trail can arrive as several separate LineString
     // features (e.g. split around a line-label's placement point, or by tile
     // clipping) whose "shared" endpoint differs by a few metres between
@@ -244,6 +225,60 @@ class TrailRouter {
     // so the trail reads as one continuous edge again.
     graph._mergeNearbyNodes(4.0);
     return graph;
+  }
+
+  /// Same idea as [_buildGraph], but keeps roads and trails/sidewalks
+  /// tagged separately (see [_Graph.roadNodeKeys]) — used by [nearestRoad],
+  /// which needs to tell the two apart rather than treat them as one
+  /// undifferentiated walkable network.
+  Future<_Graph> _buildTaggedGraph(Rect rect) async {
+    final graph = _Graph();
+    await _addFeaturesToGraph(graph, rect, ['trails', 'sidewalks'], isRoad: false);
+    await _addFeaturesToGraph(graph, rect, ['roads-fill'], isRoad: true);
+    graph._mergeNearbyNodes(4.0);
+    return graph;
+  }
+
+  Future<void> _addFeaturesToGraph(
+    _Graph graph,
+    Rect rect,
+    List<String> layers, {
+    required bool isRoad,
+  }) async {
+    final raw = await controller.queryRenderedFeaturesInRect(rect, layers, null);
+    for (final f in raw) {
+      final feature = f is String ? jsonDecode(f) : f;
+      if (feature is! Map) continue;
+      final geom = feature['geometry'];
+      if (geom is! Map) continue;
+      final type = geom['type'];
+      final coords = geom['coordinates'];
+      if (type == 'LineString') {
+        graph.addLine(coords, isRoad: isRoad);
+      } else if (type == 'MultiLineString') {
+        for (final line in coords) {
+          graph.addLine(line, isRoad: isRoad);
+        }
+      }
+    }
+  }
+
+  /// Finds the shortest path from [from] to the *nearest* point classified
+  /// as a road (not a specific destination) within [viewport] — "get me out
+  /// to a road, whichever is closest" rather than "get me to this road".
+  /// A single Dijkstra run naturally finds this: nodes are popped in
+  /// increasing-distance order, so the first road-tagged node popped is
+  /// guaranteed nearest. Returns null if no road is reachable from what's
+  /// currently mapped/visible — callers should treat that the same as any
+  /// other "no route found" case, not retry with a wider search on their own.
+  Future<TrailConnection?> nearestRoad({
+    required LatLng from,
+    required Rect viewport,
+  }) async {
+    final graph = await _buildTaggedGraph(viewport);
+    final line = graph.routeToNearestRoad(from);
+    if (line == null) return null;
+    return TrailConnection(line.last, line, true);
   }
 
   static double _polylineLength(List<LatLng> pts) {
@@ -274,10 +309,15 @@ class _Graph {
   final Map<String, List<_Edge>> adj = {};
   final List<_Seg> _segments = [];
 
+  /// Nodes that are an endpoint of at least one road-tagged edge — see
+  /// [TrailRouter._buildTaggedGraph]/[routeToNearestRoad]. Empty for a graph
+  /// built the untagged way ([TrailRouter._buildGraph]).
+  final Set<String> roadNodeKeys = {};
+
   static String _key(double lat, double lng) =>
       '${lat.toStringAsFixed(5)}_${lng.toStringAsFixed(5)}';
 
-  void addLine(dynamic coords) {
+  void addLine(dynamic coords, {bool isRoad = false}) {
     if (coords is! List) return;
     LatLng? prev;
     String? prevKey;
@@ -293,6 +333,10 @@ class _Graph {
         (adj[prevKey] ??= []).add(_Edge(k, w));
         (adj[k] ??= []).add(_Edge(prevKey, w));
         _segments.add(_Seg(prevKey, k, prev, p));
+        if (isRoad) {
+          roadNodeKeys.add(prevKey);
+          roadNodeKeys.add(k);
+        }
       }
       prev = p;
       prevKey = k;
@@ -342,12 +386,16 @@ class _Graph {
       final s = _segments[i];
       _segments[i] = _Seg(find(s.aKey), find(s.bKey), s.a, s.b);
     }
+    final newRoadNodeKeys = {for (final k in roadNodeKeys) find(k)};
     nodes
       ..clear()
       ..addAll(newNodes);
     adj
       ..clear()
       ..addAll(newAdj);
+    roadNodeKeys
+      ..clear()
+      ..addAll(newRoadNodeKeys);
   }
 
   ({LatLng point, double meters, _Seg seg})? _nearestSeg(LatLng p) {
@@ -488,6 +536,46 @@ class _Graph {
     }
     if (keys.isEmpty || keys.first != startKey) return null;
     return [from, for (final key in keys) nodes[key]!, to];
+  }
+
+  /// Dijkstra from [from] (spliced onto the graph) that stops at the first
+  /// road-tagged node it pops, rather than routing to one fixed destination
+  /// — see [TrailRouter.nearestRoad]. Nodes come off the heap in
+  /// non-decreasing distance order, so the first road node popped is
+  /// guaranteed the nearest reachable one; no need to check every candidate
+  /// and compare. Returns the followed polyline (including [from]), or null
+  /// if this graph has no road-tagged nodes at all, or none are reachable.
+  List<LatLng>? routeToNearestRoad(LatLng from) {
+    if (roadNodeKeys.isEmpty) return null;
+    final startKey = spliceTempNode(from, 'ROADFROM');
+    if (startKey.isEmpty) return null;
+
+    final dist = <String, double>{startKey: 0};
+    final prev = <String, String>{};
+    final heap = _MinHeap()..push(startKey, 0);
+    String? goalKey;
+
+    while (heap.isNotEmpty) {
+      final (node, d) = heap.pop();
+      if (d > (dist[node] ?? double.infinity)) continue;
+      if (node != startKey && roadNodeKeys.contains(node)) {
+        goalKey = node;
+        break;
+      }
+      for (final e in adj[node] ?? const <_Edge>[]) {
+        final nd = d + e.weight;
+        if (nd < (dist[e.to] ?? double.infinity)) {
+          dist[e.to] = nd;
+          prev[e.to] = node;
+          heap.push(e.to, nd);
+        }
+      }
+    }
+    if (goalKey == null) return null;
+
+    final keys = tracePath(prev, startKey, goalKey);
+    if (keys.isEmpty) return null;
+    return [from, for (final key in keys) nodes[key]!];
   }
 }
 

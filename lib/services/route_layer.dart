@@ -7,14 +7,22 @@ import 'package:maplibre_gl/maplibre_gl.dart';
 /// The line colour is data-driven (read from the feature) so it can be changed
 /// by simply re-setting the route.
 class RouteLayer {
-  RouteLayer(this.controller);
+  /// [id] distinguishes multiple RouteLayers drawn on the same map at once
+  /// (e.g. the original trail plus a computed escape route) — each needs
+  /// its own source/layer ids or the second instance's `ensure()` would
+  /// collide with the first's.
+  RouteLayer(this.controller, {String id = 'route'})
+      : _sourceId = id,
+        _lineLayerId = '$id-line',
+        _arrowLayerId = '$id-arrows',
+        _arrowImage = '$id-arrow';
 
   final MapLibreMapController controller;
 
-  static const _sourceId = 'route';
-  static const _lineLayerId = 'route-line';
-  static const _arrowLayerId = 'route-arrows';
-  static const _arrowImage = 'route-arrow';
+  final String _sourceId;
+  final String _lineLayerId;
+  final String _arrowLayerId;
+  final String _arrowImage;
 
   bool _ready = false;
 
@@ -56,7 +64,7 @@ class RouteLayer {
     await controller.addSymbolLayer(
       _sourceId,
       _arrowLayerId,
-      const SymbolLayerProperties(
+      SymbolLayerProperties(
         iconImage: _arrowImage,
         iconSize: 0.5,
         symbolPlacement: 'line',
