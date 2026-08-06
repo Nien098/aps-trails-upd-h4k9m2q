@@ -1414,23 +1414,31 @@ class _AuthorScreenState extends State<AuthorScreen> {
                 top: 12,
                 left: 0,
                 right: 0,
+                // Clamped for the same reason as _ModeBar — a large system
+                // font/display scale (Samsung's range in particular can go
+                // well past stock Android's) has room to grow this bar
+                // taller, but not to shatter "Drag to outline a boundary
+                // area" into single-character lines.
                 child: Center(
-                  child: Card(
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 16, vertical: 10),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const Icon(Icons.draw),
-                          const SizedBox(width: 10),
-                          const Text('Drag to outline a boundary area'),
-                          const SizedBox(width: 10),
-                          TextButton(
-                            onPressed: _toggleDrawBoundary,
-                            child: const Text('Cancel'),
-                          ),
-                        ],
+                  child: MediaQuery.withClampedTextScaling(
+                    maxScaleFactor: 1.3,
+                    child: Card(
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 16, vertical: 10),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(Icons.draw),
+                            const SizedBox(width: 10),
+                            const Text('Drag to outline a boundary area'),
+                            const SizedBox(width: 10),
+                            TextButton(
+                              onPressed: _toggleDrawBoundary,
+                              child: const Text('Cancel'),
+                            ),
+                          ],
+                        ),
                       ),
                     ),
                   ),
@@ -1444,28 +1452,31 @@ class _AuthorScreenState extends State<AuthorScreen> {
                 left: 12,
                 right: 12,
                 bottom: 190 + MediaQuery.viewPaddingOf(context).bottom,
-                child: Card(
-                  elevation: 4,
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 14, vertical: 10),
-                    child: Row(
-                      children: [
-                        const Icon(Icons.draw),
-                        const SizedBox(width: 10),
-                        const Expanded(
-                          child: Text('Boundary area set',
-                              style: TextStyle(fontWeight: FontWeight.w600)),
-                        ),
-                        TextButton(
-                          onPressed: _clearBoundary,
-                          child: const Text('Clear'),
-                        ),
-                        FilledButton(
-                          onPressed: _busy ? null : _openGenerator,
-                          child: const Text('Generate here'),
-                        ),
-                      ],
+                child: MediaQuery.withClampedTextScaling(
+                  maxScaleFactor: 1.3,
+                  child: Card(
+                    elevation: 4,
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 10),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.draw),
+                          const SizedBox(width: 10),
+                          const Expanded(
+                            child: Text('Boundary area set',
+                                style: TextStyle(fontWeight: FontWeight.w600)),
+                          ),
+                          TextButton(
+                            onPressed: _clearBoundary,
+                            child: const Text('Clear'),
+                          ),
+                          FilledButton(
+                            onPressed: _busy ? null : _openGenerator,
+                            child: const Text('Generate here'),
+                          ),
+                        ],
+                      ),
                     ),
                   ),
                 ),
@@ -1571,25 +1582,28 @@ class _AuthorScreenState extends State<AuthorScreen> {
                 left: 12,
                 right: 12,
                 bottom: 190 + MediaQuery.viewPaddingOf(context).bottom,
-                child: Card(
-                  color: const Color(0xFFFFF8E1),
-                  elevation: 4,
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 14, vertical: 10),
-                    child: Row(
-                      children: [
-                        const Icon(Icons.open_with, color: Color(0xFFF57F17)),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: Text(
-                              'Moving "${_moving!.label}" — tap the map to place it',
-                              style: const TextStyle(fontWeight: FontWeight.w600)),
-                        ),
-                        TextButton(
-                            onPressed: _cancelMoving,
-                            child: const Text('Cancel')),
-                      ],
+                child: MediaQuery.withClampedTextScaling(
+                  maxScaleFactor: 1.3,
+                  child: Card(
+                    color: const Color(0xFFFFF8E1),
+                    elevation: 4,
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 10),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.open_with, color: Color(0xFFF57F17)),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                                'Moving "${_moving!.label}" — tap the map to place it',
+                                style: const TextStyle(fontWeight: FontWeight.w600)),
+                          ),
+                          TextButton(
+                              onPressed: _cancelMoving,
+                              child: const Text('Cancel')),
+                        ],
+                      ),
                     ),
                   ),
                 ),
@@ -1599,24 +1613,27 @@ class _AuthorScreenState extends State<AuthorScreen> {
                 left: 12,
                 right: 12,
                 bottom: 190 + MediaQuery.viewPaddingOf(context).bottom,
-                child: Card(
-                  color: const Color(0xFFFFF8E1),
-                  elevation: 4,
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 14, vertical: 10),
-                    child: Row(
-                      children: [
-                        const Icon(Icons.open_with, color: Color(0xFFF57F17)),
-                        const SizedBox(width: 10),
-                        const Expanded(
-                          child: Text('Moving point — tap the map to place it',
-                              style: TextStyle(fontWeight: FontWeight.w600)),
-                        ),
-                        TextButton(
-                            onPressed: _cancelMovingAnchor,
-                            child: const Text('Cancel')),
-                      ],
+                child: MediaQuery.withClampedTextScaling(
+                  maxScaleFactor: 1.3,
+                  child: Card(
+                    color: const Color(0xFFFFF8E1),
+                    elevation: 4,
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 10),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.open_with, color: Color(0xFFF57F17)),
+                          const SizedBox(width: 10),
+                          const Expanded(
+                            child: Text('Moving point — tap the map to place it',
+                                style: TextStyle(fontWeight: FontWeight.w600)),
+                          ),
+                          TextButton(
+                              onPressed: _cancelMovingAnchor,
+                              child: const Text('Cancel')),
+                        ],
+                      ),
                     ),
                   ),
                 ),
@@ -1674,25 +1691,34 @@ class _ModeBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Card(
-      elevation: 4,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(10, 2, 2, 10),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            // A real Row slot for the collapse/hide icons (stacked vertically,
-            // beside the segmented button) rather than absolutely-positioned
-            // overlay icons — those sat right on top of the "Add cue" segment
-            // and looked cramped.
-            Row(
-              children: [
-                IconButton(
-                  visualDensity: VisualDensity.compact,
-                  tooltip: 'Auto-generate a trail here',
-                  icon: const Icon(Icons.auto_awesome),
-                  onPressed: onGenerate,
-                ),
+    // A few phones (Samsung's Settings → Display font/zoom range in
+    // particular goes well past stock Android's usual max) can push the
+    // system text scale high enough that this bar's fixed-height icon+label
+    // rows have nowhere to grow, and "Draw path"/"Add cue" wrap down to one
+    // character per line instead of just growing taller. Clamped rather
+    // than disabled outright — 1.3x still gives real accessibility headroom,
+    // just not enough to break the layout.
+    return MediaQuery.withClampedTextScaling(
+      maxScaleFactor: 1.3,
+      child: Card(
+        elevation: 4,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(10, 2, 2, 10),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // A real Row slot for the collapse/hide icons (stacked
+              // vertically, beside the segmented button) rather than
+              // absolutely-positioned overlay icons — those sat right on
+              // top of the "Add cue" segment and looked cramped.
+              Row(
+                children: [
+                  IconButton(
+                    visualDensity: VisualDensity.compact,
+                    tooltip: 'Auto-generate a trail here',
+                    icon: const Icon(Icons.auto_awesome),
+                    onPressed: onGenerate,
+                  ),
                 IconButton(
                   visualDensity: VisualDensity.compact,
                   tooltip: drawBoundaryActive
@@ -1798,6 +1824,7 @@ class _ModeBar extends StatelessWidget {
             ],
           ],
         ),
+      ),
       ),
     );
   }
