@@ -659,6 +659,15 @@ class _GuideScreenState extends State<GuideScreen> {
     if (circleOptions.isNotEmpty) await c.addCircles(circleOptions);
     if (myGeneration != _drawGeneration) return;
     if (symbolOptions.isNotEmpty) await c.addSymbols(symbolOptions);
+    // Cue markers can legitimately sit close together along a trail (a tight
+    // switchback, several turns down one short block). MapLibre's symbol
+    // layer defaults to hiding a label outright rather than showing two that
+    // collide — fine for a general map's clutter, wrong for markers we
+    // deliberately placed and numbered; a hidden "3. Turn left" reads as
+    // exactly the "the dots lost their labels" bug this addresses. A no-op
+    // after the first successful call (checked internally by the plugin).
+    if (myGeneration != _drawGeneration) return;
+    await c.setSymbolTextAllowOverlap(true);
   }
 
   Region get _region => regionById(widget.trail.regionId);
