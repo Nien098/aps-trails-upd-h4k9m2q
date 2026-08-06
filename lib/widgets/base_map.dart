@@ -33,6 +33,7 @@ class BaseMap extends StatefulWidget {
     this.onMapLongClick,
     this.myLocationEnabled = false,
     this.trackCameraPosition = false,
+    this.gesturesEnabled = true,
   });
 
   final Region region;
@@ -43,6 +44,12 @@ class BaseMap extends StatefulWidget {
   final OnMapClickCallback? onMapLongClick;
   final bool myLocationEnabled;
   final bool trackCameraPosition;
+
+  /// False disables the native one-finger pan/rotate camera gestures —
+  /// used while a screen-space overlay gesture (e.g. dragging out a
+  /// boundary box) needs sole ownership of drag input instead of fighting
+  /// the map's own camera-drag recognizer for it.
+  final bool gesturesEnabled;
 
   @override
   State<BaseMap> createState() => _BaseMapState();
@@ -209,6 +216,8 @@ class _BaseMapState extends State<BaseMap> {
               onStyleLoadedCallback: _onStyleLoaded,
               onMapClick: widget.onMapClick,
               onMapLongClick: widget.onMapLongClick,
+              scrollGesturesEnabled: widget.gesturesEnabled,
+              rotateGesturesEnabled: widget.gesturesEnabled,
             ),
           ),
         );

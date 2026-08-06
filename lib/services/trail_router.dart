@@ -130,49 +130,61 @@ class TrailRouter {
     return TrailConnection(end, line, true);
   }
 
+  /// Max times any single edge may be re-walked while padding a route out
+  /// toward [targetMeters] — see [generate]. Bounds how long a pathologically
+  /// small network (a schoolyard loop) can be forced to spin before giving up,
+  /// rather than reusing edges forever trying to hit an unreachable target.
+  static const _maxEdgeVisitsForPadding = 4;
+
   /// Auto-generates a walkable route from the trails currently visible in
-  /// [viewport] (a screen-pixel rect covering the map). Starts near [center],
-  /// aims for [targetMeters] total length, and returns a loop when [preferLoop]
-  /// is set and a reasonable different-return path exists — otherwise an
-  /// out-and-back. Returns null when no usable trail network is in view.
+  /// [viewport] (a screen-pixel rect covering the map), or — when [boundary]
+  /// is given — only from trails inside that geographic box, regardless of
+  /// what else the query happens to pick up nearby (see
+  /// [_Graph.restrictToBounds]). Starts near [center], aims for
+  /// [targetMeters] total length, and returns a loop when [preferLoop] is set
+  /// and a reasonable different-return path exists — otherwise an
+  /// out-and-back.
+  ///
+  /// When the reachable network is shorter than [targetMeters] (common for a
+  /// small boxed-in area), the route pads itself out by deliberately
+  /// re-walking sections — see [_Graph.coverageWalk] — rather than just
+  /// returning whatever the single longest pass happens to be. Returns null
+  /// when no usable trail network is in view/inside the boundary at all.
   Future<GeneratedRoute?> generate({
     required LatLng center,
     required Rect viewport,
     required double targetMeters,
     bool preferLoop = true,
+    LatLngBounds? boundary,
   }) async {
-    final graph = await _buildGraph(viewport);
+    final graph = await _buildGraph(
+        boundary != null ? await _screenRectForBounds(boundary) : viewport);
+    if (boundary != null) graph.restrictToBounds(boundary);
+
     final start = graph.spliceTempNode(center, 'GEN');
     if (start.isEmpty) return null;
 
-    // Shortest-path tree from the start, to find a good turnaround point.
-    final (dist, prev) = graph.dijkstraTree(start);
-    final half = targetMeters / 2;
-
-    String? apex;
-    double bestScore = double.infinity;
-    dist.forEach((key, d) {
-      if (key == start || d <= 0) return;
-      final score = (d - half).abs();
-      if (score < bestScore) {
-        bestScore = score;
-        apex = key;
-      }
-    });
+    // Half the target each way for a loop (out + back), or half for the
+    // out-leg of an out-and-back (mirrored on the way home) — either way the
+    // walk that actually explores the network only needs to cover half of
+    // what the finished route will total.
+    final outKeys = graph.coverageWalk(start, targetMeters / 2,
+        maxVisitsPerEdge: _maxEdgeVisitsForPadding);
     // Need meaningful reach; if the nearest trails are a tiny stub, bail.
-    if (apex == null || (dist[apex] ?? 0) < 150) return null;
-
-    final outKeys = graph.tracePath(prev, start, apex!);
     if (outKeys.length < 2) return null;
+    final current = outKeys.last;
 
     List<String>? backKeys;
     if (preferLoop) {
-      // Penalise re-using the outbound edges so the return finds a new way.
+      // Penalise re-using the outbound edges so the return prefers a
+      // genuinely different way home where the (possibly already-padded)
+      // network offers one, without forbidding reuse outright — a small box
+      // may have no alternative at all for the closing leg.
       final used = <String>{};
       for (var i = 0; i < outKeys.length - 1; i++) {
         used.add(_Graph.edgeId(outKeys[i], outKeys[i + 1]));
       }
-      backKeys = graph.routeAvoiding(apex!, start, used, penalty: 5.0);
+      backKeys = graph.routeAvoiding(current, start, used, penalty: 5.0);
       // Only accept a genuine loop: it must actually differ from retracing.
       if (backKeys != null) {
         final overlap = _overlapFraction(outKeys, backKeys);
@@ -188,17 +200,32 @@ class TrailRouter {
     final path = [for (final k in routeKeys) graph.nodeAt(k)];
     if (path.length < 2) return null;
 
-    final apexPoint = graph.nodeAt(apex!);
-    final anchors = loop
-        ? [path.first, apexPoint, path.last]
-        : [path.first, apexPoint, path.first];
-
     return GeneratedRoute(
       path: path,
-      anchors: anchors,
+      anchors: _sampleAnchors(path),
       meters: _polylineLength(path),
       loop: loop,
     );
+  }
+
+  /// Waypoints along a (possibly long, self-crossing, padded) generated
+  /// [path] spaced roughly every [intervalMeters] — keeps the anchor list a
+  /// manageable size for [author_screen.dart]'s segment-editing UI instead of
+  /// one anchor per graph node, which a heavily-padded route could have
+  /// hundreds of.
+  static List<LatLng> _sampleAnchors(List<LatLng> path, {double intervalMeters = 400}) {
+    if (path.length < 2) return path;
+    final anchors = [path.first];
+    var sinceLast = 0.0;
+    for (var i = 1; i < path.length; i++) {
+      sinceLast += metersBetween(path[i - 1], path[i]);
+      if (sinceLast >= intervalMeters) {
+        anchors.add(path[i]);
+        sinceLast = 0;
+      }
+    }
+    if (anchors.last != path.last) anchors.add(path.last);
+    return anchors;
   }
 
   /// Fraction of [a]'s edges that also appear in [b] (both undirected).
@@ -224,8 +251,15 @@ class TrailRouter {
   /// MediaQuery-sized rect only covers roughly the top-left third of the
   /// real viewport, silently hiding anything further down or right on
   /// screen — exactly the failure mode seen routing to a real destination.
-  Future<Rect> visibleViewportRect() async {
-    final bounds = await controller.getVisibleRegion();
+  Future<Rect> visibleViewportRect() async =>
+      _screenRectForBounds(await controller.getVisibleRegion());
+
+  /// Projects [bounds]'s 4 corners into the same native-pixel space as
+  /// [visibleViewportRect] and returns their bounding [Rect] — shared so any
+  /// caller with an arbitrary geographic box (not just "whatever's on screen
+  /// right now") can build a correctly-scaled query rect for it, e.g.
+  /// [generate]'s `boundary` param.
+  Future<Rect> _screenRectForBounds(LatLngBounds bounds) async {
     final corners = await Future.wait([
       controller.toScreenLocation(bounds.northeast),
       controller.toScreenLocation(bounds.southwest),
@@ -484,6 +518,83 @@ class _Graph {
     roadNodeKeys
       ..clear()
       ..addAll(newRoadNodeKeys);
+  }
+
+  /// Drops every node (and any edge/segment touching it) that falls outside
+  /// [bounds] — a hard geographic guarantee that generation never leaves a
+  /// user-drawn boundary box, regardless of how imprecise the screen-rect
+  /// query that built the graph was (see [TrailRouter.generate]'s
+  /// `boundary` param).
+  void restrictToBounds(LatLngBounds bounds) {
+    final keep = {
+      for (final e in nodes.entries)
+        if (bounds.contains(e.value)) e.key,
+    };
+    nodes.removeWhere((k, _) => !keep.contains(k));
+    adj.removeWhere((k, _) => !keep.contains(k));
+    for (final list in adj.values) {
+      list.removeWhere((e) => !keep.contains(e.to));
+    }
+    _segments.removeWhere((s) => !keep.contains(s.aKey) || !keep.contains(s.bKey));
+    roadNodeKeys.removeWhere((k) => !keep.contains(k));
+  }
+
+  /// Greedily walks the graph from [startKey], always preferring the
+  /// least-visited adjacent edge (unwalked ones first), until either
+  /// [targetMeters] is reached or every edge reachable from wherever the
+  /// walk currently is has hit [maxVisitsPerEdge] — see [TrailRouter.generate].
+  /// This is what lets a short, boxed-in trail network still produce a long
+  /// suggested walk: once the fresh ground runs out, it deliberately doubles
+  /// back and re-walks sections (bounded by [maxVisitsPerEdge], so a
+  /// pathologically tiny network can't spin forever) instead of just
+  /// stopping at whatever the network's single-pass reach happens to be.
+  /// Returns the sequence of node keys walked, including [startKey] first
+  /// (length 1 if nothing was reachable at all).
+  List<String> coverageWalk(String startKey, double targetMeters,
+      {required int maxVisitsPerEdge}) {
+    final visits = <String, int>{};
+    final keys = [startKey];
+    var current = startKey;
+    var walked = 0.0;
+    String? cameFrom;
+
+    while (walked < targetMeters) {
+      final options = adj[current] ?? const <_Edge>[];
+      if (options.isEmpty) break;
+
+      // Prefer the least-visited edge, skipping an immediate retrace of the
+      // edge just taken (unless that's the only option — a dead end).
+      _Edge? pick;
+      var pickVisits = 1 << 30;
+      for (final e in options) {
+        if (e.to == cameFrom && options.length > 1) continue;
+        final v = visits[edgeId(current, e.to)] ?? 0;
+        if (v >= maxVisitsPerEdge) continue;
+        if (v < pickVisits) {
+          pickVisits = v;
+          pick = e;
+        }
+      }
+      // Every non-backtrack option is at the visit cap (or this is a dead
+      // end) — allow retracing rather than stopping dead, still bounded.
+      if (pick == null) {
+        for (final e in options) {
+          final v = visits[edgeId(current, e.to)] ?? 0;
+          if (v < maxVisitsPerEdge && v < pickVisits) {
+            pickVisits = v;
+            pick = e;
+          }
+        }
+      }
+      if (pick == null) break;
+
+      visits[edgeId(current, pick.to)] = pickVisits + 1;
+      cameFrom = current;
+      current = pick.to;
+      walked += pick.weight;
+      keys.add(current);
+    }
+    return keys;
   }
 
   ({LatLng point, double meters, _Seg seg})? _nearestSeg(LatLng p, {bool roadOnly = false}) {

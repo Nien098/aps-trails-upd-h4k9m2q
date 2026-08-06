@@ -9,6 +9,7 @@ import '../cue_style.dart';
 import '../models/region.dart';
 import '../models/trail.dart';
 import '../trail_colors.dart';
+import '../services/boundary_layer.dart';
 import '../services/cue_gen.dart';
 import '../services/geo.dart';
 import '../services/route_layer.dart';
@@ -39,6 +40,24 @@ class _AuthorScreenState extends State<AuthorScreen> {
   late Region _region;
   MapLibreMapController? _c;
   RouteLayer? _routeLayer;
+  BoundaryLayer? _boundaryLayer;
+
+  /// While true, a drag on the map draws a generation-boundary box instead
+  /// of panning the camera or placing an anchor/cue — see
+  /// [_onBoundaryPanStart]/[_onBoundaryPanEnd] and [BaseMap.gesturesEnabled].
+  bool _drawBoundaryMode = false;
+
+  /// Screen-space drag-in-progress corners (only set while actively
+  /// dragging), used to paint a live preview without any platform-channel
+  /// round trips — converted to a geographic [_genBoundary] once the drag
+  /// ends.
+  Offset? _dragStart;
+  Offset? _dragCurrent;
+
+  /// The drawn boundary box constraining auto-generation, or null to fall
+  /// back to whatever's currently on screen (existing behaviour).
+  LatLngBounds? _genBoundary;
+
   bool _cueMode = false;
   bool _dirty = false;
   bool _follow = true; // auto-follow trail lines between anchors
@@ -251,7 +270,64 @@ class _AuthorScreenState extends State<AuthorScreen> {
   Future<void> _onStyleLoaded() async {
     _routeLayer = RouteLayer(_c!);
     await _routeLayer!.ensure();
+    _boundaryLayer = BoundaryLayer(_c!);
+    await _boundaryLayer!.ensure();
     await _redraw();
+  }
+
+  void _toggleDrawBoundary() {
+    setState(() {
+      _drawBoundaryMode = !_drawBoundaryMode;
+      _dragStart = null;
+      _dragCurrent = null;
+    });
+  }
+
+  void _onBoundaryPanStart(DragStartDetails d) {
+    setState(() {
+      _dragStart = d.localPosition;
+      _dragCurrent = d.localPosition;
+    });
+  }
+
+  void _onBoundaryPanUpdate(DragUpdateDetails d) {
+    setState(() => _dragCurrent = d.localPosition);
+  }
+
+  Future<void> _onBoundaryPanEnd(DragEndDetails _) async {
+    final c = _c;
+    final start = _dragStart, end = _dragCurrent;
+    setState(() {
+      _dragStart = null;
+      _dragCurrent = null;
+    });
+    // A negligible drag (an accidental tap while in this mode) isn't a
+    // deliberate box — ignore it rather than setting a degenerate boundary
+    // that would empty the graph out entirely.
+    if (c == null || start == null || end == null || (end - start).distance < 20) {
+      return;
+    }
+    final corners = await Future.wait([
+      c.toLatLng(Point(start.dx, start.dy)),
+      c.toLatLng(Point(end.dx, end.dy)),
+    ]);
+    final lats = [corners[0].latitude, corners[1].latitude]..sort();
+    final lngs = [corners[0].longitude, corners[1].longitude]..sort();
+    final boundary = LatLngBounds(
+      southwest: LatLng(lats.first, lngs.first),
+      northeast: LatLng(lats.last, lngs.last),
+    );
+    if (!mounted) return;
+    setState(() {
+      _genBoundary = boundary;
+      _drawBoundaryMode = false;
+    });
+    await _boundaryLayer?.setBounds(boundary);
+  }
+
+  Future<void> _clearBoundary() async {
+    setState(() => _genBoundary = null);
+    await _boundaryLayer?.setBounds(null);
   }
 
   /// Flattens the per-anchor segments into the full route polyline.
@@ -849,7 +925,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
         constraints: BoxConstraints(
           maxHeight: MediaQuery.of(context).size.height * 0.9,
         ),
-        builder: (_) => const _GeneratorSheet(),
+        builder: (_) => _GeneratorSheet(hasBoundary: _genBoundary != null),
       );
       if (choice == null || !mounted) return;
       if (_trail.anchors.isNotEmpty &&
@@ -872,24 +948,29 @@ class _AuthorScreenState extends State<AuthorScreen> {
       _toast('Still working on the last request — try again in a moment');
       return;
     }
-    final size = MediaQuery.of(context).size;
     setState(() => _busy = true);
     try {
-      final bounds = await c.getVisibleRegion();
+      final router = TrailRouter(c);
+      final boundary = _genBoundary;
+      // With a drawn boundary, center inside it rather than the camera's
+      // (possibly much larger, or off-boundary) current view.
+      final bounds = boundary ?? await c.getVisibleRegion();
       final center = LatLng(
         (bounds.southwest.latitude + bounds.northeast.latitude) / 2,
         (bounds.southwest.longitude + bounds.northeast.longitude) / 2,
       );
-      final viewport = Rect.fromLTWH(0, 0, size.width, size.height);
-      final route = await TrailRouter(c).generate(
+      final route = await router.generate(
         center: center,
-        viewport: viewport,
+        viewport: await router.visibleViewportRect(),
         targetMeters: choice.meters,
         preferLoop: choice.loop,
+        boundary: boundary,
       );
       if (!mounted) return;
       if (route == null) {
-        _toast('No trails found here — zoom to a trail area and try again');
+        _toast(boundary != null
+            ? 'No trails found in your drawn area — try a bigger box'
+            : 'No trails found here — zoom to a trail area and try again');
         return;
       }
       setState(() {
@@ -909,8 +990,15 @@ class _AuthorScreenState extends State<AuthorScreen> {
       await _redraw();
       final dist = Settings.instance.formatDistance(route.meters);
       final cueNote = choice.cues ? ' · ${_trail.cues.length} cues' : '';
-      _toast(
-          '${route.loop ? "Loop" : "Out-and-back"} generated — $dist$cueNote');
+      // A boxed-in area can run out of fresh trail to pad the route with
+      // (see TrailRouter.generate's coverage-walk) — say so plainly rather
+      // than reporting a shortfall as if it were what was asked for.
+      final shortfall = route.meters < choice.meters * 0.7;
+      final note = shortfall
+          ? ' — that\'s all the trail this area has room for, even with some doubling back'
+          : '';
+      _toast('${route.loop ? "Loop" : "Out-and-back"} generated — '
+          '$dist$cueNote$note');
     } catch (_) {
       if (mounted) _toast('Could not generate a route here — try another spot');
     } finally {
@@ -1222,7 +1310,91 @@ class _AuthorScreenState extends State<AuthorScreen> {
               onMapClick: _onMapClick,
               onMapLongClick: _onMapLongClick,
               myLocationEnabled: true, // show the author's position dot
+              gesturesEnabled: !_drawBoundaryMode,
             ),
+            // Absorbs drag input while drawing a generation-boundary box —
+            // only present in that mode, so it never steals ordinary taps
+            // (path/cue placement) the rest of the time. The live rectangle
+            // is a plain screen-space overlay (no platform-channel calls per
+            // drag frame); only the two final corners get converted to
+            // LatLng, in _onBoundaryPanEnd.
+            if (_drawBoundaryMode)
+              Positioned.fill(
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onPanStart: _onBoundaryPanStart,
+                  onPanUpdate: _onBoundaryPanUpdate,
+                  onPanEnd: _onBoundaryPanEnd,
+                  child: _dragStart == null || _dragCurrent == null
+                      ? const SizedBox.expand()
+                      : CustomPaint(
+                          size: Size.infinite,
+                          painter: _BoundaryPreviewPainter(
+                              _dragStart!, _dragCurrent!),
+                        ),
+                ),
+              ),
+            if (_drawBoundaryMode)
+              Positioned(
+                top: 12,
+                left: 0,
+                right: 0,
+                child: Center(
+                  child: Card(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 10),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.crop_free),
+                          const SizedBox(width: 10),
+                          const Text('Drag to draw a boundary box'),
+                          const SizedBox(width: 10),
+                          TextButton(
+                            onPressed: _toggleDrawBoundary,
+                            child: const Text('Cancel'),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            if (_genBoundary != null &&
+                !_drawBoundaryMode &&
+                _moving == null &&
+                _movingAnchor == null)
+              Positioned(
+                left: 12,
+                right: 12,
+                bottom: 190 + MediaQuery.viewPaddingOf(context).bottom,
+                child: Card(
+                  elevation: 4,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 14, vertical: 10),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.crop_free),
+                        const SizedBox(width: 10),
+                        const Expanded(
+                          child: Text('Boundary box set',
+                              style: TextStyle(fontWeight: FontWeight.w600)),
+                        ),
+                        TextButton(
+                          onPressed: _clearBoundary,
+                          child: const Text('Clear'),
+                        ),
+                        FilledButton(
+                          onPressed: _busy ? null : _openGenerator,
+                          child: const Text('Generate here'),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
             // Top-right so the (variable-height) mode bar never covers it.
             Positioned(
               right: 12,
@@ -1315,6 +1487,8 @@ class _AuthorScreenState extends State<AuthorScreen> {
                           ? () => _toast(
                               'Still working on the last request — try again in a moment')
                           : _openGenerator,
+                      drawBoundaryActive: _drawBoundaryMode,
+                      onToggleDrawBoundary: _toggleDrawBoundary,
                     ),
             ),
             if (_moving != null)
@@ -1400,6 +1574,8 @@ class _ModeBar extends StatelessWidget {
     required this.onExpandedChanged,
     required this.onHide,
     required this.onGenerate,
+    required this.drawBoundaryActive,
+    required this.onToggleDrawBoundary,
   });
 
   final bool cueMode;
@@ -1415,6 +1591,11 @@ class _ModeBar extends StatelessWidget {
   final ValueChanged<bool> onExpandedChanged;
   final VoidCallback onHide;
   final VoidCallback onGenerate;
+
+  /// Whether a boundary-box drag is currently in progress — see
+  /// [_AuthorScreenState._drawBoundaryMode].
+  final bool drawBoundaryActive;
+  final VoidCallback onToggleDrawBoundary;
 
   @override
   Widget build(BuildContext context) {
@@ -1436,6 +1617,15 @@ class _ModeBar extends StatelessWidget {
                   tooltip: 'Auto-generate a trail here',
                   icon: const Icon(Icons.auto_awesome),
                   onPressed: onGenerate,
+                ),
+                IconButton(
+                  visualDensity: VisualDensity.compact,
+                  tooltip: drawBoundaryActive
+                      ? 'Cancel drawing boundary box'
+                      : 'Draw a boundary box to constrain generation',
+                  isSelected: drawBoundaryActive,
+                  icon: const Icon(Icons.crop_free),
+                  onPressed: onToggleDrawBoundary,
                 ),
                 Expanded(
                   child: Center(
@@ -1538,6 +1728,32 @@ class _ModeBar extends StatelessWidget {
   }
 }
 
+/// Live screen-space preview of the boundary box while dragging — plain
+/// Flutter painting, no platform-channel calls, so it tracks the finger
+/// smoothly regardless of drag speed (see [_AuthorScreenState._onBoundaryPanUpdate]).
+class _BoundaryPreviewPainter extends CustomPainter {
+  _BoundaryPreviewPainter(this.a, this.b);
+  final Offset a;
+  final Offset b;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final rect = Rect.fromPoints(a, b);
+    canvas.drawRect(rect, Paint()..color = const Color(0x263E8FB0));
+    canvas.drawRect(
+      rect,
+      Paint()
+        ..color = const Color(0xFF3E8FB0)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_BoundaryPreviewPainter oldDelegate) =>
+      oldDelegate.a != a || oldDelegate.b != b;
+}
+
 /// A chosen target length + shape for auto-generation.
 class _GenChoice {
   const _GenChoice(this.meters, this.loop, this.cues);
@@ -1550,7 +1766,11 @@ class _GenChoice {
 
 /// Bottom sheet to pick a walk length and loop vs out-and-back, then generate.
 class _GeneratorSheet extends StatefulWidget {
-  const _GeneratorSheet();
+  const _GeneratorSheet({required this.hasBoundary});
+
+  /// Whether a boundary box is currently drawn — changes the description
+  /// text so it's clear generation is constrained to it.
+  final bool hasBoundary;
 
   @override
   State<_GeneratorSheet> createState() => _GeneratorSheetState();
@@ -1591,7 +1811,12 @@ class _GeneratorSheetState extends State<_GeneratorSheet> {
                 children: [
                   Text('Auto-generate a trail', style: text.titleLarge),
                   const SizedBox(height: 4),
-                  Text('Builds a route from the trails shown on screen now.',
+                  Text(
+                      widget.hasBoundary
+                          ? 'Builds a route using only the trails inside your '
+                              'drawn boundary box, looping back over them if '
+                              'needed to reach the target length.'
+                          : 'Builds a route from the trails shown on screen now.',
                       style: text.bodyMedium),
                   const SizedBox(height: 18),
                   Row(
