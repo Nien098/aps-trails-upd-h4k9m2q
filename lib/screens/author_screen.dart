@@ -48,12 +48,22 @@ class _AuthorScreenState extends State<AuthorScreen> {
   bool _drawBoundaryMode = false;
 
   /// Screen-space drag-in-progress trace (only non-empty while actively
-  /// dragging), used to paint a live freeform preview without any
-  /// platform-channel round trips per frame — converted to a geographic
-  /// [_genBoundary] once the drag ends. Points are recorded with a minimum
-  /// spacing (see [_onBoundaryPanUpdate]) so a slow drag doesn't blow this
-  /// list, and the eventual polygon, up unnecessarily.
+  /// dragging) — the source of truth converted into the final [_genBoundary]
+  /// once the drag ends. Points are recorded with a minimum spacing (see
+  /// [_onBoundaryPanUpdate]) so a slow drag doesn't blow this list, and the
+  /// eventual polygon, up unnecessarily.
   final List<Offset> _dragPoints = [];
+
+  /// Best-effort geographic trace of the drag in progress, drawn live via
+  /// [_boundaryLayer] so what's on screen while dragging matches exactly
+  /// what the final result will look like (same layer, same styling) —
+  /// a Flutter-side CustomPaint overlay was tried first but didn't reliably
+  /// render on top of the map's native platform view, so the live preview
+  /// goes through the map's own rendering instead. Necessarily lower-
+  /// fidelity than [_dragPoints] (see [_pushDragPreview]'s self-throttling),
+  /// since it costs a platform-channel round trip per point instead of zero.
+  final List<LatLng> _dragPreview = [];
+  bool _convertingDragPoint = false;
 
   /// The drawn boundary outline (closed ring) constraining auto-generation,
   /// or null to fall back to whatever's currently on screen (existing
@@ -283,11 +293,16 @@ class _AuthorScreenState extends State<AuthorScreen> {
   static const _dragPointSpacing = 6.0;
   static const _dragPointCap = 150;
 
-  void _toggleDrawBoundary() {
+  Future<void> _toggleDrawBoundary() async {
     setState(() {
       _drawBoundaryMode = !_drawBoundaryMode;
       _dragPoints.clear();
+      _dragPreview.clear();
     });
+    // Cancelling mid-drag (or toggling the mode off) can leave the last
+    // pushed live-preview shape on the map — restore whatever boundary was
+    // actually confirmed before (or clear it if there wasn't one).
+    await _boundaryLayer?.setPolygon(_genBoundary);
   }
 
   void _onBoundaryPanStart(DragStartDetails d) {
@@ -295,6 +310,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
       _dragPoints
         ..clear()
         ..add(d.localPosition);
+      _dragPreview.clear();
     });
   }
 
@@ -305,22 +321,55 @@ class _AuthorScreenState extends State<AuthorScreen> {
       return;
     }
     setState(() => _dragPoints.add(d.localPosition));
+    _pushDragPreview(d.localPosition);
+  }
+
+  /// Best-effort live preview via the map's own rendering (see
+  /// [_dragPreview]'s doc). Self-throttles by skipping a new conversion
+  /// while one's still in flight rather than queueing — each pan-update
+  /// naturally supplies a fresher point than any queued one would anyway,
+  /// so this settles at whatever rate the platform channel can sustain
+  /// instead of building a backlog.
+  Future<void> _pushDragPreview(Offset p) async {
+    final c = _c;
+    if (c == null || _convertingDragPoint || !mounted) return;
+    _convertingDragPoint = true;
+    try {
+      final dpr = MediaQuery.of(context).devicePixelRatio;
+      final latlng = await c.toLatLng(Point(p.dx * dpr, p.dy * dpr));
+      if (!mounted || !_drawBoundaryMode) return;
+      _dragPreview.add(latlng);
+      if (_dragPreview.length >= 3) {
+        await _boundaryLayer?.setPolygon(_dragPreview);
+      }
+    } finally {
+      _convertingDragPoint = false;
+    }
   }
 
   Future<void> _onBoundaryPanEnd(DragEndDetails _) async {
     final c = _c;
     final points = List<Offset>.of(_dragPoints);
-    setState(() => _dragPoints.clear());
+    setState(() {
+      _dragPoints.clear();
+      _dragPreview.clear();
+    });
     // A negligible/near-straight-line drag (an accidental tap or flick
     // while in this mode) isn't a deliberate outline — ignore it rather
     // than setting a degenerate boundary that would empty the graph out
     // entirely.
-    if (c == null || points.length < 3) return;
+    if (c == null || points.length < 3) {
+      await _boundaryLayer?.setPolygon(_genBoundary);
+      return;
+    }
     final minX = points.map((p) => p.dx).reduce(min);
     final maxX = points.map((p) => p.dx).reduce(max);
     final minY = points.map((p) => p.dy).reduce(min);
     final maxY = points.map((p) => p.dy).reduce(max);
-    if (maxX - minX < 20 && maxY - minY < 20) return;
+    if (maxX - minX < 20 && maxY - minY < 20) {
+      await _boundaryLayer?.setPolygon(_genBoundary);
+      return;
+    }
 
     // GestureDetector reports Flutter's logical/dp pixels, but toLatLng —
     // like queryRenderedFeaturesInRect and toScreenLocation elsewhere in
@@ -991,6 +1040,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
         targetMeters: choice.meters,
         preferLoop: choice.loop,
         boundaryPolygon: boundary,
+        surface: choice.surface,
       );
       if (!mounted) return;
       if (route == null) {
@@ -1022,7 +1072,10 @@ class _AuthorScreenState extends State<AuthorScreen> {
       final shortfall = route.meters < choice.meters * 0.7;
       final note = shortfall
           ? ' — that\'s all the trail this area has room for, even with some doubling back'
-          : '';
+          : route.surfaceFallback
+              ? ' — not enough ${choice.surface == Surface.trails ? "trail" : "road"} '
+                  'here, so this mixes in the other surface too'
+              : '';
       _toast('${route.loop ? "Loop" : "Out-and-back"} generated — '
           '$dist$cueNote$note');
     } catch (_) {
@@ -1340,10 +1393,13 @@ class _AuthorScreenState extends State<AuthorScreen> {
             ),
             // Absorbs drag input while drawing a generation-boundary outline
             // — only present in that mode, so it never steals ordinary taps
-            // (path/cue placement) the rest of the time. The live trace is a
-            // plain screen-space overlay (no platform-channel calls per drag
-            // frame); only the recorded points get converted to LatLng, in
-            // _onBoundaryPanEnd.
+            // (path/cue placement) the rest of the time. Invisible itself —
+            // the live preview is drawn by _boundaryLayer (see
+            // _pushDragPreview), not a Flutter-side overlay: a CustomPaint
+            // layered on top of the map's native platform view was tried
+            // first but didn't reliably render during an active drag, so the
+            // preview goes through the same rendering path already proven to
+            // work for the final result.
             if (_drawBoundaryMode)
               Positioned.fill(
                 child: GestureDetector(
@@ -1351,12 +1407,6 @@ class _AuthorScreenState extends State<AuthorScreen> {
                   onPanStart: _onBoundaryPanStart,
                   onPanUpdate: _onBoundaryPanUpdate,
                   onPanEnd: _onBoundaryPanEnd,
-                  child: _dragPoints.length < 2
-                      ? const SizedBox.expand()
-                      : CustomPaint(
-                          size: Size.infinite,
-                          painter: _BoundaryPreviewPainter(_dragPoints),
-                        ),
                 ),
               ),
             if (_drawBoundaryMode)
@@ -1753,47 +1803,16 @@ class _ModeBar extends StatelessWidget {
   }
 }
 
-/// Live screen-space preview of the freeform boundary outline while
-/// dragging — plain Flutter painting, no platform-channel calls, so it
-/// tracks the finger smoothly regardless of drag speed (see
-/// [_AuthorScreenState._onBoundaryPanUpdate]). Drawn as a closed shape (the
-/// eventual boundary always closes the ring) even mid-drag, so it reads as
-/// "the area you're outlining" rather than an open line.
-class _BoundaryPreviewPainter extends CustomPainter {
-  _BoundaryPreviewPainter(this.points);
-  final List<Offset> points;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    if (points.length < 2) return;
-    final path = Path()..moveTo(points.first.dx, points.first.dy);
-    for (final p in points.skip(1)) {
-      path.lineTo(p.dx, p.dy);
-    }
-    path.close();
-    canvas.drawPath(path, Paint()..color = const Color(0x263E8FB0));
-    canvas.drawPath(
-      path,
-      Paint()
-        ..color = const Color(0xFF3E8FB0)
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 2,
-    );
-  }
-
-  @override
-  bool shouldRepaint(_BoundaryPreviewPainter oldDelegate) =>
-      oldDelegate.points != points;
-}
-
 /// A chosen target length + shape for auto-generation.
 class _GenChoice {
-  const _GenChoice(this.meters, this.loop, this.cues);
+  const _GenChoice(this.meters, this.loop, this.cues, this.surface);
   final double meters;
   final bool loop;
 
   /// Whether to auto-drop turn cues along the generated route.
   final bool cues;
+
+  final Surface surface;
 }
 
 /// Bottom sheet to pick a walk length and loop vs out-and-back, then generate.
@@ -1816,6 +1835,7 @@ class _GeneratorSheetState extends State<_GeneratorSheet> {
   double _meters = 4000;
   bool _loop = true;
   bool _cues = true;
+  Surface _surface = Surface.mixed;
 
   @override
   Widget build(BuildContext context) {
@@ -1905,6 +1925,43 @@ class _GeneratorSheetState extends State<_GeneratorSheet> {
                     selected: {_loop},
                     onSelectionChanged: (s) => setState(() => _loop = s.first),
                   ),
+                  const SizedBox(height: 16),
+                  Text('Surface', style: text.titleMedium),
+                  const SizedBox(height: 8),
+                  SegmentedButton<Surface>(
+                    showSelectedIcon: false,
+                    segments: const [
+                      ButtonSegment(
+                          value: Surface.trails,
+                          icon: Icon(Icons.park_outlined),
+                          label: Text('Trails')),
+                      ButtonSegment(
+                          value: Surface.mixed,
+                          icon: Icon(Icons.shuffle),
+                          label: Text('Mixed')),
+                      ButtonSegment(
+                          value: Surface.roads,
+                          icon: Icon(Icons.add_road),
+                          label: Text('Roads')),
+                    ],
+                    selected: {_surface},
+                    onSelectionChanged: (s) =>
+                        setState(() => _surface = s.first),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: Text(
+                      switch (_surface) {
+                        Surface.trails =>
+                          'Sticks to singletrack/park trails where possible.',
+                        Surface.mixed =>
+                          'Uses whichever of trails, sidewalks, or roads is shortest.',
+                        Surface.roads =>
+                          'Sticks to streets and sidewalks where possible.',
+                      },
+                      style: text.bodySmall,
+                    ),
+                  ),
                   const SizedBox(height: 8),
                   CheckboxListTile(
                     contentPadding: EdgeInsets.zero,
@@ -1926,8 +1983,8 @@ class _GeneratorSheetState extends State<_GeneratorSheet> {
             child: SizedBox(
               width: double.infinity,
               child: FilledButton.icon(
-                onPressed: () =>
-                    Navigator.pop(context, _GenChoice(_meters, _loop, _cues)),
+                onPressed: () => Navigator.pop(
+                    context, _GenChoice(_meters, _loop, _cues, _surface)),
                 icon: const Icon(Icons.auto_awesome),
                 label: const Text('Generate'),
               ),

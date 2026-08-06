@@ -7,6 +7,14 @@ import 'package:maplibre_gl/maplibre_gl.dart';
 import 'geo.dart';
 import 'settings.dart';
 
+/// Which walkable surfaces auto-generation should prefer — see
+/// [TrailRouter.generate]'s `surface` param. [trails] means singletrack/park
+/// paths only (the `trails` + `sidewalks` style layers); [roads] means
+/// streets (the `roads-fill` + `sidewalks` layers); [mixed] is today's
+/// default — every walkable layer together, picking whatever's shortest
+/// regardless of surface.
+enum Surface { trails, mixed, roads }
+
 /// A trail route generated automatically from the visible trail network.
 class GeneratedRoute {
   GeneratedRoute({
@@ -14,6 +22,7 @@ class GeneratedRoute {
     required this.anchors,
     required this.meters,
     required this.loop,
+    this.surfaceFallback = false,
   });
 
   /// The full followed polyline.
@@ -29,6 +38,12 @@ class GeneratedRoute {
   /// True when the route returns by a different way (a loop) rather than
   /// retracing itself (an out-and-back).
   final bool loop;
+
+  /// True when a non-[Surface.mixed] preference was requested but that
+  /// surface alone didn't reach anywhere meaningful in the area searched, so
+  /// this route falls back to every walkable layer instead of failing
+  /// outright — see [TrailRouter.generate].
+  final bool surfaceFallback;
 }
 
 /// Result of connecting a new anchor to the trail network.
@@ -145,67 +160,101 @@ class TrailRouter {
   /// returns a loop when [preferLoop] is set and a reasonable
   /// different-return path exists — otherwise an out-and-back.
   ///
+  /// [surface] restricts which style layers count as walkable — see
+  /// [Surface]. When the preferred surface alone doesn't reach anywhere
+  /// meaningful (a boundary with essentially no trail, when [Surface.trails]
+  /// was requested, say), this automatically retries with every walkable
+  /// layer rather than failing outright — [GeneratedRoute.surfaceFallback]
+  /// says whether that happened, so the caller can mention it.
+  ///
   /// When the reachable network is shorter than [targetMeters] (common for a
   /// small boxed-in area), the route pads itself out by deliberately
   /// re-walking sections — see [_Graph.coverageWalk] — rather than just
   /// returning whatever the single longest pass happens to be. Returns null
-  /// when no usable trail network is in view/inside the boundary at all.
+  /// when no usable trail network is in view/inside the boundary at all,
+  /// on any surface.
   Future<GeneratedRoute?> generate({
     required LatLng center,
     required Rect viewport,
     required double targetMeters,
     bool preferLoop = true,
     List<LatLng>? boundaryPolygon,
+    Surface surface = Surface.mixed,
   }) async {
-    final graph = await _buildGraph(boundaryPolygon != null
+    final rect = boundaryPolygon != null
         ? await _screenRectForPolygon(boundaryPolygon)
-        : viewport);
-    if (boundaryPolygon != null) graph.restrictToPolygon(boundaryPolygon);
+        : viewport;
 
-    final start = graph.spliceTempNode(center, 'GEN');
-    if (start.isEmpty) return null;
+    Future<GeneratedRoute?> attempt(List<String> layers) async {
+      final graph = await _buildGraph(rect, layers: layers);
+      if (boundaryPolygon != null) graph.restrictToPolygon(boundaryPolygon);
 
-    // Half the target each way for a loop (out + back), or half for the
-    // out-leg of an out-and-back (mirrored on the way home) — either way the
-    // walk that actually explores the network only needs to cover half of
-    // what the finished route will total.
-    final outKeys = graph.coverageWalk(start, targetMeters / 2,
-        maxVisitsPerEdge: _maxEdgeVisitsForPadding);
-    // Need meaningful reach; if the nearest trails are a tiny stub, bail.
-    if (outKeys.length < 2) return null;
-    final current = outKeys.last;
+      final start = graph.spliceTempNode(center, 'GEN');
+      if (start.isEmpty) return null;
 
-    List<String>? backKeys;
-    if (preferLoop) {
-      // Penalise re-using the outbound edges so the return prefers a
-      // genuinely different way home where the (possibly already-padded)
-      // network offers one, without forbidding reuse outright — a small box
-      // may have no alternative at all for the closing leg.
-      final used = <String>{};
-      for (var i = 0; i < outKeys.length - 1; i++) {
-        used.add(_Graph.edgeId(outKeys[i], outKeys[i + 1]));
+      // Half the target each way for a loop (out + back), or half for the
+      // out-leg of an out-and-back (mirrored on the way home) — either way
+      // the walk that actually explores the network only needs to cover
+      // half of what the finished route will total.
+      final outKeys = graph.coverageWalk(start, targetMeters / 2,
+          maxVisitsPerEdge: _maxEdgeVisitsForPadding);
+      // Need meaningful reach; if the nearest trails are a tiny stub, bail.
+      if (outKeys.length < 2) return null;
+      final current = outKeys.last;
+
+      List<String>? backKeys;
+      if (preferLoop) {
+        // Penalise re-using the outbound edges so the return prefers a
+        // genuinely different way home where the (possibly already-padded)
+        // network offers one, without forbidding reuse outright — a small
+        // box may have no alternative at all for the closing leg.
+        final used = <String>{};
+        for (var i = 0; i < outKeys.length - 1; i++) {
+          used.add(_Graph.edgeId(outKeys[i], outKeys[i + 1]));
+        }
+        backKeys = graph.routeAvoiding(current, start, used, penalty: 5.0);
+        // Only accept a genuine loop: it must actually differ from retracing.
+        if (backKeys != null) {
+          final overlap = _overlapFraction(outKeys, backKeys);
+          if (overlap > 0.6) backKeys = null;
+        }
       }
-      backKeys = graph.routeAvoiding(current, start, used, penalty: 5.0);
-      // Only accept a genuine loop: it must actually differ from retracing.
-      if (backKeys != null) {
-        final overlap = _overlapFraction(outKeys, backKeys);
-        if (overlap > 0.6) backKeys = null;
-      }
+
+      final loop = backKeys != null;
+      final routeKeys = loop
+          ? [...outKeys, ...backKeys.skip(1)]
+          : [...outKeys, ...outKeys.reversed.skip(1)];
+
+      final path = [for (final k in routeKeys) graph.nodeAt(k)];
+      if (path.length < 2) return null;
+
+      return GeneratedRoute(
+        path: path,
+        anchors: _sampleAnchors(path),
+        meters: _polylineLength(path),
+        loop: loop,
+      );
     }
 
-    final loop = backKeys != null;
-    final routeKeys = loop
-        ? [...outKeys, ...backKeys.skip(1)]
-        : [...outKeys, ...outKeys.reversed.skip(1)];
+    final preferredLayers = switch (surface) {
+      Surface.trails => const ['trails', 'sidewalks'],
+      Surface.roads => const ['roads-fill', 'sidewalks'],
+      Surface.mixed => _walkableLayers,
+    };
+    final primary = await attempt(preferredLayers);
+    if (primary != null || surface == Surface.mixed) return primary;
 
-    final path = [for (final k in routeKeys) graph.nodeAt(k)];
-    if (path.length < 2) return null;
-
+    // The preferred surface alone couldn't even get started here — fall
+    // back to every walkable layer rather than reporting "no trails found"
+    // when a real (mixed-surface) route is actually available.
+    final fallback = await attempt(_walkableLayers);
+    if (fallback == null) return null;
     return GeneratedRoute(
-      path: path,
-      anchors: _sampleAnchors(path),
-      meters: _polylineLength(path),
-      loop: loop,
+      path: fallback.path,
+      anchors: fallback.anchors,
+      meters: fallback.meters,
+      loop: fallback.loop,
+      surfaceFallback: true,
     );
   }
 
@@ -320,9 +369,9 @@ class TrailRouter {
     return line;
   }
 
-  Future<_Graph> _buildGraph(Rect rect) async {
+  Future<_Graph> _buildGraph(Rect rect, {List<String> layers = _walkableLayers}) async {
     final graph = _Graph();
-    await _addFeaturesToGraph(graph, rect, _walkableLayers, isRoad: false);
+    await _addFeaturesToGraph(graph, rect, layers, isRoad: false);
     // A single real-world trail can arrive as several separate LineString
     // features (e.g. split around a line-label's placement point, or by tile
     // clipping) whose "shared" endpoint differs by a few metres between
