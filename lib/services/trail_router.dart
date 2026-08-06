@@ -69,9 +69,15 @@ class TrailRouter {
   static double get _maxDetourFactor => Settings.instance.detourFactor.value;
 
   /// Connects a new [to] tap to the network, routing from [from] if given.
-  Future<TrailConnection> connect({LatLng? from, required LatLng to}) async {
-    final rect = await _rectAround(from, to);
-    final graph = await _buildGraph(rect);
+  /// [rect] overrides the auto-computed query area (a tight box around just
+  /// [from]/[to] — right for the author screen's "connect this nearby tap"
+  /// use, but too narrow when [to] is far away, e.g. routing back to a
+  /// distant trailhead: only geometry actually rendered inside the query
+  /// rect is visible to the graph, so a caller chasing a far-off point
+  /// should pass the full current map viewport instead).
+  Future<TrailConnection> connect({LatLng? from, required LatLng to, Rect? rect}) async {
+    final r = rect ?? await _rectAround(from, to);
+    final graph = await _buildGraph(r);
 
     // Snap the new anchor onto the nearest trail (Level A).
     final snap = graph.nearestOnEdge(to);
@@ -223,7 +229,7 @@ class TrailRouter {
     // connected, producing an odd kink right at the split (often exactly
     // under the trail's name label). Merge close-enough fragment endpoints
     // so the trail reads as one continuous edge again.
-    graph._mergeNearbyNodes(4.0);
+    graph._mergeNearbyNodes(_mergeToleranceMeters);
     return graph;
   }
 
@@ -235,9 +241,17 @@ class TrailRouter {
     final graph = _Graph();
     await _addFeaturesToGraph(graph, rect, ['trails', 'sidewalks'], isRoad: false);
     await _addFeaturesToGraph(graph, rect, ['roads-fill'], isRoad: true);
-    graph._mergeNearbyNodes(4.0);
+    graph._mergeNearbyNodes(_mergeToleranceMeters);
     return graph;
   }
+
+  /// Real-world trail/sidewalk fragments and trail-to-road junctions rarely
+  /// share an exact node in OSM data — a trail can end several metres short
+  /// of the road centreline it visually meets. 4m (the original value, sized
+  /// for same-way tile-split gaps only) was too tight for that; widened to
+  /// cover typical junction slop without merging genuinely distinct nearby
+  /// trails (e.g. adjacent switchback legs) into one.
+  static const _mergeToleranceMeters = 8.0;
 
   Future<void> _addFeaturesToGraph(
     _Graph graph,
@@ -297,9 +311,10 @@ class _Edge {
 }
 
 class _Seg {
-  _Seg(this.aKey, this.bKey, this.a, this.b);
+  _Seg(this.aKey, this.bKey, this.a, this.b, this.isRoad);
   final String aKey, bKey;
   final LatLng a, b;
+  final bool isRoad;
 }
 
 /// A lightweight routing graph keyed by rounded coordinates (~1 m tolerance),
@@ -332,7 +347,7 @@ class _Graph {
         final w = metersBetween(prev, p);
         (adj[prevKey] ??= []).add(_Edge(k, w));
         (adj[k] ??= []).add(_Edge(prevKey, w));
-        _segments.add(_Seg(prevKey, k, prev, p));
+        _segments.add(_Seg(prevKey, k, prev, p, isRoad));
         if (isRoad) {
           roadNodeKeys.add(prevKey);
           roadNodeKeys.add(k);
@@ -384,7 +399,7 @@ class _Graph {
     }
     for (var i = 0; i < _segments.length; i++) {
       final s = _segments[i];
-      _segments[i] = _Seg(find(s.aKey), find(s.bKey), s.a, s.b);
+      _segments[i] = _Seg(find(s.aKey), find(s.bKey), s.a, s.b, s.isRoad);
     }
     final newRoadNodeKeys = {for (final k in roadNodeKeys) find(k)};
     nodes
@@ -398,9 +413,10 @@ class _Graph {
       ..addAll(newRoadNodeKeys);
   }
 
-  ({LatLng point, double meters, _Seg seg})? _nearestSeg(LatLng p) {
+  ({LatLng point, double meters, _Seg seg})? _nearestSeg(LatLng p, {bool roadOnly = false}) {
     ({LatLng point, double meters, _Seg seg})? best;
     for (final seg in _segments) {
+      if (roadOnly && !seg.isRoad) continue;
       final r = _nearestOnSegment(p, seg.a, seg.b);
       if (best == null || r.meters < best.meters) {
         best = (point: r.point, meters: r.meters, seg: seg);
@@ -545,8 +561,8 @@ class _Graph {
   /// guaranteed the nearest reachable one; no need to check every candidate
   /// and compare. Returns the followed polyline (including [from]), or null
   /// if this graph has no road-tagged nodes at all, or none are reachable.
-  List<LatLng>? routeToNearestRoad(LatLng from) {
-    if (roadNodeKeys.isEmpty) return null;
+  List<LatLng>? routeToNearestRoad(LatLng from, {double maxBridgeMeters = 60}) {
+    if (!_segments.any((s) => s.isRoad)) return null;
     final startKey = spliceTempNode(from, 'ROADFROM');
     if (startKey.isEmpty) return null;
 
@@ -571,11 +587,38 @@ class _Graph {
         }
       }
     }
-    if (goalKey == null) return null;
 
-    final keys = tracePath(prev, startKey, goalKey);
+    if (goalKey != null) {
+      final keys = tracePath(prev, startKey, goalKey);
+      if (keys.isEmpty) return null;
+      return [from, for (final key in keys) nodes[key]!];
+    }
+
+    // No trail node is topologically joined to a road node in the source
+    // data — a common real-world gap, since a mapped path rarely shares an
+    // exact node with the road it leads out to. The heap ran to exhaustion
+    // above (never broke early), so `dist`/`prev` already cover every node
+    // reachable from `from`; bridge from whichever one has the shortest
+    // combined (trail distance + straight last-mile gap to the nearest road
+    // edge), capped at [maxBridgeMeters] so this can't wander off through
+    // open ground toward some distant road.
+    String? bestNode;
+    LatLng? bestPoint;
+    var bestTotal = double.infinity;
+    dist.forEach((key, d) {
+      final near = _nearestSeg(nodes[key]!, roadOnly: true);
+      if (near == null || near.meters > maxBridgeMeters) return;
+      final total = d + near.meters;
+      if (total < bestTotal) {
+        bestTotal = total;
+        bestNode = key;
+        bestPoint = near.point;
+      }
+    });
+    if (bestNode == null) return null;
+    final keys = tracePath(prev, startKey, bestNode!);
     if (keys.isEmpty) return null;
-    return [from, for (final key in keys) nodes[key]!];
+    return [from, for (final key in keys) nodes[key]!, bestPoint!];
   }
 }
 

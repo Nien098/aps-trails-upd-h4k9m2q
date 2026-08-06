@@ -467,12 +467,22 @@ class _GuideScreenState extends State<GuideScreen> {
     final pos = _lastPos;
     final c = _c;
     final start = widget.trail.path.isNotEmpty ? widget.trail.path.first : null;
-    if (pos == null || c == null || start == null) {
+    if (pos == null || c == null || start == null || !mounted) {
       _toast("Couldn't find a mapped route — reversing your course instead");
       _reverseCourse();
       return;
     }
-    final connection = await TrailRouter(c).connect(from: pos, to: start);
+    // The default query area is a tight box around just pos/start — right
+    // for a nearby author-screen tap, but the start is often well outside
+    // that box here, hiding trail branches (like a shortcut fork) that sit
+    // just off the direct line between the two. Use the full visible map
+    // instead, matching _routeToNearestRoad.
+    final size = MediaQuery.of(context).size;
+    final connection = await TrailRouter(c).connect(
+      from: pos,
+      to: start,
+      rect: Rect.fromLTWH(0, 0, size.width, size.height),
+    );
     if (!connection.followed) {
       _toast("Couldn't find a mapped route back to the start — "
           'reversing your course instead');
