@@ -1,6 +1,5 @@
 import 'dart:io';
 import 'dart:math' show cos, max, min, pi;
-import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
@@ -38,15 +37,26 @@ class _ShareActivityScreenState extends State<ShareActivityScreen> {
   MapLibreMapController? _mapC;
   RouteLayer? _routeLayer;
 
-  /// Native PNG bytes of the real map + route, captured via
-  /// [MapLibreMapController.takeSnapshot] once it settles — see
-  /// [_onMapStyleLoaded]. Null until ready (or capture failed).
-  Uint8List? _mapSnapshot;
+  /// Android's platform-view/GL surface can re-fire onStyleLoaded (surface
+  /// recreated, e.g. around a Navigator push transition) — without this
+  /// guard a second call creates a fresh RouteLayer and re-adds the route
+  /// source under the same fixed id while the first call's setRoute/
+  /// animateCamera is still in flight, two overlapping updates racing on
+  /// the same controller and producing visibly wrong intermediate states
+  /// (the route flickering, or the camera appearing to "recalculate").
+  bool _styleLoadHandled = false;
 
-  /// True once the snapshot attempt has finished one way or the other —
-  /// either [_mapSnapshot] is set, or it failed and the self-drawn
-  /// [_RouteThumbnailPainter] fallback is used instead.
-  bool _mapCaptureFailed = false;
+  /// True once the route is drawn and the camera has finished fitting to
+  /// it (plus a short settle delay for tiles to actually paint) — see
+  /// [_onMapStyleLoaded]. The Share button stays disabled until this (or
+  /// [_mapFailed]) is true, so [_share] only ever captures a map that's
+  /// already confirmed correct on screen.
+  bool _mapReady = false;
+
+  /// True if the track was too short to map, or route/camera setup threw —
+  /// falls back to the self-drawn [_RouteThumbnailPainter] instead of an
+  /// empty or broken map area.
+  bool _mapFailed = false;
 
   List<LatLng> get _points => [for (final p in widget.activity.track) p.position];
 
@@ -58,7 +68,7 @@ class _ShareActivityScreenState extends State<ShareActivityScreen> {
         zoom: 14,
       );
 
-  bool get _mapReady => _mapSnapshot != null || _mapCaptureFailed;
+  bool get _canShare => _mapReady || _mapFailed;
 
   @override
   void initState() {
@@ -66,7 +76,7 @@ class _ShareActivityScreenState extends State<ShareActivityScreen> {
     final a = widget.activity;
     final dist = Settings.instance.formatDistance(a.distanceMeters);
     _caption = TextEditingController(text: 'I walked $dist on ${a.trailName}!');
-    if (_points.length < 2) _mapCaptureFailed = true;
+    if (_points.length < 2) _mapFailed = true;
   }
 
   @override
@@ -75,19 +85,21 @@ class _ShareActivityScreenState extends State<ShareActivityScreen> {
     super.dispose();
   }
 
-  /// Draws the route on a real map, fits the camera to it, waits for tiles
-  /// to actually settle, then captures a native PNG via
-  /// [MapLibreMapController.takeSnapshot] — a dedicated native rendering
-  /// call, distinct from (and far more reliable than) capturing the map
-  /// through Flutter's own widget compositor, since the map is a native
-  /// Android platform view. Once captured, [build] swaps the live map for
-  /// the plain PNG, so the later whole-card [RenderRepaintBoundary] capture
-  /// (in [_share]) never has to touch the platform view at all — it only
-  /// ever captures a plain `Image.memory`, the same as any other picture.
+  /// Draws the route on the real map and fits the camera to it. Deliberately
+  /// does *not* use [MapLibreMapController.takeSnapshot] — tried first, but
+  /// real-device testing showed it can capture a stale/unsettled render (a
+  /// zoomed-out default view with no route) independently of what's already
+  /// correctly showing on screen, with no reliable signal for when it's
+  /// actually safe to call. Capturing the already-confirmed-correct on-
+  /// screen map directly (via the whole-card RenderRepaintBoundary in
+  /// [_share], once the user can actually see it's right) doesn't have that
+  /// problem — same mechanism already used for the rest of the card.
   Future<void> _onMapStyleLoaded() async {
+    if (_styleLoadHandled) return;
+    _styleLoadHandled = true;
     final c = _mapC;
     if (c == null || _points.length < 2) {
-      if (mounted) setState(() => _mapCaptureFailed = true);
+      if (mounted) setState(() => _mapFailed = true);
       return;
     }
     try {
@@ -102,14 +114,11 @@ class _ShareActivityScreenState extends State<ShareActivityScreen> {
         bottom: 30,
       ));
       // animateCamera's future completes once the animation finishes, not
-      // once every tile at the new position/zoom has actually painted —
-      // give it a moment before snapshotting, or the capture can catch the
-      // map mid-render.
-      await Future.delayed(const Duration(milliseconds: 600));
-      final bytes = await c.takeSnapshot();
-      if (mounted) setState(() => _mapSnapshot = bytes);
+      // once every tile at the new position/zoom has actually painted.
+      await Future.delayed(const Duration(milliseconds: 400));
+      if (mounted) setState(() => _mapReady = true);
     } catch (_) {
-      if (mounted) setState(() => _mapCaptureFailed = true);
+      if (mounted) setState(() => _mapFailed = true);
     }
   }
 
@@ -131,7 +140,7 @@ class _ShareActivityScreenState extends State<ShareActivityScreen> {
   /// way TrailShare.shareTrail already does, and opens the OS share sheet
   /// with it plus the caption text.
   Future<void> _share() async {
-    if (_sharing || !_mapReady) return;
+    if (_sharing || !_canShare) return;
     setState(() => _sharing = true);
     try {
       final boundary =
@@ -189,8 +198,8 @@ class _ShareActivityScreenState extends State<ShareActivityScreen> {
           ),
           const SizedBox(height: 16),
           FilledButton.icon(
-            onPressed: (_sharing || !_mapReady) ? null : _share,
-            icon: (_sharing || !_mapReady)
+            onPressed: (_sharing || !_canShare) ? null : _share,
+            icon: (_sharing || !_canShare)
                 ? const SizedBox(
                     width: 18,
                     height: 18,
@@ -198,7 +207,7 @@ class _ShareActivityScreenState extends State<ShareActivityScreen> {
                 : const Icon(Icons.share),
             label: Text(_sharing
                 ? 'Preparing…'
-                : !_mapReady
+                : !_canShare
                     ? 'Loading map…'
                     : 'Share'),
           ),
@@ -207,27 +216,40 @@ class _ShareActivityScreenState extends State<ShareActivityScreen> {
     );
   }
 
-  /// The map slot inside the card: the live map while it's loading/being
-  /// captured, then swapped for the captured PNG (or the self-drawn
-  /// fallback thumbnail if the native snapshot failed) — same size either
-  /// way so nothing jumps when it swaps, and the Share button stays
-  /// disabled the whole time the live map is still showing here.
+  /// The map slot inside the card: the self-drawn fallback thumbnail if
+  /// route/camera setup failed, otherwise the real live map — with a
+  /// loading scrim over it until [_mapReady], both so the zoom-to-fit
+  /// animation reads as an intentional "preparing" state rather than a
+  /// glitch, and so it's obvious the Share button being disabled matches
+  /// what's still happening on screen.
   Widget _buildMapArea() {
-    if (_mapSnapshot != null) {
-      return Image.memory(_mapSnapshot!, fit: BoxFit.cover);
-    }
-    if (_mapCaptureFailed) {
+    if (_mapFailed) {
       return _points.length >= 2
           ? CustomPaint(painter: _RouteThumbnailPainter(_points))
           : const SizedBox.shrink();
     }
     return ClipRRect(
       borderRadius: BorderRadius.circular(12),
-      child: BaseMap(
-        region: _region,
-        initialCamera: _initialCamera,
-        onMapCreated: (c) => _mapC = c,
-        onStyleLoaded: _onMapStyleLoaded,
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          BaseMap(
+            region: _region,
+            initialCamera: _initialCamera,
+            onMapCreated: (c) => _mapC = c,
+            onStyleLoaded: _onMapStyleLoaded,
+          ),
+          if (!_mapReady)
+            Container(
+              color: Colors.white.withValues(alpha: 0.7),
+              alignment: Alignment.center,
+              child: const SizedBox(
+                width: 22,
+                height: 22,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+            ),
+        ],
       ),
     );
   }
