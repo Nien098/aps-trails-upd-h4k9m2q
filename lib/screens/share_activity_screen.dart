@@ -10,6 +10,7 @@ import 'package:share_plus/share_plus.dart';
 
 import '../models/activity.dart';
 import '../models/region.dart';
+import '../services/geo.dart';
 import '../services/route_layer.dart';
 import '../services/settings.dart';
 import '../widgets/base_map.dart';
@@ -106,6 +107,7 @@ class _ShareActivityScreenState extends State<ShareActivityScreen> {
       _routeLayer = RouteLayer(c);
       await _routeLayer!.ensure();
       await _routeLayer!.setRoute(_points, '#1565C0');
+      await _drawDistanceMarkers(c);
       await c.animateCamera(CameraUpdate.newLatLngBounds(
         _boundsOf(_points),
         left: 30,
@@ -120,6 +122,70 @@ class _ShareActivityScreenState extends State<ShareActivityScreen> {
     } catch (_) {
       if (mounted) setState(() => _mapFailed = true);
     }
+  }
+
+  /// Runkeeper-style distance badges along the route (its own "1 mi"/"2 mi"
+  /// rounded-square pins — same idea here, but drawn in this app's own
+  /// marker style: a solid circle + white number, matching the numbered
+  /// cue markers guide_screen.dart already draws, rather than copying
+  /// Runkeeper's exact look). Batched into single addCircles/addSymbols
+  /// calls — see the comment on _drawCues in guide_screen.dart for why:
+  /// each add call on this plugin rebuilds its whole layer from scratch, so
+  /// doing it one marker at a time both races the two layers against each
+  /// other and is needlessly slow.
+  Future<void> _drawDistanceMarkers(MapLibreMapController c) async {
+    final markers = _distanceMarkerPositions(_points, Settings.instance.metric.value);
+    if (markers.isEmpty) return;
+    await c.addCircles([
+      for (final m in markers)
+        CircleOptions(
+          geometry: m,
+          circleRadius: 13,
+          circleColor: '#1B5E20',
+          circleStrokeColor: '#ffffff',
+          circleStrokeWidth: 2,
+        ),
+    ]);
+    await c.addSymbols([
+      for (var i = 0; i < markers.length; i++)
+        SymbolOptions(
+          geometry: markers[i],
+          textField: '${i + 1}',
+          textSize: 13,
+          textColor: '#ffffff',
+        ),
+    ]);
+    // Same fix as guide_screen.dart's cue labels: MapLibre's default
+    // collision avoidance can hide a label judged too close to another,
+    // which a run of closely-spaced markers can trigger easily.
+    await c.setSymbolTextAllowOverlap(true);
+  }
+
+  /// LatLng positions at each whole distance-unit boundary along [pts] (1 km
+  /// or 1 mi depending on [metric]) — interpolated between the two track
+  /// points straddling each boundary, the same idea as
+  /// ActivityDetailScreen's per-unit split computation but returning a
+  /// position instead of a time.
+  static List<LatLng> _distanceMarkerPositions(List<LatLng> pts, bool metric) {
+    if (pts.length < 2) return const [];
+    final unitMeters = metric ? 1000.0 : 1609.344;
+    final markers = <LatLng>[];
+    var cum = 0.0;
+    var nextBoundary = unitMeters;
+    for (var i = 1; i < pts.length; i++) {
+      final segDist = metersBetween(pts[i - 1], pts[i]);
+      while (cum + segDist >= nextBoundary) {
+        final overshoot = cum + segDist - nextBoundary;
+        final frac = segDist <= 0 ? 0.0 : 1 - (overshoot / segDist);
+        markers.add(LatLng(
+          pts[i - 1].latitude + (pts[i].latitude - pts[i - 1].latitude) * frac,
+          pts[i - 1].longitude + (pts[i].longitude - pts[i - 1].longitude) * frac,
+        ));
+        nextBoundary += unitMeters;
+      }
+      cum += segDist;
+    }
+    return markers;
   }
 
   static LatLngBounds _boundsOf(List<LatLng> pts) {
