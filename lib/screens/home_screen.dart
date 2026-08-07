@@ -218,6 +218,23 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       context,
       MaterialPageRoute(builder: (_) => AuthorScreen(trail: draft)),
     );
+    // AuthorScreen saves in place (draft.id is set by TrailStore.save), so
+    // the walk recorded to create this trail can now be logged against a
+    // real trail id — same 20 m floor GuideScreen uses to skip an
+    // accidental open/barely-moved session rather than cluttering history.
+    final track = draft.recordedTrack;
+    if (saved == true && draft.id != null && track != null && draft.walkedMeters >= 20) {
+      await TrailStore.instance.addActivity(Activity(
+        trailId: draft.id,
+        trailName: draft.name,
+        startedAt: draft.recordedStartedAt ?? DateTime.now(),
+        durationSec: draft.recordedDurationSec ?? 0,
+        distanceMeters: draft.walkedMeters,
+        elevGainMeters: draft.elevGainMeters,
+        track: track,
+      ));
+      await Settings.instance.addWalk(draft.walkedMeters, draft.elevGainMeters);
+    }
     if (saved == true) setState(_reload);
   }
 

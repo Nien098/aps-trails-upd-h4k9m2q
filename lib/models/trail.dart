@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:maplibre_gl/maplibre_gl.dart';
 
 import '../services/cue_gen.dart' show migrateLegacyCues;
+import 'activity.dart' show TrackPoint;
 
 /// The kind of direction cue, which drives the marker's icon/colour and the
 /// default spoken phrase. Authors can override the spoken text per cue.
@@ -109,6 +110,9 @@ class Trail {
     this.walkedMeters = 0,
     this.walkCount = 0,
     this.elevGainMeters = 0,
+    this.recordedTrack,
+    this.recordedStartedAt,
+    this.recordedDurationSec,
   })  : path = path ?? [],
         anchors = anchors ?? [],
         cues = cues ?? [],
@@ -142,6 +146,16 @@ class Trail {
   List<Cue> cues;
 
   DateTime createdAt;
+
+  /// The raw GPS track/timing from RecordTrailScreen, if this draft came
+  /// from recording a walk rather than hand-drawing — carried only until
+  /// the trail is first saved and gets an id, at which point HomeScreen
+  /// logs it as an Activity against that id (see `_recordTrail`). Never
+  /// persisted on the trail row itself; [walkedMeters]/[elevGainMeters]
+  /// above already hold this same walk's totals for the trail's own stats.
+  List<TrackPoint>? recordedTrack;
+  DateTime? recordedStartedAt;
+  int? recordedDurationSec;
 
   static String _encodePoints(List<LatLng> pts) =>
       jsonEncode(pts.map((p) => [p.latitude, p.longitude]).toList());

@@ -8,6 +8,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:vibration/vibration.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
+import '../models/activity.dart' show TrackPoint;
 import '../models/region.dart';
 import '../models/trail.dart';
 import '../services/crash_log.dart';
@@ -45,6 +46,19 @@ class _RecordTrailScreenState extends State<RecordTrailScreen> {
   bool _stopping = false;
   bool _cleaning = false;
   String _status = 'Getting your location…';
+
+  /// Timestamped/elevation track and climb total for this walk — same
+  /// fields GuideScreen logs as an Activity, so recording a trail also
+  /// leaves real walking history behind instead of just a drawn line. See
+  /// [_stop] and HomeScreen._recordTrail for where this gets saved (the
+  /// trail has no id yet here, so the Activity itself is logged later).
+  final List<TrackPoint> _track = [];
+  double _elevGain = 0;
+  double? _smoothAlt;
+  double? _elevRef;
+
+  int get _elapsedSec =>
+      _startedAt == null ? 0 : DateTime.now().difference(_startedAt!).inSeconds;
 
   final FlutterTts _tts = FlutterTts();
   late final StillnessWatchdog _watchdog =
@@ -201,15 +215,37 @@ class _RecordTrailScreenState extends State<RecordTrailScreen> {
     final here = LatLng(pos.latitude, pos.longitude);
     final step = _last == null ? null : metersBetween(_last!, here);
     _watchdog.update(here, accuracy: pos.accuracy, stepMeters: step);
+    final ele = pos.altitude != 0 ? pos.altitude : null;
     if (_last == null) {
       _path.add(here);
+      _track.add(TrackPoint(here, _elapsedSec, ele: ele));
     } else {
       if (step! >= 2.5 && step <= 100) {
         _meters += step;
         _path.add(here);
+        _track.add(TrackPoint(here, _elapsedSec, ele: ele));
       }
     }
     _last = here;
+
+    // Elevation gain from GPS altitude — same smoothing/hysteresis as
+    // GuideScreen's identical logic, so a recorded trail's initial climb
+    // total is measured the same way a later guided walk of it would be.
+    final acc = pos.altitudeAccuracy;
+    if (pos.altitude != 0 && (acc <= 0 || acc <= 20)) {
+      final alt = pos.altitude;
+      _smoothAlt = _smoothAlt == null ? alt : _smoothAlt! * 0.6 + alt * 0.4;
+      final s = _smoothAlt!;
+      if (_elevRef == null) {
+        _elevRef = s;
+      } else if (s - _elevRef! > 4.0) {
+        _elevGain += s - _elevRef!;
+        _elevRef = s;
+      } else if (s - _elevRef! < -4.0) {
+        _elevRef = s;
+      }
+    }
+
     _c?.animateCamera(CameraUpdate.newLatLng(here));
     _route?.setRoute(_path, '#1565C0');
     if (mounted) setState(() {});
@@ -244,6 +280,15 @@ class _RecordTrailScreenState extends State<RecordTrailScreen> {
       path: finalPath,
       anchors: [for (final c in cues) c.position],
       cues: cues,
+      // Seed the trail's own totals with the walk that recorded it — see
+      // the `recordedTrack` doc comment for why the Activity itself isn't
+      // saved until HomeScreen knows the trail's id.
+      walkedMeters: _meters,
+      walkCount: 1,
+      elevGainMeters: _elevGain,
+      recordedTrack: List.of(_track),
+      recordedStartedAt: _startedAt,
+      recordedDurationSec: _elapsedSec,
     );
     if (mounted) Navigator.pop(context, draft);
   }
