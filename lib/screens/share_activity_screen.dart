@@ -1,15 +1,19 @@
 import 'dart:io';
 import 'dart:math' show cos, max, min, pi;
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
-import 'package:maplibre_gl/maplibre_gl.dart' show LatLng;
+import 'package:maplibre_gl/maplibre_gl.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../models/activity.dart';
+import '../models/region.dart';
+import '../services/route_layer.dart';
 import '../services/settings.dart';
+import '../widgets/base_map.dart';
 
 /// Runkeeper-style "share this walk" flow: previews a stats+route card, then
 /// hands it to the OS share sheet (SMS/WhatsApp/email/etc.) as an image plus
@@ -25,9 +29,36 @@ class ShareActivityScreen extends StatefulWidget {
 }
 
 class _ShareActivityScreenState extends State<ShareActivityScreen> {
+  static const _mapAreaHeight = 160.0;
+
   final _cardKey = GlobalKey();
   late final TextEditingController _caption;
   bool _sharing = false;
+
+  MapLibreMapController? _mapC;
+  RouteLayer? _routeLayer;
+
+  /// Native PNG bytes of the real map + route, captured via
+  /// [MapLibreMapController.takeSnapshot] once it settles — see
+  /// [_onMapStyleLoaded]. Null until ready (or capture failed).
+  Uint8List? _mapSnapshot;
+
+  /// True once the snapshot attempt has finished one way or the other —
+  /// either [_mapSnapshot] is set, or it failed and the self-drawn
+  /// [_RouteThumbnailPainter] fallback is used instead.
+  bool _mapCaptureFailed = false;
+
+  List<LatLng> get _points => [for (final p in widget.activity.track) p.position];
+
+  Region get _region =>
+      _points.isEmpty ? kDefaultRegion : regionForPoint(_points.first);
+
+  CameraPosition get _initialCamera => CameraPosition(
+        target: _points.isEmpty ? _region.center : _points.first,
+        zoom: 14,
+      );
+
+  bool get _mapReady => _mapSnapshot != null || _mapCaptureFailed;
 
   @override
   void initState() {
@@ -35,6 +66,7 @@ class _ShareActivityScreenState extends State<ShareActivityScreen> {
     final a = widget.activity;
     final dist = Settings.instance.formatDistance(a.distanceMeters);
     _caption = TextEditingController(text: 'I walked $dist on ${a.trailName}!');
+    if (_points.length < 2) _mapCaptureFailed = true;
   }
 
   @override
@@ -43,12 +75,63 @@ class _ShareActivityScreenState extends State<ShareActivityScreen> {
     super.dispose();
   }
 
-  /// Captures the card (already laid out and painted — this only runs after
-  /// a user tap, well past the first frame) to a PNG, writes it to a temp
-  /// file the same way TrailShare.shareTrail already does, and opens the OS
-  /// share sheet with it plus the caption text.
+  /// Draws the route on a real map, fits the camera to it, waits for tiles
+  /// to actually settle, then captures a native PNG via
+  /// [MapLibreMapController.takeSnapshot] — a dedicated native rendering
+  /// call, distinct from (and far more reliable than) capturing the map
+  /// through Flutter's own widget compositor, since the map is a native
+  /// Android platform view. Once captured, [build] swaps the live map for
+  /// the plain PNG, so the later whole-card [RenderRepaintBoundary] capture
+  /// (in [_share]) never has to touch the platform view at all — it only
+  /// ever captures a plain `Image.memory`, the same as any other picture.
+  Future<void> _onMapStyleLoaded() async {
+    final c = _mapC;
+    if (c == null || _points.length < 2) {
+      if (mounted) setState(() => _mapCaptureFailed = true);
+      return;
+    }
+    try {
+      _routeLayer = RouteLayer(c);
+      await _routeLayer!.ensure();
+      await _routeLayer!.setRoute(_points, '#1565C0');
+      await c.animateCamera(CameraUpdate.newLatLngBounds(
+        _boundsOf(_points),
+        left: 30,
+        right: 30,
+        top: 30,
+        bottom: 30,
+      ));
+      // animateCamera's future completes once the animation finishes, not
+      // once every tile at the new position/zoom has actually painted —
+      // give it a moment before snapshotting, or the capture can catch the
+      // map mid-render.
+      await Future.delayed(const Duration(milliseconds: 600));
+      final bytes = await c.takeSnapshot();
+      if (mounted) setState(() => _mapSnapshot = bytes);
+    } catch (_) {
+      if (mounted) setState(() => _mapCaptureFailed = true);
+    }
+  }
+
+  static LatLngBounds _boundsOf(List<LatLng> pts) {
+    var minLat = pts.first.latitude, maxLat = pts.first.latitude;
+    var minLng = pts.first.longitude, maxLng = pts.first.longitude;
+    for (final p in pts) {
+      minLat = p.latitude < minLat ? p.latitude : minLat;
+      maxLat = p.latitude > maxLat ? p.latitude : maxLat;
+      minLng = p.longitude < minLng ? p.longitude : minLng;
+      maxLng = p.longitude > maxLng ? p.longitude : maxLng;
+    }
+    return LatLngBounds(
+        southwest: LatLng(minLat, minLng), northeast: LatLng(maxLat, maxLng));
+  }
+
+  /// Captures the card (map slot already swapped to a plain image by now —
+  /// see [_mapReady]/[build]) to a PNG, writes it to a temp file the same
+  /// way TrailShare.shareTrail already does, and opens the OS share sheet
+  /// with it plus the caption text.
   Future<void> _share() async {
-    if (_sharing) return;
+    if (_sharing || !_mapReady) return;
     setState(() => _sharing = true);
     try {
       final boundary =
@@ -88,7 +171,11 @@ class _ShareActivityScreenState extends State<ShareActivityScreen> {
           Center(
             child: RepaintBoundary(
               key: _cardKey,
-              child: _ShareCard(activity: widget.activity),
+              child: _ShareCard(
+                activity: widget.activity,
+                mapAreaHeight: _mapAreaHeight,
+                mapChild: _buildMapArea(),
+              ),
             ),
           ),
           const SizedBox(height: 20),
@@ -102,27 +189,61 @@ class _ShareActivityScreenState extends State<ShareActivityScreen> {
           ),
           const SizedBox(height: 16),
           FilledButton.icon(
-            onPressed: _sharing ? null : _share,
-            icon: _sharing
+            onPressed: (_sharing || !_mapReady) ? null : _share,
+            icon: (_sharing || !_mapReady)
                 ? const SizedBox(
                     width: 18,
                     height: 18,
                     child: CircularProgressIndicator(strokeWidth: 2))
                 : const Icon(Icons.share),
-            label: Text(_sharing ? 'Preparing…' : 'Share'),
+            label: Text(_sharing
+                ? 'Preparing…'
+                : !_mapReady
+                    ? 'Loading map…'
+                    : 'Share'),
           ),
         ],
       ),
     );
   }
+
+  /// The map slot inside the card: the live map while it's loading/being
+  /// captured, then swapped for the captured PNG (or the self-drawn
+  /// fallback thumbnail if the native snapshot failed) — same size either
+  /// way so nothing jumps when it swaps, and the Share button stays
+  /// disabled the whole time the live map is still showing here.
+  Widget _buildMapArea() {
+    if (_mapSnapshot != null) {
+      return Image.memory(_mapSnapshot!, fit: BoxFit.cover);
+    }
+    if (_mapCaptureFailed) {
+      return _points.length >= 2
+          ? CustomPaint(painter: _RouteThumbnailPainter(_points))
+          : const SizedBox.shrink();
+    }
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(12),
+      child: BaseMap(
+        region: _region,
+        initialCamera: _initialCamera,
+        onMapCreated: (c) => _mapC = c,
+        onStyleLoaded: _onMapStyleLoaded,
+      ),
+    );
+  }
 }
 
-/// The shareable card itself — kept visually simple and self-contained
-/// (no live map, no network/tile dependency) so it renders instantly and
-/// looks the same regardless of what's loaded elsewhere in the app.
+/// The shareable card itself. [mapChild] is whatever [_buildMapArea]
+/// currently returns (live map while loading, then a plain captured image).
 class _ShareCard extends StatelessWidget {
-  const _ShareCard({required this.activity});
+  const _ShareCard({
+    required this.activity,
+    required this.mapAreaHeight,
+    required this.mapChild,
+  });
   final Activity activity;
+  final double mapAreaHeight;
+  final Widget mapChild;
 
   static const _brand = Color(0xFF1B5E20);
 
@@ -163,14 +284,7 @@ class _ShareCard extends StatelessWidget {
               style: const TextStyle(fontSize: 13, color: Color(0xFF6A6A6A))),
           const SizedBox(height: 16),
           if (a.track.length >= 2)
-            SizedBox(
-              height: 140,
-              width: double.infinity,
-              child: CustomPaint(
-                painter:
-                    _RouteThumbnailPainter([for (final p in a.track) p.position]),
-              ),
-            ),
+            SizedBox(height: mapAreaHeight, width: double.infinity, child: mapChild),
           const SizedBox(height: 16),
           Row(
             children: [
@@ -209,9 +323,9 @@ class _ShareCard extends StatelessWidget {
       '${_months[d.month - 1]} ${d.day}, ${d.year}';
 }
 
-/// Self-drawn route outline from the activity's own track — no live map
-/// widget involved, so it's instant, offline-safe, and has a consistent
-/// look regardless of map style/tile load state. Projects lat/lng into a
+/// Self-drawn route outline from the activity's own track — used only as a
+/// fallback if the native map snapshot fails (see
+/// [_ShareActivityScreenState._onMapStyleLoaded]). Projects lat/lng into a
 /// locally equirectangular space (scaling longitude by cos(latitude), same
 /// idea as the routing math in lib/services/trail_router.dart) so the shape
 /// isn't stretched, then fits it to the canvas preserving aspect ratio.
