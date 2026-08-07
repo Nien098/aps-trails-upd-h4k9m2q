@@ -104,6 +104,17 @@ class NativeBridge {
     } catch (_) {}
   }
 
+  /// Opens the system TTS engine's own "install voice data" screen — the
+  /// only way to actually fix a voice that lists in [FlutterTts.getVoices]
+  /// but produces no audio, since that means its model data was never
+  /// downloaded. No API can trigger the download itself; this just gets
+  /// the walker to the right screen to do it.
+  static Future<void> openTtsVoiceData() async {
+    try {
+      await _ch.invokeMethod('openTtsVoiceData');
+    } catch (_) {}
+  }
+
   /// Launches the system package installer on a downloaded APK. Always shows
   /// Android's own install-confirmation screen — no app can install silently.
   /// Returns null on success, or the native exception's message if launching

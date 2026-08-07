@@ -215,9 +215,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
               style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
           const SizedBox(height: 6),
           const Text(
-              "Which voice reads cues out loud during a walk. Available "
-              "voices depend on what's installed on this phone — tap the "
-              "speaker icon to hear one before choosing it.",
+              "Which voice reads cues out loud during a walk. Includes "
+              'English, Cantonese, Mandarin, and Indonesian voices '
+              "installed on this phone — tap the speaker icon to hear one "
+              "before choosing it. Walking cues themselves are still "
+              "written in English, so a Cantonese/Mandarin/Indonesian "
+              "voice will read them in its own accent rather than "
+              "translating them.",
               style: TextStyle(fontSize: 14, color: Color(0xFF4A4A4A))),
           const SizedBox(height: 12),
           const _VoicePicker(),
@@ -437,7 +441,20 @@ class _VoicePickerState extends State<_VoicePicker> {
     'en-ie': 'English (Ireland)',
     'en-za': 'English (South Africa)',
     'en-ng': 'English (Nigeria)',
+    'zh-cn': 'Mandarin (China)',
+    'zh-tw': 'Mandarin (Taiwan)',
+    'zh-hk': 'Chinese (Hong Kong)',
+    'cmn-cn': 'Mandarin (China)',
+    'cmn-tw': 'Mandarin (Taiwan)',
+    'yue-hk': 'Cantonese (Hong Kong)',
+    'id-id': 'Indonesian',
   };
+
+  /// Which locale prefixes show up in the picker at all — the app's own
+  /// requested languages, per the user. Anything else installed on the
+  /// phone (other languages the walker never asked for) stays hidden so
+  /// the list doesn't turn into every voice pack on the device.
+  static const _allowedPrefixes = ['en', 'zh', 'yue', 'cmn', 'id'];
 
   @override
   void initState() {
@@ -453,10 +470,15 @@ class _VoicePickerState extends State<_VoicePicker> {
         final m = Map<Object?, Object?>.from(entry as Map);
         final name = m['name']?.toString();
         final locale = m['locale']?.toString();
-        // English only — the app's cues are English text, and a non-English
-        // voice would mispronounce them rather than just sound different.
         if (name == null || locale == null) continue;
-        if (!locale.toLowerCase().startsWith('en')) continue;
+        final localeLower = locale.toLowerCase();
+        if (!_allowedPrefixes.any((p) => localeLower.startsWith(p))) continue;
+        // Google's "star" voice family lists here but, on some phones,
+        // never actually produces audio — its model data apparently isn't
+        // bundled locally despite the "-local" suffix in the name. There's
+        // no way to tell that apart from a working voice ahead of time, so
+        // hide the whole family rather than leave dead entries in the list.
+        if (name.toLowerCase().contains('star')) continue;
         voices.add({'name': name, 'locale': locale});
       }
       voices.sort((a, b) => a['locale']!.compareTo(b['locale']!));
@@ -468,7 +490,33 @@ class _VoicePickerState extends State<_VoicePicker> {
     }
   }
 
-  String _label(String locale) => _localeNames[locale.toLowerCase()] ?? locale;
+  String _label(String locale) {
+    final lower = locale.toLowerCase();
+    if (_localeNames.containsKey(lower)) return _localeNames[lower]!;
+    if (lower.startsWith('yue')) return 'Cantonese ($locale)';
+    if (lower.startsWith('zh') || lower.startsWith('cmn')) {
+      return 'Chinese ($locale)';
+    }
+    if (lower.startsWith('id')) return 'Indonesian ($locale)';
+    if (lower.startsWith('en')) return 'English ($locale)';
+    return locale;
+  }
+
+  /// A short sample line in the voice's own language/script, so previewing
+  /// a Cantonese/Mandarin/Indonesian voice actually demonstrates it —
+  /// unlike the real walking cues (still English text; see the note above
+  /// the picker), this line is written for the language being previewed.
+  String _sampleFor(String locale) {
+    final lower = locale.toLowerCase();
+    if (lower.startsWith('yue') || lower.contains('hk') || lower.contains('tw')) {
+      return '向左轉,前面兩百米。'; // Cantonese/Hong Kong/Taiwan — traditional script
+    }
+    if (lower.startsWith('zh') || lower.startsWith('cmn')) {
+      return '向左转,两百米后到达。'; // Mandarin/mainland China — simplified script
+    }
+    if (lower.startsWith('id')) return 'Belok kiri dalam dua ratus meter.';
+    return 'Turn left in two hundred metres.';
+  }
 
   Future<void> _preview(String name, String locale) async {
     final key = '$name|$locale';
@@ -477,7 +525,7 @@ class _VoicePickerState extends State<_VoicePicker> {
       await _tts.setLanguage(locale);
       await _tts.setVoice({'name': name, 'locale': locale});
       await _tts.setSpeechRate(0.44);
-      await _tts.speak('Turn left in two hundred metres.');
+      await _tts.speak(_sampleFor(locale));
     } catch (_) {
       // Nothing to show for a failed preview beyond just not speaking —
       // the picker itself still works even if this particular voice can't
@@ -498,11 +546,19 @@ class _VoicePickerState extends State<_VoicePicker> {
       );
     }
     if (_failed || _voices.isEmpty) {
-      return Text(
-          _failed
-              ? "Couldn't read this phone's installed voices."
-              : 'No extra English voices found on this phone — using the system default.',
-          style: const TextStyle(fontSize: 13, color: Color(0xFF4A4A4A)));
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+              _failed
+                  ? "Couldn't read this phone's installed voices."
+                  : 'No English, Cantonese, Mandarin, or Indonesian voices '
+                      'found on this phone — using the system default.',
+              style: const TextStyle(fontSize: 13, color: Color(0xFF4A4A4A))),
+          const SizedBox(height: 8),
+          _manageVoicesButton(),
+        ],
+      );
     }
     return ValueListenableBuilder<String>(
       valueListenable: Settings.instance.ttsVoice,
@@ -536,9 +592,23 @@ class _VoicePickerState extends State<_VoicePicker> {
                       : null,
                 ),
               ),
+            const SizedBox(height: 4),
+            Align(alignment: Alignment.centerLeft, child: _manageVoicesButton()),
           ],
         ),
       ),
+    );
+  }
+
+  /// Opens Android's own TTS voice-data manager — the only real fix when a
+  /// voice is listed here but silent (its model data isn't downloaded), and
+  /// also where Cantonese/Mandarin/Indonesian voices can be added if none
+  /// showed up above.
+  Widget _manageVoicesButton() {
+    return TextButton.icon(
+      onPressed: NativeBridge.openTtsVoiceData,
+      icon: const Icon(Icons.download_outlined, size: 18),
+      label: const Text('Manage voices on this phone'),
     );
   }
 }

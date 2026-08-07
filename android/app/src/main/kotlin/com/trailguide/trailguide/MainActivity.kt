@@ -12,6 +12,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings as AndroidSettings
+import android.speech.tts.TextToSpeech
 import android.telephony.SmsManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
@@ -148,6 +149,17 @@ class MainActivity : FlutterActivity() {
                             )
                         } catch (e: Exception) {
                             Log.e("TGNative", "battery optimization request failed", e)
+                        }
+                        result.success(null)
+                    }
+                    "openTtsVoiceData" -> {
+                        try {
+                            startActivity(
+                                Intent(TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA)
+                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            )
+                        } catch (e: Exception) {
+                            Log.e("TGNative", "openTtsVoiceData failed", e)
                         }
                         result.success(null)
                     }
