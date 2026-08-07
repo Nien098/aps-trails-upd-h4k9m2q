@@ -14,6 +14,7 @@ import '../services/geo.dart';
 import '../services/route_layer.dart';
 import '../services/settings.dart';
 import '../widgets/base_map.dart';
+import '../widgets/mini_charts.dart';
 
 /// Runkeeper-style "share this walk" flow: previews a stats+route card, then
 /// hands it to the OS share sheet (SMS/WhatsApp/email/etc.) as an image plus
@@ -213,6 +214,32 @@ class _ShareActivityScreenState extends State<ShareActivityScreen> {
     return markers;
   }
 
+  /// Elevation profile (x = cumulative distance in the current unit, y =
+  /// lightly-smoothed elevation) for the optional elevation chart — same
+  /// smoothing/interpolation as ActivityDetailScreen's `_ProfileCharts`,
+  /// duplicated rather than shared since this card only ever needs the
+  /// elevation series (not pace) and stays self-contained.
+  static List<Offset> _elevationProfile(Activity a, bool metric) {
+    final track = a.track;
+    if (track.length < 3) return const [];
+    final unitM = metric ? 1000.0 : 1609.344;
+    final cum = List<double>.filled(track.length, 0);
+    for (var i = 1; i < track.length; i++) {
+      cum[i] =
+          cum[i - 1] + metersBetween(track[i - 1].position, track[i].position);
+    }
+    final data = <Offset>[];
+    double? sm;
+    for (var i = 0; i < track.length; i++) {
+      final e = track[i].ele;
+      if (e == null) continue;
+      sm = sm == null ? e : sm * 0.7 + e * 0.3;
+      final y = metric ? sm : sm * 3.28084;
+      data.add(Offset(cum[i] / unitM, y));
+    }
+    return data;
+  }
+
   static LatLngBounds _boundsOf(List<LatLng> pts) {
     var minLat = pts.first.latitude, maxLat = pts.first.latitude;
     var minLng = pts.first.longitude, maxLng = pts.first.longitude;
@@ -277,6 +304,10 @@ class _ShareActivityScreenState extends State<ShareActivityScreen> {
                 mapChild: _buildMapArea(),
                 extraStats: _selectedStats,
                 statLabels: _availableStats,
+                elevationProfile: _selectedStats.contains('elevation')
+                    ? _elevationProfile(
+                        widget.activity, Settings.instance.metric.value)
+                    : const [],
               ),
             ),
           ),
@@ -372,6 +403,7 @@ class _ShareCard extends StatelessWidget {
     required this.mapChild,
     required this.extraStats,
     required this.statLabels,
+    required this.elevationProfile,
   });
   final Activity activity;
   final double mapAreaHeight;
@@ -382,6 +414,14 @@ class _ShareCard extends StatelessWidget {
   /// whatever order the Set happens to iterate in.
   final Set<String> extraStats;
   final Map<String, String> statLabels;
+
+  /// Elevation-vs-distance points to draw as a chart, or empty to skip it.
+  /// Populated by the caller only when 'elevation' is one of [extraStats]
+  /// (see [_ShareActivityScreenState._elevationProfile]) — the brother's
+  /// ask was "the elevation graph tagged on... assuming the user selects
+  /// elevation as a shared option", so it rides on the same chip rather
+  /// than getting its own toggle.
+  final List<Offset> elevationProfile;
 
   static const _brand = Color(0xFF1B5E20);
 
@@ -433,6 +473,22 @@ class _ShareCard extends StatelessWidget {
                       _stat('Pace', s.formatPace(a.distanceMeters, a.durationSec))),
             ],
           ),
+          if (elevationProfile.length >= 2) ...[
+            const SizedBox(height: 14),
+            const Text('Elevation',
+                style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: Color(0xFF4A4A4A))),
+            const SizedBox(height: 4),
+            AreaLineChart(
+              data: elevationProfile,
+              height: 100,
+              fmtY: (y) => '${y.round()} ${s.metric.value ? 'm' : 'ft'}',
+              fmtX: (x) =>
+                  '${x.toStringAsFixed(1)} ${s.metric.value ? 'km' : 'mi'}',
+            ),
+          ],
           if (extraStats.isNotEmpty) ...[
             const SizedBox(height: 14),
             Wrap(
