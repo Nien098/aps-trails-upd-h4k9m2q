@@ -2,6 +2,8 @@ import 'dart:convert';
 
 import 'package:maplibre_gl/maplibre_gl.dart';
 
+import '../services/geo.dart';
+
 /// One recorded GPS sample: a position, seconds elapsed since the walk began,
 /// and (when known) the altitude in metres — used to draw the elevation profile.
 class TrackPoint {
@@ -63,6 +65,20 @@ class Activity {
   String trackToJson() => _encodeTrack(track);
 
   static List<TrackPoint> trackFromJson(String? s) => _decodeTrack(s);
+
+  /// Seconds actually moving (excludes long pauses / standing still) —
+  /// used for "moving time"/"moving pace" stats, distinct from
+  /// [durationSec] (total elapsed, pauses included). Falls back to
+  /// [durationSec] if the track is too sparse to tell.
+  int movingSeconds() {
+    var moving = 0;
+    for (var i = 1; i < track.length; i++) {
+      final dt = track[i].tSec - track[i - 1].tSec;
+      final d = metersBetween(track[i - 1].position, track[i].position);
+      if (dt > 0 && dt < 120 && d >= 2) moving += dt;
+    }
+    return moving == 0 ? durationSec : moving;
+  }
 
   Map<String, Object?> toRow() => {
         'trail_id': trailId,

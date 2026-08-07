@@ -177,10 +177,10 @@ class _ActivityDetailScreenState extends State<ActivityDetailScreen> {
                 _StatTile('Calories',
                     '${s.estimateCalories(a.distanceMeters)} kcal',
                     Icons.local_fire_department),
-                _StatTile('Moving time', Settings.formatDuration(_movingSec()),
+                _StatTile('Moving time', Settings.formatDuration(a.movingSeconds()),
                     Icons.timelapse),
                 _StatTile('Moving pace',
-                    s.formatPace(a.distanceMeters, _movingSec()),
+                    s.formatPace(a.distanceMeters, a.movingSeconds()),
                     Icons.bolt),
               ],
             ),
@@ -225,17 +225,6 @@ class _ActivityDetailScreenState extends State<ActivityDetailScreen> {
         ],
       ),
     );
-  }
-
-  /// Seconds actually moving (excludes long pauses / standing still).
-  int _movingSec() {
-    var moving = 0;
-    for (var i = 1; i < a.track.length; i++) {
-      final dt = a.track[i].tSec - a.track[i - 1].tSec;
-      final d = metersBetween(a.track[i - 1].position, a.track[i].position);
-      if (dt > 0 && dt < 120 && d >= 2) moving += dt;
-    }
-    return moving == 0 ? a.durationSec : moving;
   }
 
   static const _months = [

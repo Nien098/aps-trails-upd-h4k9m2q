@@ -21,6 +21,7 @@ class Settings {
   static const _kTrailLineDashed = 'basemap_trail_line_dashed';
   static const _kDetourFactor = 'trail_router_detour_factor';
   static const _kBatteryWarningShown = 'battery_warning_shown';
+  static const _kShareStats = 'share_card_stats';
 
   /// true = metric (m / km), false = imperial (ft / mi). Defaults to metric.
   final ValueNotifier<bool> metric = ValueNotifier(true);
@@ -83,6 +84,12 @@ class Settings {
   /// after that.
   final ValueNotifier<bool> batteryWarningShown = ValueNotifier(false);
 
+  /// Which optional stats (beyond the always-shown Distance/Time/Pace)
+  /// appear on the walk-share card — see ShareActivityScreen. Remembered
+  /// across shares rather than reset every time. Defaults to just elevation
+  /// gain, matching the card's original look.
+  final ValueNotifier<Set<String>> shareStats = ValueNotifier({'elevation'});
+
   Future<void> load() async {
     final p = await SharedPreferences.getInstance();
     metric.value = p.getBool(_kMetric) ?? true;
@@ -99,6 +106,7 @@ class Settings {
     trailLineDashed.value = p.getBool(_kTrailLineDashed) ?? false;
     detourFactor.value = p.getDouble(_kDetourFactor) ?? 2.5;
     batteryWarningShown.value = p.getBool(_kBatteryWarningShown) ?? false;
+    shareStats.value = (p.getStringList(_kShareStats) ?? const ['elevation']).toSet();
   }
 
   Future<void> setMetric(bool value) async {
@@ -171,6 +179,12 @@ class Settings {
     batteryWarningShown.value = value;
     final p = await SharedPreferences.getInstance();
     await p.setBool(_kBatteryWarningShown, value);
+  }
+
+  Future<void> setShareStats(Set<String> keys) async {
+    shareStats.value = keys;
+    final p = await SharedPreferences.getInstance();
+    await p.setStringList(_kShareStats, keys.toList());
   }
 
   /// Adds a finished walk's distance and elevation gain to the lifetime totals.

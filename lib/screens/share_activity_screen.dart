@@ -31,8 +31,21 @@ class ShareActivityScreen extends StatefulWidget {
 class _ShareActivityScreenState extends State<ShareActivityScreen> {
   static const _mapAreaHeight = 160.0;
 
+  /// Optional stats a walker can add to the card beyond the always-shown
+  /// Distance/Time/Pace headline row — key -> label. Selection is
+  /// remembered across shares via Settings.shareStats rather than reset
+  /// every time.
+  static const _availableStats = {
+    'elevation': 'Elevation gain',
+    'speed': 'Avg speed',
+    'calories': 'Calories',
+    'movingTime': 'Moving time',
+    'movingPace': 'Moving pace',
+  };
+
   final _cardKey = GlobalKey();
   late final TextEditingController _caption;
+  late Set<String> _selectedStats;
   bool _sharing = false;
 
   MapLibreMapController? _mapC;
@@ -77,7 +90,19 @@ class _ShareActivityScreenState extends State<ShareActivityScreen> {
     final a = widget.activity;
     final dist = Settings.instance.formatDistance(a.distanceMeters);
     _caption = TextEditingController(text: 'I walked $dist on ${a.trailName}!');
+    _selectedStats = Set.of(Settings.instance.shareStats.value);
     if (_points.length < 2) _mapFailed = true;
+  }
+
+  void _toggleStat(String key, bool enabled) {
+    setState(() {
+      if (enabled) {
+        _selectedStats.add(key);
+      } else {
+        _selectedStats.remove(key);
+      }
+    });
+    Settings.instance.setShareStats(_selectedStats);
   }
 
   @override
@@ -250,10 +275,27 @@ class _ShareActivityScreenState extends State<ShareActivityScreen> {
                 activity: widget.activity,
                 mapAreaHeight: _mapAreaHeight,
                 mapChild: _buildMapArea(),
+                extraStats: _selectedStats,
+                statLabels: _availableStats,
               ),
             ),
           ),
           const SizedBox(height: 20),
+          Text('Also include on card', style: Theme.of(context).textTheme.titleSmall),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 4,
+            children: [
+              for (final entry in _availableStats.entries)
+                FilterChip(
+                  label: Text(entry.value),
+                  selected: _selectedStats.contains(entry.key),
+                  onSelected: (v) => _toggleStat(entry.key, v),
+                ),
+            ],
+          ),
+          const SizedBox(height: 16),
           TextField(
             controller: _caption,
             maxLines: 3,
@@ -328,10 +370,18 @@ class _ShareCard extends StatelessWidget {
     required this.activity,
     required this.mapAreaHeight,
     required this.mapChild,
+    required this.extraStats,
+    required this.statLabels,
   });
   final Activity activity;
   final double mapAreaHeight;
   final Widget mapChild;
+
+  /// Which optional stat keys (from [statLabels]) to render, in a fixed
+  /// order (see [_ShareActivityScreenState._availableStats]) rather than
+  /// whatever order the Set happens to iterate in.
+  final Set<String> extraStats;
+  final Map<String, String> statLabels;
 
   static const _brand = Color(0xFF1B5E20);
 
@@ -383,13 +433,46 @@ class _ShareCard extends StatelessWidget {
                       _stat('Pace', s.formatPace(a.distanceMeters, a.durationSec))),
             ],
           ),
-          if (a.elevGainMeters > 0) ...[
-            const SizedBox(height: 10),
-            _stat('Elevation gain', '↑ ${s.formatElevation(a.elevGainMeters)}'),
+          if (extraStats.isNotEmpty) ...[
+            const SizedBox(height: 14),
+            Wrap(
+              spacing: 20,
+              runSpacing: 10,
+              children: [
+                // Iterate statLabels (a fixed, declared order) rather than
+                // the Set directly, so the card's layout doesn't depend on
+                // whatever order the user happened to tap the chips in.
+                for (final key in statLabels.keys)
+                  if (extraStats.contains(key))
+                    SizedBox(
+                      width: 140,
+                      child: _stat(statLabels[key]!, _statValue(s, a, key)),
+                    ),
+              ],
+            ),
           ],
         ],
       ),
     );
+  }
+
+  /// Formats the value for one optional stat key — see
+  /// [_ShareActivityScreenState._availableStats] for what each key means.
+  String _statValue(Settings s, Activity a, String key) {
+    switch (key) {
+      case 'elevation':
+        return '↑ ${s.formatElevation(a.elevGainMeters)}';
+      case 'speed':
+        return s.formatSpeed(a.distanceMeters, a.durationSec);
+      case 'calories':
+        return '${s.estimateCalories(a.distanceMeters)} kcal';
+      case 'movingTime':
+        return Settings.formatDuration(a.movingSeconds());
+      case 'movingPace':
+        return s.formatPace(a.distanceMeters, a.movingSeconds());
+      default:
+        return '';
+    }
   }
 
   Widget _stat(String label, String value) {
