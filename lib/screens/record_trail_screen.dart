@@ -55,9 +55,22 @@ class _RecordTrailScreenState extends State<RecordTrailScreen> {
     super.initState();
     WakelockPlus.enable();
     NativeBridge.onAcknowledgeStillness = _acknowledgeStillness;
-    _tts.setLanguage('en-US');
-    _tts.setSpeechRate(0.44);
+    _initTts();
     _start();
+  }
+
+  Future<void> _initTts() async {
+    final voice = Settings.parseVoice(Settings.instance.ttsVoice.value);
+    await _tts.setLanguage(voice?['locale'] ?? 'en-US');
+    await _tts.setSpeechRate(0.44);
+    if (voice != null) {
+      try {
+        await _tts.setVoice(voice);
+      } catch (_) {
+        // Voice may have been uninstalled/changed since it was picked in
+        // Settings — fall back silently to the locale's system default.
+      }
+    }
   }
 
   Future<void> _start() async {

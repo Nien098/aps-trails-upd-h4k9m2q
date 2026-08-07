@@ -22,6 +22,7 @@ class Settings {
   static const _kDetourFactor = 'trail_router_detour_factor';
   static const _kBatteryWarningShown = 'battery_warning_shown';
   static const _kShareStats = 'share_card_stats';
+  static const _kTtsVoice = 'tts_voice';
 
   /// true = metric (m / km), false = imperial (ft / mi). Defaults to metric.
   final ValueNotifier<bool> metric = ValueNotifier(true);
@@ -90,6 +91,22 @@ class Settings {
   /// gain, matching the card's original look.
   final ValueNotifier<Set<String>> shareStats = ValueNotifier({'elevation'});
 
+  /// The spoken-cue voice, as "name|locale" matching what
+  /// `FlutterTts.getVoices` reports on this device — see
+  /// SettingsScreen's voice picker. Empty string = system default for
+  /// whatever language is requested (the app's original behaviour, and
+  /// still what a fresh install gets), since the actual list of installed
+  /// voices is phone-specific and can't be baked in as a fixed default.
+  final ValueNotifier<String> ttsVoice = ValueNotifier('');
+
+  /// Parses a saved [ttsVoice] value into the map `FlutterTts.setVoice`
+  /// expects, or null if unset/malformed (falls back to system default).
+  static Map<String, String>? parseVoice(String v) {
+    final parts = v.split('|');
+    if (parts.length != 2 || parts[0].isEmpty) return null;
+    return {'name': parts[0], 'locale': parts[1]};
+  }
+
   Future<void> load() async {
     final p = await SharedPreferences.getInstance();
     metric.value = p.getBool(_kMetric) ?? true;
@@ -107,6 +124,7 @@ class Settings {
     detourFactor.value = p.getDouble(_kDetourFactor) ?? 2.5;
     batteryWarningShown.value = p.getBool(_kBatteryWarningShown) ?? false;
     shareStats.value = (p.getStringList(_kShareStats) ?? const ['elevation']).toSet();
+    ttsVoice.value = p.getString(_kTtsVoice) ?? '';
   }
 
   Future<void> setMetric(bool value) async {
@@ -185,6 +203,12 @@ class Settings {
     shareStats.value = keys;
     final p = await SharedPreferences.getInstance();
     await p.setStringList(_kShareStats, keys.toList());
+  }
+
+  Future<void> setTtsVoice(String voice) async {
+    ttsVoice.value = voice;
+    final p = await SharedPreferences.getInstance();
+    await p.setString(_kTtsVoice, voice);
   }
 
   /// Adds a finished walk's distance and elevation gain to the lifetime totals.

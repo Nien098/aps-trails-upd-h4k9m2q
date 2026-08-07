@@ -206,10 +206,19 @@ class _GuideScreenState extends State<GuideScreen> {
   }
 
   Future<void> _initTts() async {
-    await _tts.setLanguage('en-US');
+    final voice = Settings.parseVoice(Settings.instance.ttsVoice.value);
+    await _tts.setLanguage(voice?['locale'] ?? 'en-US');
     await _tts.setSpeechRate(0.44); // slower & clearer
     await _tts.setVolume(1.0);
     await _tts.setPitch(1.0);
+    if (voice != null) {
+      try {
+        await _tts.setVoice(voice);
+      } catch (_) {
+        // Voice may have been uninstalled/changed since it was picked in
+        // Settings — fall back silently to the locale's system default.
+      }
+    }
   }
 
   Future<void> _startLocation() async {
