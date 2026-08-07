@@ -9,6 +9,7 @@ import '../services/settings.dart';
 import '../services/trail_store.dart';
 import '../widgets/base_map.dart';
 import '../widgets/mini_charts.dart';
+import 'share_activity_screen.dart';
 import 'trail_progress_screen.dart';
 
 /// Shows a single walk: summary stats, a map of the route walked, and per-unit
@@ -110,6 +111,16 @@ class _ActivityDetailScreenState extends State<ActivityDetailScreen> {
               )
             : null,
         actions: [
+          IconButton(
+            icon: const Icon(Icons.share),
+            tooltip: 'Share this walk',
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => ShareActivityScreen(activity: a),
+              ),
+            ),
+          ),
           if (!widget.justFinished)
             IconButton(
               icon: const Icon(Icons.delete_outline),
