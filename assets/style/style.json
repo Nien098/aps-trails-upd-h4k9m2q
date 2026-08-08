@@ -39,7 +39,7 @@
       "filter": ["any", ["!=", ["get", "kind"], "water"], ["has", "kind_detail"]],
       "paint": {
         "fill-color": "#accdea",
-        "fill-opacity": ["interpolate", ["linear"], ["zoom"], 10, 0.45, 14, 0.7, 16, 0.85]
+        "fill-opacity": 0.75
       }
     },
     {
