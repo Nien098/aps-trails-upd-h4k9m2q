@@ -350,11 +350,17 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           t.cues.map((c) => c.order).reduce((a, b) => a > b ? a : b);
       for (final cue in t.cues) {
         cue.order = maxOrder - cue.order;
-        cue.type = reversedCueType(cue.type);
+        reverseCueInPlace(cue);
       }
     }
 
     await TrailStore.instance.save(t);
+    // A checkpoint from an earlier walk stores nextIndex — a position in the
+    // cue list that just got reversed, so resuming against it would silently
+    // skip the wrong cues (and skip them from the wrong end of the trail).
+    // The saved progress can't be meaningfully translated to the opposite
+    // direction, so drop it rather than resume into a broken state.
+    if (t.id != null) await TrailStore.instance.clearWalkCheckpoint(t.id!);
     if (!mounted) return;
     setState(_reload);
     _toast('Reversed "${t.name}"');

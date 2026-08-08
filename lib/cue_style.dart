@@ -43,6 +43,37 @@ CueType reversedCueType(CueType t) => switch (t) {
       _ => t,
     };
 
+/// Flips one cue in place for a reversed walking direction — the type AND
+/// the wording that goes with it.
+///
+/// Swapping only [Cue.type] (as this used to) leaves the saved [Cue.label]
+/// and [Cue.spoken] describing the *old* direction, so a reversed trail
+/// would show a right-turn arrow while still announcing "Turn left here" —
+/// actively misleading, and exactly the direction a walker is being told to
+/// go. So for the types that actually change under reversal (left/right,
+/// start/finish), the wording is rebuilt from the new type's canonical
+/// definition.
+///
+/// That intentionally discards any custom wording the author wrote on those
+/// cues, for the same reason [effectiveCue] (guide_screen.dart) does when a
+/// walker turns back mid-walk: a phrase written for one direction can't be
+/// reliably rewritten for the other, and the type's plain default is always
+/// correct. Cues whose meaning is direction-independent (note, caution,
+/// bridge, straight, u-turn) are left completely untouched, so custom text
+/// on those survives a reverse.
+void reverseCueInPlace(Cue cue) {
+  final flipped = reversedCueType(cue.type);
+  if (flipped == cue.type) return;
+  final hadDefaultLabel = cue.label == cue.type.label;
+  final hadDefaultSpoken = cue.spoken == cue.type.defaultSpoken;
+  cue.type = flipped;
+  // Only overwrite text that still matched the old type's default; anything
+  // else was deliberately customised, and silently replacing it would lose
+  // the author's words on a round-trip reverse-and-reverse-back.
+  if (hadDefaultLabel) cue.label = flipped.label;
+  if (hadDefaultSpoken) cue.spoken = flipped.defaultSpoken;
+}
+
 /// Marker colour for a spot where two or more cues are stacked (e.g. a 4-way
 /// crossing) — distinct from every [cueColor] so a stack reads as "multiple
 /// cues here" at a glance, before the author or hiker even reads the label.
