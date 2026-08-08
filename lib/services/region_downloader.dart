@@ -76,6 +76,15 @@ class RegionDownloader {
   int get plannedTileCount => _planned;
   int _planned = 0;
 
+  /// Tiles that never downloaded even after retries — each one leaves a gap
+  /// that MapLibre fills by stretching a coarser tile to cover it (visibly
+  /// blocky/oversized water, buildings, roads at close zoom, since that
+  /// coarser tile was only ever meant for a zoomed-way-out view). Checked by
+  /// the caller after [download] completes to warn if the region may have
+  /// visible gaps.
+  int get failedTileCount => _failedTileCount;
+  int _failedTileCount = 0;
+
   /// Downloads the region into `<docs>/map/<id>.pmtiles` and returns a [Region].
   Future<Region?> download({
     required String id,
@@ -97,6 +106,7 @@ class RegionDownloader {
     final writer = await PmTilesWriter.create(tempPath);
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 20);
     var done = 0;
+    final failed = <List<int>>[];
     try {
       // Fetch in small concurrent batches to keep memory + sockets bounded.
       const batch = 6;
@@ -109,11 +119,29 @@ class RegionDownloader {
           final bytes = results[j];
           if (bytes != null && bytes.isNotEmpty) {
             await writer.addTile(slice[j][0], slice[j][1], slice[j][2], bytes);
+          } else {
+            failed.add(slice[j]);
           }
           done++;
         }
         onProgress
             ?.call(DownloadProgress(done, tiles.length, writer.byteCount));
+      }
+      // A tile that failed even after _fetch's own retries is usually a
+      // transient blip rather than a permanently bad tile (a dropped
+      // connection in a batch of hundreds, a momentary rate limit) — worth
+      // one more slower, sequential pass before accepting the gap.
+      if (!_cancelled && failed.isNotEmpty) {
+        final stillFailed = <List<int>>[];
+        for (final t in failed) {
+          final bytes = await _fetch(client, t[0], t[1], t[2], retries: 4);
+          if (bytes != null && bytes.isNotEmpty) {
+            await writer.addTile(t[0], t[1], t[2], bytes);
+          } else {
+            stillFailed.add(t);
+          }
+        }
+        _failedTileCount = stillFailed.length;
       }
     } finally {
       client.close(force: true);
@@ -146,21 +174,33 @@ class RegionDownloader {
     );
   }
 
-  Future<List<int>?> _fetch(HttpClient client, int z, int x, int y) async {
-    try {
-      final req = await client.getUrl(Uri.parse(protomapsTileUrl(z, x, y)));
-      final resp = await req.close();
-      if (resp.statusCode != 200) {
-        await resp.drain();
-        return null;
+  /// Fetches one tile, retrying transient failures (timeout, dropped
+  /// connection, non-200) with a short backoff — a silent `null` here used
+  /// to just mean "skip this tile", which leaves a permanent gap in the
+  /// archive that MapLibre papers over with a stretched, wrong-looking
+  /// coarser tile at render time. Real, permanently-missing tiles (e.g. a
+  /// zoom level with no coverage at this location) still end up `null`
+  /// after retries — this only cuts down on the transient case.
+  Future<List<int>?> _fetch(HttpClient client, int z, int x, int y,
+      {int retries = 2}) async {
+    for (var attempt = 0; ; attempt++) {
+      try {
+        final req = await client.getUrl(Uri.parse(protomapsTileUrl(z, x, y)));
+        final resp = await req.close();
+        if (resp.statusCode != 200) {
+          await resp.drain();
+          if (attempt >= retries) return null;
+        } else {
+          final b = BytesBuilder();
+          await for (final chunk in resp) {
+            b.add(chunk);
+          }
+          return b.takeBytes();
+        }
+      } catch (_) {
+        if (attempt >= retries) return null;
       }
-      final b = BytesBuilder();
-      await for (final chunk in resp) {
-        b.add(chunk);
-      }
-      return b.takeBytes();
-    } catch (_) {
-      return null;
+      await Future.delayed(Duration(milliseconds: 300 * (attempt + 1)));
     }
   }
 }

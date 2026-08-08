@@ -120,6 +120,19 @@ class _DownloadRegionScreenState extends State<DownloadRegionScreen> {
         return;
       }
       await addUserRegion(region);
+      // A handful of tiles that never downloaded (even after retries) leave
+      // gaps that render as oversized, blocky water/roads/buildings in that
+      // spot — same fix as re-running the download, so say so plainly
+      // rather than leaving an inaccurate-looking map unexplained. Must
+      // toast before popping — mounted goes false right after.
+      final missing = downloader.failedTileCount;
+      if (missing > 0) {
+        _toast(missing == 1
+            ? '1 map tile failed to download — that spot may look a bit '
+                'off. Re-download this area if it matters.'
+            : '$missing map tiles failed to download — some spots may look '
+                'a bit off. Re-download this area if it matters.');
+      }
       if (mounted) Navigator.pop(context, region.id);
     } finally {
       if (mounted) setState(() => _busy = false);
