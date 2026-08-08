@@ -4,6 +4,7 @@ import 'package:path_provider/path_provider.dart';
 
 import '../config.dart';
 import '../models/region.dart';
+import 'settings.dart';
 
 /// Copies bundled offline map assets (region pmtiles, glyphs) out of the
 /// Flutter asset bundle onto the device filesystem, because MapLibre Native
@@ -86,6 +87,13 @@ class OfflineMap {
     final root = dir.path;
     final mapFile = File('$root/map/$kMapAsset.pmtiles');
     await mapFile.parent.create(recursive: true);
+    // A live in-app update (HomeScreen._updateBundledMap, via the same
+    // RegionDownloader pipeline as a downloaded region) replaces this exact
+    // file with data fetched fresh from Protomaps. Once that's happened,
+    // never overwrite it with the older data baked into this build — the
+    // size-mismatch check below would otherwise "restore" the stale copy
+    // on every cold start, silently undoing the update.
+    if (Settings.instance.bundledMapUpdated.value) return;
     if (!mapFile.existsSync() || mapFile.lengthSync() != _mapBytes) {
       final sink = mapFile.openWrite();
       try {

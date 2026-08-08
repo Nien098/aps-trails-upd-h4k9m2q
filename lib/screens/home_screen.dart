@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../cue_style.dart';
 import '../models/activity.dart';
@@ -450,6 +451,24 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     label: const Text('Download new area'),
                   ),
                 ),
+                const Divider(height: 28),
+                const Text('Built-in map',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.public),
+                  title: const Text('Default map (SW BC)'),
+                  subtitle: const Text(
+                      'Built into the app — update to re-fetch it fresh'),
+                  trailing: IconButton(
+                    icon: const Icon(Icons.refresh),
+                    tooltip: 'Update the default map',
+                    onPressed: () async {
+                      Navigator.pop(ctx);
+                      await _updateBundledMap();
+                    },
+                  ),
+                ),
                 if (userRegions.isNotEmpty) ...[
                   const Divider(height: 28),
                   const Text('Downloaded areas',
@@ -504,6 +523,100 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       setState(() => _activeRegion = regionById(id));
       _toast('Added "${regionById(id).name}"');
     }
+  }
+
+  /// Re-fetches the whole bundled default basemap live from Protomaps,
+  /// through the same RegionDownloader/PmTilesWriter pipeline as a
+  /// downloaded region — the only way to get fresher/gap-free data onto a
+  /// phone that already has the app installed, since the bundled
+  /// `southwest_bc.pmtiles` itself only ever changes via a full app update.
+  /// Bounds are the union of every bundled bookmark in [kRegions], since
+  /// the basemap covers all of them, not just one.
+  Future<void> _updateBundledMap() async {
+    var west = kRegions.first.west, south = kRegions.first.south;
+    var east = kRegions.first.east, north = kRegions.first.north;
+    for (final r in kRegions.skip(1)) {
+      if (r.west < west) west = r.west;
+      if (r.south < south) south = r.south;
+      if (r.east > east) east = r.east;
+      if (r.north > north) north = r.north;
+    }
+
+    if (!await Updater.instance.isOnWifi()) {
+      if (!mounted) return;
+      final proceed = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Not on WiFi'),
+          content: const Text(
+              'Updating the default map re-fetches a large area (likely '
+              '200+ MB) and can use significant mobile data. Continue '
+              'anyway, or wait until you\'re on WiFi?'),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Wait for WiFi')),
+            FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('Continue anyway')),
+          ],
+        ),
+      );
+      if (proceed != true) return;
+    }
+    if (!mounted) return;
+
+    final downloader = RegionDownloader();
+    _showBlockingDialog('Estimating size…');
+    final estBytes = await downloader.estimateBytes(west, south, east, north);
+    final tiles = RegionDownloader.tilesFor(west, south, east, north).length;
+    if (mounted) Navigator.pop(context); // close "estimating"
+    if (!mounted) return;
+
+    final mb = (estBytes / 1e6).toStringAsFixed(0);
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Update the default map?'),
+        content: Text(
+            'Re-fetches the whole built-in coverage area fresh (~$mb MB, '
+            '$tiles tiles) and replaces what shipped with the app. This can '
+            'take a long time — keep the app open until it finishes. '
+            'Trails you\'ve made keep working either way.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Update')),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    await WakelockPlus.enable();
+    final progress = ValueNotifier<DownloadProgress>(DownloadProgress(0, tiles, 0));
+    final future = downloader.download(
+      id: kMapAsset,
+      name: 'Default map',
+      west: west, south: south, east: east, north: north,
+      onProgress: (p) => progress.value = p,
+    );
+    _showUpdateProgress(progress, downloader, title: 'Updating default map');
+    final updated = await future;
+    await WakelockPlus.disable();
+    if (mounted) Navigator.pop(context); // close progress
+    if (updated == null) {
+      _toast('Update cancelled — kept the map that shipped with the app');
+      return;
+    }
+    await Settings.instance.setBundledMapUpdated(true);
+    final missing = downloader.failedTileCount;
+    _toast(missing > 0
+        ? 'Default map updated — $missing tile${missing == 1 ? '' : 's'} '
+            'still failed to download'
+        : 'Default map updated');
   }
 
   /// Re-downloads [r]'s exact area under its existing id — refreshes stale
@@ -571,12 +684,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   void _showUpdateProgress(
-      ValueNotifier<DownloadProgress> progress, RegionDownloader downloader) {
+      ValueNotifier<DownloadProgress> progress, RegionDownloader downloader,
+      {String title = 'Updating area'}) {
     showDialog(
       context: context,
       barrierDismissible: false,
       builder: (ctx) => AlertDialog(
-        title: const Text('Updating area'),
+        title: Text(title),
         content: ValueListenableBuilder<DownloadProgress>(
           valueListenable: progress,
           builder: (context, p, _) {

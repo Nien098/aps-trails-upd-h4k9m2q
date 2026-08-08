@@ -23,6 +23,7 @@ class Settings {
   static const _kBatteryWarningShown = 'battery_warning_shown';
   static const _kShareStats = 'share_card_stats';
   static const _kTtsVoice = 'tts_voice';
+  static const _kBundledMapUpdated = 'bundled_map_updated';
 
   /// true = metric (m / km), false = imperial (ft / mi). Defaults to metric.
   final ValueNotifier<bool> metric = ValueNotifier(true);
@@ -99,6 +100,12 @@ class Settings {
   /// voices is phone-specific and can't be baked in as a fixed default.
   final ValueNotifier<String> ttsVoice = ValueNotifier('');
 
+  /// True once the bundled default basemap has been replaced by a live
+  /// re-download (HomeScreen's "Update" on the built-in map) — see
+  /// OfflineMap._copyBaked, which checks this before ever re-copying the
+  /// older data baked into the APK back over a freshly-updated file.
+  final ValueNotifier<bool> bundledMapUpdated = ValueNotifier(false);
+
   /// Parses a saved [ttsVoice] value into the map `FlutterTts.setVoice`
   /// expects, or null if unset/malformed (falls back to system default).
   static Map<String, String>? parseVoice(String v) {
@@ -125,6 +132,7 @@ class Settings {
     batteryWarningShown.value = p.getBool(_kBatteryWarningShown) ?? false;
     shareStats.value = (p.getStringList(_kShareStats) ?? const ['elevation']).toSet();
     ttsVoice.value = p.getString(_kTtsVoice) ?? '';
+    bundledMapUpdated.value = p.getBool(_kBundledMapUpdated) ?? false;
   }
 
   Future<void> setMetric(bool value) async {
@@ -209,6 +217,12 @@ class Settings {
     ttsVoice.value = voice;
     final p = await SharedPreferences.getInstance();
     await p.setString(_kTtsVoice, voice);
+  }
+
+  Future<void> setBundledMapUpdated(bool value) async {
+    bundledMapUpdated.value = value;
+    final p = await SharedPreferences.getInstance();
+    await p.setBool(_kBundledMapUpdated, value);
   }
 
   /// Adds a finished walk's distance and elevation gain to the lifetime totals.
