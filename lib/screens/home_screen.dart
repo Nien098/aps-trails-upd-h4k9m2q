@@ -9,6 +9,7 @@ import '../services/backup.dart';
 import '../services/geo.dart';
 import '../services/import_fit.dart';
 import '../services/native_bridge.dart';
+import '../services/region_downloader.dart';
 import '../services/settings.dart';
 import '../services/trail_share.dart';
 import '../services/trail_store.dart';
@@ -459,17 +460,30 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                       contentPadding: EdgeInsets.zero,
                       leading: const Icon(Icons.map_outlined),
                       title: Text(r.name),
-                      trailing: IconButton(
-                        icon: const Icon(Icons.delete_outline),
-                        onPressed: () async {
-                          if (!await _confirmDeleteRegion(r)) return;
-                          await removeUserRegion(r.id);
-                          if (_activeRegion.id == r.id) {
-                            _activeRegion = kDefaultRegion;
-                          }
-                          setSheet(() {});
-                          if (mounted) setState(() {});
-                        },
+                      trailing: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          IconButton(
+                            icon: const Icon(Icons.refresh),
+                            tooltip: 'Update (re-download this area)',
+                            onPressed: () async {
+                              Navigator.pop(ctx);
+                              await _updateArea(r);
+                            },
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.delete_outline),
+                            onPressed: () async {
+                              if (!await _confirmDeleteRegion(r)) return;
+                              await removeUserRegion(r.id);
+                              if (_activeRegion.id == r.id) {
+                                _activeRegion = kDefaultRegion;
+                              }
+                              setSheet(() {});
+                              if (mounted) setState(() {});
+                            },
+                          ),
+                        ],
                       ),
                     ),
                 ],
@@ -490,6 +504,121 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       setState(() => _activeRegion = regionById(id));
       _toast('Added "${regionById(id).name}"');
     }
+  }
+
+  /// Re-downloads [r]'s exact area under its existing id — refreshes stale
+  /// or gap-filled tiles (see RegionDownloader's retry logic) without the
+  /// delete-then-download-new dance, which used to hand out a brand-new id
+  /// and silently orphan any trail's reference to the old one.
+  Future<void> _updateArea(Region r) async {
+    final downloader = RegionDownloader();
+    _showBlockingDialog('Estimating size…');
+    final estBytes =
+        await downloader.estimateBytes(r.west, r.south, r.east, r.north);
+    final tiles =
+        RegionDownloader.tilesFor(r.west, r.south, r.east, r.north).length;
+    if (mounted) Navigator.pop(context); // close "estimating"
+    if (!mounted) return;
+
+    if (!await _confirmUpdateRegion(r, estBytes)) return;
+    if (!mounted) return;
+
+    final progress = ValueNotifier<DownloadProgress>(DownloadProgress(0, tiles, 0));
+    final future = downloader.download(
+      id: r.id,
+      name: r.name,
+      west: r.west, south: r.south, east: r.east, north: r.north,
+      onProgress: (p) => progress.value = p,
+    );
+    _showUpdateProgress(progress, downloader);
+    final updated = await future;
+    if (mounted) Navigator.pop(context); // close progress
+    if (updated == null) {
+      _toast('Update cancelled — kept the existing map for "${r.name}"');
+      return;
+    }
+    await addUserRegion(updated);
+    if (_activeRegion.id == updated.id) _activeRegion = updated;
+    final missing = downloader.failedTileCount;
+    _toast(missing > 0
+        ? 'Updated "${r.name}" — $missing tile${missing == 1 ? '' : 's'} '
+            'still failed to download'
+        : 'Updated "${r.name}"');
+    if (mounted) setState(() {});
+  }
+
+  Future<bool> _confirmUpdateRegion(Region r, int estBytes) async {
+    final mb = (estBytes / 1e6).toStringAsFixed(estBytes < 1e7 ? 1 : 0);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Update "${r.name}"?'),
+        content: Text(
+            'Re-downloads this exact area fresh (~$mb MB) and replaces what\'s '
+            'saved now — useful if it looked wrong or incomplete last time. '
+            'Trails you made here keep working either way.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Update')),
+        ],
+      ),
+    );
+    return ok ?? false;
+  }
+
+  void _showUpdateProgress(
+      ValueNotifier<DownloadProgress> progress, RegionDownloader downloader) {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Updating area'),
+        content: ValueListenableBuilder<DownloadProgress>(
+          valueListenable: progress,
+          builder: (context, p, _) {
+            final pct = p.total == 0 ? 0.0 : p.done / p.total;
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                LinearProgressIndicator(value: pct),
+                const SizedBox(height: 12),
+                Text('${(pct * 100).round()}%  ·  '
+                    '${(p.bytes / 1e6).toStringAsFixed(1)} MB'),
+              ],
+            );
+          },
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => downloader.cancel(),
+            child: const Text('Cancel'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showBlockingDialog(String msg) {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        content: Row(
+          children: [
+            const SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2)),
+            const SizedBox(width: 16),
+            Text(msg),
+          ],
+        ),
+      ),
+    );
   }
 
   Future<bool> _confirmDeleteRegion(Region r) async {

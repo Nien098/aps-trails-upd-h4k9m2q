@@ -148,16 +148,10 @@ class RegionDownloader {
     }
 
     if (_cancelled) {
-      // Abort: close/clean the temp file, leave nothing behind.
-      try {
-        await writer.finish(outPath,
-            west: west, south: south, east: east, north: north,
-            minZoom: kRegionMinZoom, maxZoom: kRegionMaxZoom);
-        await File(outPath).delete();
-      } catch (_) {}
-      try {
-        await File(tempPath).delete();
-      } catch (_) {}
+      // Just discard the in-progress temp file — never touch outPath, since
+      // for an update-in-place [id] is an existing region's id, and that
+      // region's real .pmtiles must survive a cancelled update untouched.
+      await writer.abort();
       return null;
     }
 

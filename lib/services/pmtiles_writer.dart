@@ -33,6 +33,19 @@ class PmTilesWriter {
     _offset += bytes.length;
   }
 
+  /// Discards the in-progress temp file without building a final archive —
+  /// for a cancelled download. Distinct from [finish] specifically so a
+  /// cancelled *update* of an existing region (same id, same `outPath` as
+  /// an already-working file) can never touch that existing file at all.
+  Future<void> abort() async {
+    try {
+      await _temp.close();
+    } catch (_) {}
+    try {
+      await File(_tempPath).delete();
+    } catch (_) {}
+  }
+
   /// Assembles the final `.pmtiles` at [outPath]. Bounds are in degrees.
   Future<void> finish(
     String outPath, {
@@ -79,7 +92,12 @@ class PmTilesWriter {
       maxZoom: maxZoom,
     );
 
-    final out = await File(outPath).open(mode: FileMode.write);
+    // Written to a side path and renamed into place only once complete —
+    // updating an existing region reuses its id (and so this exact
+    // `outPath`); writing directly into it would leave that region's map
+    // half-written (and unusable) if the app died partway through.
+    final stagingPath = '$outPath.new';
+    final out = await File(stagingPath).open(mode: FileMode.write);
     try {
       await out.writeFrom(header);
       await out.writeFrom(dirs.root);
@@ -93,6 +111,7 @@ class PmTilesWriter {
     } finally {
       await out.close();
     }
+    await File(stagingPath).rename(outPath);
     try {
       await File(_tempPath).delete();
     } catch (_) {}
