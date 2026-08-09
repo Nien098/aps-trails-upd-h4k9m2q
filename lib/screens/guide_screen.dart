@@ -914,22 +914,26 @@ class _GuideScreenState extends State<GuideScreen> {
       // a stack — multi-line text field rendering has proven fragile here (a
       // combined "1. Start\n6. Finish" label could end up not drawing at
       // all), where plain single-line labels have been reliable. Each line
-      // gets its own vertical offset so a stack still reads as one list, and
-      // each is a *separate point feature at the same position* rather than
-      // sharing one — a single circle marker still draws once per group
-      // below since only markers[0] carries a real radius/stroke, the rest
-      // radius 0 (invisible, text-only).
+      // is a *separate point feature*, nudged a little south of the real
+      // spot so a stack still reads as one downward list instead of every
+      // line sitting exactly on top of the last (text-offset can't do this
+      // per-feature here — see [CueLayer]'s doc) — a single circle marker
+      // still draws once per group since only markers[0] carries a real
+      // radius/stroke, the rest radius 0 (invisible, text-only).
       for (var i = 0; i < group.length; i++) {
         final cue = group[i];
         final display = _walkedReplacement[cue] ?? cue;
+        const metersPerDegLat = 111320.0;
+        final linePos = i == 0
+            ? pos
+            : LatLng(pos.latitude - (i * 3.5) / metersPerDegLat, pos.longitude);
         markers.add(CueMarker(
-          position: pos,
+          position: linePos,
           radius: i == 0 ? (stacked ? 13 : 11) : 0,
           color: circleColor,
           strokeWidth: stacked ? 4 : 3,
           text: '${rank[cue] ?? "–"}. ${display.label}',
           textColor: completed ? '#757575' : '#1a1a1a',
-          textOffsetY: 1.1 + i * 0.95,
         ));
       }
     }

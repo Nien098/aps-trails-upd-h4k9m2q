@@ -69,7 +69,17 @@ class CueLayer {
         textHaloColor: '#ffffff',
         textHaloWidth: 2,
         textAnchor: 'top',
-        textOffset: ['get', 'textOffset'],
+        // A *fixed* offset, deliberately not data-driven: an earlier version
+        // read a per-feature array property here (['get', 'textOffset']) so
+        // each line of a stacked marker could sit at a different height, but
+        // that made the whole text layer fail to render anything at all —
+        // text-offset apparently isn't supported as a data expression on
+        // this plugin/native-SDK combination, and the failure is silent
+        // (no Dart-catchable exception, nothing in logcat). Per-line spacing
+        // is now done by nudging each line's own point geometry instead (see
+        // [CueMarker.position] in [GuideScreen._drawCues]) — geometry is
+        // definitely supported per-feature, sidestepping the whole question.
+        textOffset: [0, 1.2],
         textAllowOverlap: true,
         textIgnorePlacement: true,
       ),
@@ -101,7 +111,6 @@ class CueLayer {
               'strokeWidth': m.strokeWidth,
               'text': m.text,
               'textColor': m.textColor,
-              'textOffset': [0, m.textOffsetY],
             },
           },
       ],
@@ -115,7 +124,10 @@ class CueLayer {
 }
 
 /// One rendered pin: a circle (colour/size) plus its text label, both driven
-/// from the same data — see [CueLayer].
+/// from the same data — see [CueLayer]. For a stacked group's 2nd+ line,
+/// [position] should already be nudged slightly off the real cue position
+/// (see [GuideScreen._drawCues]) so the lines don't fully overlap — the
+/// *real* circle (radius > 0) always uses the true, un-nudged position.
 class CueMarker {
   const CueMarker({
     required this.position,
@@ -124,7 +136,6 @@ class CueMarker {
     required this.strokeWidth,
     required this.text,
     required this.textColor,
-    required this.textOffsetY,
   });
 
   final LatLng position;
@@ -133,5 +144,4 @@ class CueMarker {
   final double strokeWidth;
   final String text;
   final String textColor;
-  final double textOffsetY;
 }
