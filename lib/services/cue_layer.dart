@@ -1,8 +1,8 @@
 import 'package:maplibre_gl/maplibre_gl.dart';
 
-/// Renders trail cue markers (numbered circle + text label) as a single
-/// GeoJSON source backing two data-driven style layers, updated with ONE
-/// atomic [setGeoJsonSource] call per redraw.
+/// Renders trail cue markers (numbered circle + text label) via a GeoJSON
+/// source backing two data-driven style layers — fully torn down and
+/// rebuilt from scratch on every redraw (see [setMarkers]).
 ///
 /// This replaces an earlier version that used the plugin's high-level
 /// [MapLibreMapController.addCircles]/[addSymbols] annotation API — two
@@ -10,21 +10,16 @@ import 'package:maplibre_gl/maplibre_gl.dart';
 /// re-add cycle. That two-manager design repeatedly proved able to go
 /// visually out of sync with itself after a mid-walk redraw (e.g. a
 /// marker's circle colour updating to the reversed type's colour while its
-/// text label kept showing the old, un-reversed wording, or vice versa) —
-/// real, reproduced, device-confirmed behaviour, not a hypothetical. Since
-/// the circle and text always came from the exact same source Cue object in
-/// the calling code, the two properties should never have been able to
-/// diverge; the most plausible explanation left is that the plugin's own
-/// glyph-shaping pass for text symbols is slower and more prone to being
-/// superseded/dropped than a plain circle repaint (matching an even older,
-/// already-documented case of this same "colours updated, text didn't"
-/// symptom from earlier work on this screen), and that a text-only update
-/// can occasionally lose that race against a near-simultaneous circle
-/// update from the very same redraw. Folding both into one GeoJSON source
-/// with two *data-driven* layers (reading `color`/`text`/etc. straight off
-/// each feature's properties) removes the two-manager race entirely: there
-/// is only one GeoJSON replace per redraw, so the circle and text layers
-/// reading from it can never see different data.
+/// text label kept showing the old, un-reversed wording) — real, reproduced,
+/// device-confirmed behaviour, not a hypothetical. A later version tried
+/// folding both into one shared GeoJSON source updated via a single
+/// `setGeoJsonSource` call (removing the two-manager race), then tried
+/// additionally tearing down just the text layer on each redraw — neither
+/// was enough: on-device testing kept showing the text stuck on whatever it
+/// rendered the very first time, regardless of how the underlying data
+/// changed afterwards, even while the circle layer's colour visibly updated
+/// correctly on the very same redraw. Only fully recreating the source and
+/// both layers together has reliably shown correct text on-device.
 class CueLayer {
   CueLayer(this.controller, {String id = 'cues'})
       : _sourceId = id,
@@ -70,7 +65,12 @@ class CueLayer {
   Future<void> ensure({String? belowLayerId}) async {
     if (_ready) return;
     _belowLayerId = belowLayerId;
-    await controller.addGeoJsonSource(_sourceId, Map.of(_empty));
+    await _create(Map.of(_empty));
+    _ready = true;
+  }
+
+  Future<void> _create(Map<String, dynamic> geojson) async {
+    await controller.addGeoJsonSource(_sourceId, geojson);
     await controller.addCircleLayer(
       _sourceId,
       _circleLayerId,
@@ -81,16 +81,15 @@ class CueLayer {
         circleStrokeWidth: ['get', 'strokeWidth'],
       ),
       enableInteraction: false,
-      belowLayerId: belowLayerId,
+      belowLayerId: _belowLayerId,
     );
     await controller.addSymbolLayer(
       _sourceId,
       _symbolLayerId,
       _symbolLayerProperties,
       enableInteraction: false,
-      belowLayerId: belowLayerId,
+      belowLayerId: _belowLayerId,
     );
-    _ready = true;
   }
 
   /// Replaces every marker. [markers] is a flat list of already-computed
@@ -98,20 +97,24 @@ class CueLayer {
   /// caller ([GuideScreen._drawCues]); this class only owns getting that
   /// data onto the map reliably.
   ///
-  /// The circle layer is a plain data update (`setGeoJsonSource` alone is
-  /// enough — paint-property repaints have been reliable here). The text
-  /// layer is fully torn down and re-added every time instead: on-device
-  /// testing showed a `setGeoJsonSource` update alone leaves stale glyphs on
-  /// screen — new *circle* colours land correctly on the same redraw, but
-  /// the *text* stays exactly as it was before the update, as if the label
-  /// layer never re-shaped its glyphs for the new source data at all. Only
-  /// removing and re-adding the layer itself (not just its data) reliably
-  /// forces that re-shape. More expensive than a data-only update, but
-  /// cue-marker redraws are infrequent (cue fired/skipped/reversed) and the
-  /// marker count is small, so the extra cost is not a concern.
+  /// Every redraw fully tears down and recreates the source *and both
+  /// layers* rather than updating them in place — on-device testing showed
+  /// that in-place updates (`setGeoJsonSource` alone, and later even
+  /// removing/re-adding just the text layer while leaving the source and
+  /// circle layer in place) reliably leave the text stuck showing whatever
+  /// it rendered on the very first draw, no matter how the underlying data
+  /// changes afterwards; only a completely fresh source+layers has ever
+  /// rendered correctly. That matches the one place in this app that has
+  /// never shown this bug at all: reversing a trail from the main menu,
+  /// which doesn't touch a live map layer's data — it starts an entirely
+  /// new walk (a new GuideScreen, a new [ensure] call, i.e. a first draw)
+  /// against already-reversed data. Tearing down and rebuilding here
+  /// deliberately recreates that same "first draw" condition every time,
+  /// instead of trying to coax an update out of a layer that has
+  /// repeatedly proven unwilling to actually show one for its text.
   Future<void> setMarkers(List<CueMarker> markers) async {
     if (!_ready) return;
-    await controller.setGeoJsonSource(_sourceId, {
+    final geojson = {
       'type': 'FeatureCollection',
       'features': [
         for (final m in markers)
@@ -130,20 +133,16 @@ class CueLayer {
             },
           },
       ],
-    });
+    };
     await controller.removeLayer(_symbolLayerId);
-    await controller.addSymbolLayer(
-      _sourceId,
-      _symbolLayerId,
-      _symbolLayerProperties,
-      enableInteraction: false,
-      belowLayerId: _belowLayerId,
-    );
+    await controller.removeLayer(_circleLayerId);
+    await controller.removeSource(_sourceId);
+    await _create(geojson);
   }
 
   Future<void> clear() async {
     if (!_ready) return;
-    await controller.setGeoJsonSource(_sourceId, Map.of(_empty));
+    await setMarkers(const []);
   }
 }
 
