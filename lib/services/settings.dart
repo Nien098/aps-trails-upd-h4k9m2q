@@ -24,6 +24,7 @@ class Settings {
   static const _kShareStats = 'share_card_stats';
   static const _kTtsVoice = 'tts_voice';
   static const _kBundledMapUpdated = 'bundled_map_updated';
+  static const _kDriveModeFollow = 'drive_mode_follow';
 
   /// true = metric (m / km), false = imperial (ft / mi). Defaults to metric.
   final ValueNotifier<bool> metric = ValueNotifier(true);
@@ -106,6 +107,14 @@ class Settings {
   /// older data baked into the APK back over a freshly-updated file.
   final ValueNotifier<bool> bundledMapUpdated = ValueNotifier(false);
 
+  /// Guide-mode camera style: off (default) = flat, north-up "birds-eye"
+  /// view; on = tilted and rotated to face the walker's direction of
+  /// travel, the same idea as a car nav app's driving view. Remembered
+  /// across walks like every other preference here, rather than resetting
+  /// each time — someone who prefers one style is unlikely to want to
+  /// re-pick it on every single walk.
+  final ValueNotifier<bool> driveModeFollow = ValueNotifier(false);
+
   /// Parses a saved [ttsVoice] value into the map `FlutterTts.setVoice`
   /// expects, or null if unset/malformed (falls back to system default).
   static Map<String, String>? parseVoice(String v) {
@@ -133,6 +142,7 @@ class Settings {
     shareStats.value = (p.getStringList(_kShareStats) ?? const ['elevation']).toSet();
     ttsVoice.value = p.getString(_kTtsVoice) ?? '';
     bundledMapUpdated.value = p.getBool(_kBundledMapUpdated) ?? false;
+    driveModeFollow.value = p.getBool(_kDriveModeFollow) ?? false;
   }
 
   Future<void> setMetric(bool value) async {
@@ -223,6 +233,12 @@ class Settings {
     bundledMapUpdated.value = value;
     final p = await SharedPreferences.getInstance();
     await p.setBool(_kBundledMapUpdated, value);
+  }
+
+  Future<void> setDriveModeFollow(bool value) async {
+    driveModeFollow.value = value;
+    final p = await SharedPreferences.getInstance();
+    await p.setBool(_kDriveModeFollow, value);
   }
 
   /// Adds a finished walk's distance and elevation gain to the lifetime totals.

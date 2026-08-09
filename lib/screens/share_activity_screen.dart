@@ -30,7 +30,15 @@ class ShareActivityScreen extends StatefulWidget {
 }
 
 class _ShareActivityScreenState extends State<ShareActivityScreen> {
-  static const _mapAreaHeight = 160.0;
+  // Bigger than the original 160 — easier to actually pinch-zoom/drag on,
+  // and the walker can reposition it before sharing (see _touchingMap).
+  static const _mapAreaHeight = 240.0;
+
+  /// True while a finger is down on the map area — used to disable the
+  /// enclosing ListView's own scroll for the duration, so a drag meant to
+  /// pan/zoom the (small, embedded) map can't instead be captured by the
+  /// page scrolling underneath it.
+  bool _touchingMap = false;
 
   /// Optional stats a walker can add to the card beyond the always-shown
   /// Distance/Time/Pace headline row — key -> label. Selection is
@@ -292,6 +300,12 @@ class _ShareActivityScreenState extends State<ShareActivityScreen> {
     return Scaffold(
       appBar: AppBar(title: const Text('Share walk')),
       body: ListView(
+        // Disabled for the duration of a touch that started on the map, so
+        // dragging/pinching it to reposition the view isn't instead
+        // captured as a page-scroll — see _touchingMap.
+        physics: _touchingMap
+            ? const NeverScrollableScrollPhysics()
+            : const AlwaysScrollableScrollPhysics(),
         padding: EdgeInsets.fromLTRB(
             16, 16, 16, 16 + MediaQuery.viewPaddingOf(context).bottom),
         children: [
@@ -301,7 +315,12 @@ class _ShareActivityScreenState extends State<ShareActivityScreen> {
               child: _ShareCard(
                 activity: widget.activity,
                 mapAreaHeight: _mapAreaHeight,
-                mapChild: _buildMapArea(),
+                mapChild: Listener(
+                  onPointerDown: (_) => setState(() => _touchingMap = true),
+                  onPointerUp: (_) => setState(() => _touchingMap = false),
+                  onPointerCancel: (_) => setState(() => _touchingMap = false),
+                  child: _buildMapArea(),
+                ),
                 extraStats: _selectedStats,
                 statLabels: _availableStats,
                 elevationProfile: _selectedStats.contains('elevation')
@@ -311,6 +330,15 @@ class _ShareActivityScreenState extends State<ShareActivityScreen> {
               ),
             ),
           ),
+          if (_mapReady)
+            const Padding(
+              padding: EdgeInsets.only(top: 6),
+              child: Text(
+                'Pinch to zoom, drag to reposition the map before sharing.',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 12, color: Color(0xFF6A6A6A)),
+              ),
+            ),
           const SizedBox(height: 20),
           Text('Also include on card', style: Theme.of(context).textTheme.titleSmall),
           const SizedBox(height: 8),

@@ -95,6 +95,18 @@ class _GuideScreenState extends State<GuideScreen> {
   bool _offRouteCardShown = false;
   double? _distToNext; // metres to the next cue
   bool _follow = true;
+
+  /// "Drive mode" — tilted, rotated to face the direction of travel (like a
+  /// car nav app) instead of the default flat, north-up "birds-eye" view.
+  /// Seeded from the remembered preference; toggling updates both.
+  late bool _driveMode = Settings.instance.driveModeFollow.value;
+
+  /// Direction of travel (degrees, 0-360), used to orient the camera in
+  /// drive mode. Only updated on a real step of movement (see
+  /// [_onPosition]) — recomputing it from GPS jitter while standing still
+  /// would spin the view around for no reason.
+  double? _heading;
+
   String _status = 'Getting your location…';
   String? _lastSpoken; // for the "repeat" button
 
@@ -600,7 +612,10 @@ class _GuideScreenState extends State<GuideScreen> {
 
   void _onPosition(Position pos) {
     final me = LatLng(pos.latitude, pos.longitude);
-    final step = _lastPos == null ? null : metersBetween(_lastPos!, me);
+    // Captured before _lastPos is overwritten below — needed later to
+    // compute the direction of travel for drive mode.
+    final prevPos = _lastPos;
+    final step = prevPos == null ? null : metersBetween(prevPos, me);
     _watchdog.update(me, accuracy: pos.accuracy, stepMeters: step);
 
     // Accumulate walked distance. Ignore sub-2.5 m jitter and >100 m jumps (a
@@ -636,9 +651,26 @@ class _GuideScreenState extends State<GuideScreen> {
       }
     }
 
-    // Follow the walker with the camera.
+    // Only recompute heading on a real step (a few metres) — GPS jitter
+    // while standing still would otherwise spin drive mode's view around
+    // for no reason.
+    if (_driveMode && prevPos != null && step != null && step >= 3) {
+      _heading = bearingBetween(prevPos, me);
+    }
+
+    // Follow the walker with the camera — flat/north-up by default, or
+    // tilted and rotated to face the direction of travel in drive mode.
     if (_follow) {
-      _c?.animateCamera(CameraUpdate.newLatLng(me));
+      if (_driveMode) {
+        _c?.animateCamera(CameraUpdate.newCameraPosition(CameraPosition(
+          target: me,
+          zoom: 17,
+          tilt: 55,
+          bearing: _heading ?? 0,
+        )));
+      } else {
+        _c?.animateCamera(CameraUpdate.newLatLng(me));
+      }
     }
 
     // Cue triggering comes first: reaching a cue means you're on the trail,
@@ -756,9 +788,23 @@ class _GuideScreenState extends State<GuideScreen> {
 
   RouteLayer? _routeLayer;
 
+  /// Android's platform-view/GL surface can re-fire onStyleLoaded (surface
+  /// recreated) — see the identical guard + comment in
+  /// share_activity_screen.dart, where this was first diagnosed. Without
+  /// it, a second call here creates a fresh RouteLayer and re-adds the
+  /// route source/line/arrow layers under the same fixed ids while the
+  /// first call's setup is still in flight (or already done) — the
+  /// duplicate addSymbolLayer call for the arrows appears to fail
+  /// silently (no arrows ever render), while the duplicate line layer
+  /// still shows correctly, so the symptom is specifically "route line
+  /// renders fine, but the directional arrows never appear at all".
+  bool _styleLoadHandled = false;
+
   Future<void> _onMapCreated(MapLibreMapController c) async => _c = c;
 
   Future<void> _onStyleLoaded() async {
+    if (_styleLoadHandled) return;
+    _styleLoadHandled = true;
     final c = _c;
     if (c == null) return;
     _routeLayer = RouteLayer(c);
@@ -906,8 +952,29 @@ class _GuideScreenState extends State<GuideScreen> {
             (p) => LatLng(p.latitude, p.longitude),
             onError: (_) => null);
     if (here != null) await _c?.animateCamera(CameraUpdate.newLatLng(here));
-    await _c?.animateCamera(CameraUpdate.bearingTo(0));
-    await _c?.animateCamera(CameraUpdate.tiltTo(0));
+    if (_driveMode) {
+      await _c?.animateCamera(CameraUpdate.bearingTo(_heading ?? 0));
+      await _c?.animateCamera(CameraUpdate.tiltTo(55));
+    } else {
+      await _c?.animateCamera(CameraUpdate.bearingTo(0));
+      await _c?.animateCamera(CameraUpdate.tiltTo(0));
+    }
+  }
+
+  /// Switches between the flat "birds-eye" view and tilted "drive mode" —
+  /// see [_driveMode]. Snaps the camera immediately rather than waiting for
+  /// the next GPS tick, so the toggle feels responsive.
+  Future<void> _toggleDriveMode() async {
+    setState(() => _driveMode = !_driveMode);
+    await Settings.instance.setDriveModeFollow(_driveMode);
+    setState(() => _follow = true);
+    if (_driveMode) {
+      await _c?.animateCamera(CameraUpdate.bearingTo(_heading ?? 0));
+      await _c?.animateCamera(CameraUpdate.tiltTo(55));
+    } else {
+      await _c?.animateCamera(CameraUpdate.bearingTo(0));
+      await _c?.animateCamera(CameraUpdate.tiltTo(0));
+    }
   }
 
   /// Banks this outing into the trail's lifetime totals and logs it as an
@@ -1023,8 +1090,10 @@ class _GuideScreenState extends State<GuideScreen> {
               ),
             ),
 
-          // Recenter (also faces north + flattens). Sits above the banner,
-          // sharing the banner's SafeArea so it clears the Android nav bar too.
+          // Recenter — also resets orientation: flat/north-up normally, or
+          // facing the direction of travel in drive mode. Sits above the
+          // banner, sharing the banner's SafeArea so it clears the Android
+          // nav bar too.
           Positioned(
             right: 16,
             bottom: 0,
@@ -1032,10 +1101,29 @@ class _GuideScreenState extends State<GuideScreen> {
               top: false,
               child: Padding(
                 padding: EdgeInsets.only(bottom: reservedBottom),
-                child: FloatingActionButton(
-                  heroTag: 'recenter',
-                  onPressed: _recenter,
-                  child: const Icon(Icons.my_location),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    FloatingActionButton(
+                      heroTag: 'driveMode',
+                      mini: true,
+                      backgroundColor:
+                          _driveMode ? const Color(0xFF1B5E20) : null,
+                      foregroundColor: _driveMode ? Colors.white : null,
+                      tooltip: _driveMode
+                          ? 'Switch to birds-eye view'
+                          : 'Switch to drive mode (follow + tilt)',
+                      onPressed: _toggleDriveMode,
+                      child: Icon(
+                          _driveMode ? Icons.navigation : Icons.map_outlined),
+                    ),
+                    const SizedBox(height: 10),
+                    FloatingActionButton(
+                      heroTag: 'recenter',
+                      onPressed: _recenter,
+                      child: const Icon(Icons.my_location),
+                    ),
+                  ],
                 ),
               ),
             ),

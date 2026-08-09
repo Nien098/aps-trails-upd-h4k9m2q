@@ -66,9 +66,14 @@ class RouteLayer {
       _arrowLayerId,
       SymbolLayerProperties(
         iconImage: _arrowImage,
-        iconSize: 0.5,
+        // Was 0.5 — nearly invisible to anyone with reduced vision, which
+        // defeats the point of an app built around being easy to read for
+        // older walkers. 1.3x renders it at a clearly legible size.
+        iconSize: 1.3,
         symbolPlacement: 'line',
-        symbolSpacing: 70.0,
+        // Wider spacing to match the bigger icon — otherwise adjacent
+        // arrows crowd/overlap each other along tighter bends.
+        symbolSpacing: 110.0,
         iconRotationAlignment: 'map',
         iconAllowOverlap: true,
         iconIgnorePlacement: true,

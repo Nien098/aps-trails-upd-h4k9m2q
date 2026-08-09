@@ -7,6 +7,15 @@ import 'package:maplibre_gl/maplibre_gl.dart';
 double metersBetween(LatLng a, LatLng b) =>
     Geolocator.distanceBetween(a.latitude, a.longitude, b.latitude, b.longitude);
 
+/// Compass bearing (degrees, 0–360, 0 = north) from [a] to [b] — used to
+/// point the camera the way the walker is actually heading in "follow"
+/// guide mode. Geolocator.bearingBetween returns -180..180; normalized here
+/// since CameraUpdate.bearingTo expects a plain 0-360 heading.
+double bearingBetween(LatLng a, LatLng b) =>
+    (Geolocator.bearingBetween(a.latitude, a.longitude, b.latitude, b.longitude) +
+            360) %
+        360;
+
 /// Total length in metres of a polyline (0 for fewer than two points).
 double pathLength(List<LatLng> path) {
   var total = 0.0;
