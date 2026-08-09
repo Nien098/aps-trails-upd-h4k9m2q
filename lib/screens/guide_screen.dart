@@ -14,6 +14,7 @@ import '../models/region.dart';
 import '../models/trail.dart';
 import '../services/crash_log.dart';
 import '../services/cue_gen.dart';
+import '../services/cue_layer.dart';
 import '../services/geo.dart';
 import '../services/native_bridge.dart';
 import '../services/route_layer.dart';
@@ -104,18 +105,21 @@ class _GuideScreenState extends State<GuideScreen> {
   /// walk of it is unaffected.
   bool _turnedBack = false;
 
-  /// Original cue → its walked replacement once the walker has turned back
+  /// Original cue → its display replacement once the walker has turned back
   /// via [_reverseCourse]: a fresh clone with type/label/spoken flipped for
-  /// the return leg (see [reverseCueInPlace]), exactly matching how the
-  /// main-menu "reverse direction" option treats a whole trail. [Trail.cues]
-  /// (and the original objects still held in [_cues] before a turn-back) are
-  /// never mutated in place — an ordinary later walk of the same trail must
-  /// see its original, forward-direction cues — so [_drawCues] looks up each
-  /// original cue's replacement here instead of reading it directly. A cue
-  /// with no entry here was either never turned back from, or lies beyond
-  /// the point where the walker turned around (cancelled by the turn-back —
-  /// see [_turnedBack]) and is drawn using its own untouched data, greyed
-  /// out either way.
+  /// the reversed line (see [reverseCueInPlace]), exactly matching how the
+  /// main-menu "reverse direction" option treats a whole trail. Populated for
+  /// *every* cue on the trail, not just the ones actually walked back over —
+  /// the drawn line reverses for the whole loop, so every pin along it needs
+  /// a consistently flipped colour/label, even the ones beyond where the
+  /// walker turned around (cancelled for navigation purposes — see
+  /// [_turnedBack] — but still visible on the map). [Trail.cues] (and the
+  /// original objects still held in [_cues] before a turn-back) are never
+  /// mutated in place — an ordinary later walk of the same trail must see
+  /// its original, forward-direction cues — so [_drawCues] looks up each
+  /// original cue's replacement here instead of reading it directly. Empty
+  /// (every lookup falls back to the original cue unchanged) until the
+  /// walker actually turns back.
   final Map<Cue, Cue> _walkedReplacement = {};
 
   /// A second, distinctly-coloured route line for the "shortest way back to
@@ -435,15 +439,22 @@ class _GuideScreenState extends State<GuideScreen> {
   /// [_turnedBack].
   void _reverseCourse() {
     final passedOriginals = _cues.sublist(0, _nextIndex);
+    // Every original cue — not just the ones already passed — gets a
+    // correctly-flipped clone here. The drawn line below reverses for the
+    // *whole* loop, so every pin along it needs to show a consistently
+    // flipped colour/label, not just the ones still part of the (shorter)
+    // walk back to the start; a not-yet-reached pin left showing its old,
+    // un-flipped colour or wording directly contradicts the now-reversed
+    // arrow passing right through it.
+    //
     // Fresh clones, not the shared original Cue objects — reverseCueInPlace
     // mutates its argument, and mutating the originals would corrupt
     // Trail.cues for any later, ordinary forward walk of this same trail.
     // This is the exact same transform the main-menu "reverse direction"
     // option applies to a whole trail (see reverseCueInPlace's doc), just
-    // scoped to a clone here so it's runtime-only for this walk.
-    final clones = <Cue>[];
+    // scoped to clones here so it's runtime-only for this walk.
     _walkedReplacement.clear();
-    for (final orig in passedOriginals) {
+    for (final orig in widget.trail.cues) {
       final clone = Cue(
         type: orig.type,
         position: orig.position,
@@ -454,8 +465,11 @@ class _GuideScreenState extends State<GuideScreen> {
       );
       reverseCueInPlace(clone);
       _walkedReplacement[orig] = clone;
-      clones.add(clone);
     }
+    // Only the already-passed cues actually fire on the way back — same
+    // subset as before, just sourced from the now-complete replacement map
+    // above instead of cloned separately.
+    final clones = [for (final orig in passedOriginals) _walkedReplacement[orig]!];
     setState(() {
       _cues
         ..clear()
@@ -783,6 +797,7 @@ class _GuideScreenState extends State<GuideScreen> {
   }
 
   RouteLayer? _routeLayer;
+  CueLayer? _cueLayer;
 
   /// Android's platform-view/GL surface can re-fire onStyleLoaded (surface
   /// recreated) — see the identical guard + comment in
@@ -806,6 +821,8 @@ class _GuideScreenState extends State<GuideScreen> {
     _routeLayer = RouteLayer(c);
     await _routeLayer!.ensure();
     await _routeLayer!.setRoute(widget.trail.path, widget.trail.color);
+    _cueLayer = CueLayer(c);
+    await _cueLayer!.ensure();
     await _drawCues();
   }
 
@@ -833,29 +850,23 @@ class _GuideScreenState extends State<GuideScreen> {
   /// This is called from several places in quick succession — firing a cue,
   /// skipping one, turning back — each a separate un-awaited async call, so
   /// two calls can genuinely overlap (e.g. a cue fires right as the walker
-  /// taps Turn back); [_drawGeneration] makes every call check, after each
+  /// taps Turn back); [_drawGeneration] makes every call check, after the
   /// await, whether a newer call has since started, stopping immediately
   /// instead of racing a newer call to the finish and drawing stale markers
   /// after it.
   ///
-  /// Circles and symbols are each added in one batched `addCircles`/
-  /// `addSymbols` call rather than one-at-a-time in the loop below — the
-  /// underlying plugin rebuilds that whole layer's GeoJSON source on *every*
-  /// individual `addCircle`/`addSymbol` call, not incrementally, and text
-  /// layout (glyph shaping + collision) is far more expensive to redo than a
-  /// plain circle repaint. Looping calls one at a time — as this used to —
-  /// meant the symbol layer's string of full-source rebuilds could still be
-  /// catching up after the circle layer's had already finished, which reads
-  /// as exactly "the marker colours updated but the text didn't" (map
-  /// correct on next redraw, but wrong at the moment it mattered). Batching
-  /// to one rebuild each removes that gap entirely.
+  /// Drawn via [_cueLayer] — one GeoJSON source shared by a circle layer and
+  /// a text layer, replaced in a single atomic call — rather than the
+  /// plugin's separate circle/symbol annotation managers this used to use.
+  /// Those two managers could go visually out of sync with each other after
+  /// a mid-walk redraw (a marker's circle colour updating correctly while
+  /// its text label kept showing stale wording, or vice versa — reproduced
+  /// on-device even though both properties came from the exact same Cue
+  /// object in the code below); see [CueLayer]'s doc for the full story.
   Future<void> _drawCues() async {
-    final c = _c;
-    if (c == null) return;
+    final layer = _cueLayer;
+    if (layer == null) return;
     final myGeneration = ++_drawGeneration;
-    await c.clearSymbols();
-    await c.clearCircles();
-    if (myGeneration != _drawGeneration) return;
 
     // _cues is already sorted by order — that sort position is the display
     // rank, always a clean 1..N regardless of gaps in the raw order values.
@@ -884,8 +895,7 @@ class _GuideScreenState extends State<GuideScreen> {
       }
     }
 
-    final circleOptions = <CircleOptions>[];
-    final symbolOptions = <SymbolOptions>[];
+    final markers = <CueMarker>[];
     for (final group in groups) {
       final stacked = group.length > 1;
       if (stacked) {
@@ -894,52 +904,38 @@ class _GuideScreenState extends State<GuideScreen> {
       final completed =
           group.every((cue) => (rank[cue] ?? _nextIndex) <= _nextIndex);
       final pos = group.first.position;
-      circleOptions.add(CircleOptions(
-        geometry: pos,
-        circleRadius: stacked ? 13 : 11,
-        circleColor: completed
-            ? _completedColorHex
-            : (stacked
-                ? stackedCueColorHex
-                : cueColorHex(
-                    (_walkedReplacement[group.first] ?? group.first).type)),
-        circleStrokeColor: '#ffffff',
-        circleStrokeWidth: stacked ? 4 : 3,
-      ));
-      // One symbol per cue rather than one joined multi-line symbol for a
-      // stack — multi-line text field rendering has proven fragile here (a
+      final circleColor = completed
+          ? _completedColorHex
+          : (stacked
+              ? stackedCueColorHex
+              : cueColorHex(
+                  (_walkedReplacement[group.first] ?? group.first).type));
+      // One line of text per cue rather than one joined multi-line label for
+      // a stack — multi-line text field rendering has proven fragile here (a
       // combined "1. Start\n6. Finish" label could end up not drawing at
       // all), where plain single-line labels have been reliable. Each line
-      // gets its own vertical offset so a stack still reads as one list.
+      // gets its own vertical offset so a stack still reads as one list, and
+      // each is a *separate point feature at the same position* rather than
+      // sharing one — a single circle marker still draws once per group
+      // below since only markers[0] carries a real radius/stroke, the rest
+      // radius 0 (invisible, text-only).
       for (var i = 0; i < group.length; i++) {
         final cue = group[i];
         final display = _walkedReplacement[cue] ?? cue;
-        symbolOptions.add(SymbolOptions(
-          geometry: pos,
-          textField: '${rank[cue] ?? "–"}. ${display.label}',
-          textSize: 15,
+        markers.add(CueMarker(
+          position: pos,
+          radius: i == 0 ? (stacked ? 13 : 11) : 0,
+          color: circleColor,
+          strokeWidth: stacked ? 4 : 3,
+          text: '${rank[cue] ?? "–"}. ${display.label}',
           textColor: completed ? '#757575' : '#1a1a1a',
-          textHaloColor: '#ffffff',
-          textHaloWidth: 2,
-          textAnchor: 'top',
-          textOffset: Offset(0, 1.1 + i * 0.95),
+          textOffsetY: 1.1 + i * 0.95,
         ));
       }
     }
 
     if (myGeneration != _drawGeneration) return;
-    if (circleOptions.isNotEmpty) await c.addCircles(circleOptions);
-    if (myGeneration != _drawGeneration) return;
-    if (symbolOptions.isNotEmpty) await c.addSymbols(symbolOptions);
-    // Cue markers can legitimately sit close together along a trail (a tight
-    // switchback, several turns down one short block). MapLibre's symbol
-    // layer defaults to hiding a label outright rather than showing two that
-    // collide — fine for a general map's clutter, wrong for markers we
-    // deliberately placed and numbered; a hidden "3. Turn left" reads as
-    // exactly the "the dots lost their labels" bug this addresses. A no-op
-    // after the first successful call (checked internally by the plugin).
-    if (myGeneration != _drawGeneration) return;
-    await c.setSymbolTextAllowOverlap(true);
+    await layer.setMarkers(markers);
   }
 
   Region get _region => regionById(widget.trail.regionId);
