@@ -105,23 +105,6 @@ class _GuideScreenState extends State<GuideScreen> {
   /// walk of it is unaffected.
   bool _turnedBack = false;
 
-  /// Original cue → its display replacement once the walker has turned back
-  /// via [_reverseCourse]: a fresh clone with type/label/spoken flipped for
-  /// the reversed line (see [reverseCueInPlace]), exactly matching how the
-  /// main-menu "reverse direction" option treats a whole trail. Populated for
-  /// *every* cue on the trail, not just the ones actually walked back over —
-  /// the drawn line reverses for the whole loop, so every pin along it needs
-  /// a consistently flipped colour/label, even the ones beyond where the
-  /// walker turned around (cancelled for navigation purposes — see
-  /// [_turnedBack] — but still visible on the map). [Trail.cues] (and the
-  /// original objects still held in [_cues] before a turn-back) are never
-  /// mutated in place — an ordinary later walk of the same trail must see
-  /// its original, forward-direction cues — so [_drawCues] looks up each
-  /// original cue's replacement here instead of reading it directly. Empty
-  /// (every lookup falls back to the original cue unchanged) until the
-  /// walker actually turns back.
-  final Map<Cue, Cue> _walkedReplacement = {};
-
   /// A second, distinctly-coloured route line for the "shortest way back to
   /// start" / "nearest road" bail-out options — kept separate from
   /// [_routeLayer] (which keeps showing the original trail, greyed) so both
@@ -432,61 +415,85 @@ class _GuideScreenState extends State<GuideScreen> {
     }
   }
 
-  /// Bails out of the rest of the trail and heads back to the start: the
-  /// cues already fired become the walk's new (and only) remaining cues, in
-  /// reverse order, so they fire correctly heading the other way; every cue
-  /// still ahead is dropped for the rest of this walk. Runtime-only — see
-  /// [_turnedBack].
+  /// Bails out of the rest of the trail and heads back to the start.
+  ///
+  /// This used to reverse the walk's cues in place and redraw the existing
+  /// map markers/route line for the new direction — but redrawing an
+  /// already-on-screen marker layer with new text repeatedly proved
+  /// unreliable on-device (colours would update, text wouldn't, no matter
+  /// how the redraw was structured), while the *other* way this app
+  /// reverses a trail — the main-menu "Reverse direction" option — has
+  /// never shown that problem at all, because it never updates a live map
+  /// layer: it mutates the trail's data, then opens a brand new GuideScreen
+  /// against it, which draws everything correctly the first time (as every
+  /// fresh walk start already reliably does). So instead of continuing to
+  /// chase the redraw bug, this now does the same thing: builds a reversed
+  /// *clone* of the trail (never touching the original — an ordinary later
+  /// walk of it must stay untouched) and replaces this screen with a fresh
+  /// GuideScreen for it, carrying this walk's progress over via the same
+  /// [WalkCheckpoint] mechanism an interrupted-walk resume already uses.
   void _reverseCourse() {
-    final passedOriginals = _cues.sublist(0, _nextIndex);
-    // Every original cue — not just the ones already passed — gets a
-    // correctly-flipped clone here. The drawn line below reverses for the
-    // *whole* loop, so every pin along it needs to show a consistently
-    // flipped colour/label, not just the ones still part of the (shorter)
-    // walk back to the start; a not-yet-reached pin left showing its old,
-    // un-flipped colour or wording directly contradicts the now-reversed
-    // arrow passing right through it.
-    //
-    // Fresh clones, not the shared original Cue objects — reverseCueInPlace
-    // mutates its argument, and mutating the originals would corrupt
-    // Trail.cues for any later, ordinary forward walk of this same trail.
-    // This is the exact same transform the main-menu "reverse direction"
-    // option applies to a whole trail (see reverseCueInPlace's doc), just
-    // scoped to clones here so it's runtime-only for this walk.
-    _walkedReplacement.clear();
-    for (final orig in widget.trail.cues) {
-      final clone = Cue(
-        type: orig.type,
-        position: orig.position,
-        order: orig.order,
-        label: orig.label,
-        spoken: orig.spoken,
-        radiusMeters: orig.radiusMeters,
-      );
-      reverseCueInPlace(clone);
-      _walkedReplacement[orig] = clone;
+    final t = widget.trail;
+    final reversedPath = t.path.reversed.toList();
+    final reversedAnchors =
+        t.anchors.isNotEmpty ? t.anchors.reversed.toList() : <LatLng>[];
+    final reversedCues = <Cue>[];
+    if (t.cues.isNotEmpty) {
+      final maxOrder = t.cues.map((c) => c.order).reduce((a, b) => a > b ? a : b);
+      for (final orig in t.cues) {
+        final clone = Cue(
+          type: orig.type,
+          position: orig.position,
+          order: maxOrder - orig.order,
+          label: orig.label,
+          spoken: orig.spoken,
+          radiusMeters: orig.radiusMeters,
+        );
+        reverseCueInPlace(clone);
+        reversedCues.add(clone);
+      }
     }
-    // Only the already-passed cues actually fire on the way back — same
-    // subset as before, just sourced from the now-complete replacement map
-    // above instead of cloned separately.
-    final clones = [for (final orig in passedOriginals) _walkedReplacement[orig]!];
-    setState(() {
-      _cues
-        ..clear()
-        ..addAll(clones.reversed);
-      _nextIndex = 0;
-      _turnedBack = true;
-      _activeCard = null;
-    });
-    _toast('Turned back — guiding you to the start');
-    // The direction arrows follow the drawn line's coordinate order (see
-    // RouteLayer), so without this they'd keep pointing the original,
-    // now-wrong way even though the cues above are already flipped — same
-    // bug the main-menu "reverse direction" option had.
-    _routeLayer?.setRoute(
-        widget.trail.path.reversed.toList(), widget.trail.color);
-    _drawCues();
-    _writeCheckpoint();
+    final reversedTrail = Trail(
+      id: t.id,
+      name: t.name,
+      regionId: t.regionId,
+      color: t.color,
+      path: reversedPath,
+      anchors: reversedAnchors,
+      cues: reversedCues,
+      createdAt: t.createdAt,
+      walkedMeters: t.walkedMeters,
+      walkCount: t.walkCount,
+      elevGainMeters: t.elevGainMeters,
+    );
+
+    // _cues is sorted the same way the new screen's own copy will be, so a
+    // cue at forward index j lands at reversed index (length-1-j) — the
+    // walker's next cue on the way back is whichever one they most recently
+    // passed (index _nextIndex-1), which is why this is length-_nextIndex,
+    // not length-_nextIndex-1: e.g. having fired none yet (_nextIndex == 0,
+    // still basically at the start) resolves to length — "no cues left",
+    // they've essentially already arrived back; having fired all of them
+    // (_nextIndex == length) resolves to 0 — walk the whole thing back.
+    final resumeIndex = (_cues.length - _nextIndex).clamp(0, reversedCues.length);
+
+    final checkpoint = WalkCheckpoint(
+      trailId: t.id ?? -1,
+      trailName: t.name,
+      startedAt: _startedAt ?? DateTime.now(),
+      pausedTotalSec: _pausedTotal.inSeconds,
+      wasPaused: _paused,
+      nextIndex: resumeIndex,
+      walkedMeters: _walkMeters,
+      elevGainMeters: _elevGain,
+      lastPos: _lastPos,
+      track: _track,
+    );
+
+    if (!mounted) return;
+    Navigator.of(context).pushReplacement(MaterialPageRoute(
+      builder: (_) => GuideScreen(trail: reversedTrail, resume: checkpoint),
+    ));
   }
 
   /// Computes the shortest mapped path from here back to the trail's start
@@ -870,19 +877,12 @@ class _GuideScreenState extends State<GuideScreen> {
 
     // _cues is already sorted by order — that sort position is the display
     // rank, always a clean 1..N regardless of gaps in the raw order values.
-    // After a turn-back (see [_turnedBack]), _cues only holds the return
-    // leg's cues (as fresh clones — see [_walkedReplacement]), so a cue can
-    // genuinely have no rank at all — one that was cancelled outright rather
-    // than merely not-yet-reached; it displays the same as "completed"
-    // (grey, unnumbered) either way. Ranked by each clone's *original*
-    // identity so the lookups below (built from widget.trail.cues, which
-    // only ever holds originals) find it.
-    final origByClone = {
-      for (final e in _walkedReplacement.entries) e.value: e.key,
-    };
+    // A bail-out route (see _installComputedRoute) replaces _cues with a
+    // freshly generated, shorter list, so a cue can genuinely have no rank
+    // at all; it displays the same as "completed" (grey, unnumbered) either
+    // way.
     final rank = <Cue, int>{
-      for (var i = 0; i < _cues.length; i++)
-        (origByClone[_cues[i]] ?? _cues[i]): i + 1,
+      for (var i = 0; i < _cues.length; i++) _cues[i]: i + 1,
     };
     final groups = <List<Cue>>[];
     for (final cue in widget.trail.cues) {
@@ -906,10 +906,7 @@ class _GuideScreenState extends State<GuideScreen> {
       final pos = group.first.position;
       final circleColor = completed
           ? _completedColorHex
-          : (stacked
-              ? stackedCueColorHex
-              : cueColorHex(
-                  (_walkedReplacement[group.first] ?? group.first).type));
+          : (stacked ? stackedCueColorHex : cueColorHex(group.first.type));
       // One line of text per cue rather than one joined multi-line label for
       // a stack — multi-line text field rendering has proven fragile here (a
       // combined "1. Start\n6. Finish" label could end up not drawing at
@@ -922,7 +919,6 @@ class _GuideScreenState extends State<GuideScreen> {
       // radius/stroke, the rest radius 0 (invisible, text-only).
       for (var i = 0; i < group.length; i++) {
         final cue = group[i];
-        final display = _walkedReplacement[cue] ?? cue;
         const metersPerDegLat = 111320.0;
         final linePos = i == 0
             ? pos
@@ -932,7 +928,7 @@ class _GuideScreenState extends State<GuideScreen> {
           radius: i == 0 ? (stacked ? 13 : 11) : 0,
           color: circleColor,
           strokeWidth: stacked ? 4 : 3,
-          text: '${rank[cue] ?? "–"}. ${display.label}',
+          text: '${rank[cue] ?? "–"}. ${cue.label}',
           textColor: completed ? '#757575' : '#1a1a1a',
         ));
       }
@@ -1438,9 +1434,6 @@ class _NextCueStrip extends StatelessWidget {
       this.rank,
       this.onSkip});
 
-  /// Already reflects any turn-back flip — see [_GuideScreenState._reverseCourse]
-  /// and [_GuideScreenState._walkedReplacement]. No further transform needed
-  /// here.
   final Cue? nextCue;
   final double? distance;
 
