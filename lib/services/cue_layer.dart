@@ -37,32 +37,14 @@ class CueLayer {
   final String _symbolLayerId;
 
   bool _ready = false;
+  String? _belowLayerId;
 
   static const _empty = {
     'type': 'FeatureCollection',
     'features': <dynamic>[],
   };
 
-  /// Adds the source and layers. Call once after the style loads.
-  Future<void> ensure({String? belowLayerId}) async {
-    if (_ready) return;
-    await controller.addGeoJsonSource(_sourceId, Map.of(_empty));
-    await controller.addCircleLayer(
-      _sourceId,
-      _circleLayerId,
-      CircleLayerProperties(
-        circleRadius: ['get', 'radius'],
-        circleColor: ['get', 'color'],
-        circleStrokeColor: '#ffffff',
-        circleStrokeWidth: ['get', 'strokeWidth'],
-      ),
-      enableInteraction: false,
-      belowLayerId: belowLayerId,
-    );
-    await controller.addSymbolLayer(
-      _sourceId,
-      _symbolLayerId,
-      SymbolLayerProperties(
+  SymbolLayerProperties get _symbolLayerProperties => SymbolLayerProperties(
         textField: ['get', 'text'],
         textSize: 15,
         textColor: ['get', 'textColor'],
@@ -82,17 +64,51 @@ class CueLayer {
         textOffset: [0, 1.2],
         textAllowOverlap: true,
         textIgnorePlacement: true,
+      );
+
+  /// Adds the source and layers. Call once after the style loads.
+  Future<void> ensure({String? belowLayerId}) async {
+    if (_ready) return;
+    _belowLayerId = belowLayerId;
+    await controller.addGeoJsonSource(_sourceId, Map.of(_empty));
+    await controller.addCircleLayer(
+      _sourceId,
+      _circleLayerId,
+      CircleLayerProperties(
+        circleRadius: ['get', 'radius'],
+        circleColor: ['get', 'color'],
+        circleStrokeColor: '#ffffff',
+        circleStrokeWidth: ['get', 'strokeWidth'],
       ),
+      enableInteraction: false,
+      belowLayerId: belowLayerId,
+    );
+    await controller.addSymbolLayer(
+      _sourceId,
+      _symbolLayerId,
+      _symbolLayerProperties,
       enableInteraction: false,
       belowLayerId: belowLayerId,
     );
     _ready = true;
   }
 
-  /// Replaces every marker in one atomic call. [markers] is a flat list of
-  /// already-computed per-pin data — grouping/stacking/rank/colour logic all
-  /// stays in the caller ([GuideScreen._drawCues]); this class only owns
-  /// getting that data onto the map reliably.
+  /// Replaces every marker. [markers] is a flat list of already-computed
+  /// per-pin data — grouping/stacking/rank/colour logic all stays in the
+  /// caller ([GuideScreen._drawCues]); this class only owns getting that
+  /// data onto the map reliably.
+  ///
+  /// The circle layer is a plain data update (`setGeoJsonSource` alone is
+  /// enough — paint-property repaints have been reliable here). The text
+  /// layer is fully torn down and re-added every time instead: on-device
+  /// testing showed a `setGeoJsonSource` update alone leaves stale glyphs on
+  /// screen — new *circle* colours land correctly on the same redraw, but
+  /// the *text* stays exactly as it was before the update, as if the label
+  /// layer never re-shaped its glyphs for the new source data at all. Only
+  /// removing and re-adding the layer itself (not just its data) reliably
+  /// forces that re-shape. More expensive than a data-only update, but
+  /// cue-marker redraws are infrequent (cue fired/skipped/reversed) and the
+  /// marker count is small, so the extra cost is not a concern.
   Future<void> setMarkers(List<CueMarker> markers) async {
     if (!_ready) return;
     await controller.setGeoJsonSource(_sourceId, {
@@ -115,6 +131,14 @@ class CueLayer {
           },
       ],
     });
+    await controller.removeLayer(_symbolLayerId);
+    await controller.addSymbolLayer(
+      _sourceId,
+      _symbolLayerId,
+      _symbolLayerProperties,
+      enableInteraction: false,
+      belowLayerId: _belowLayerId,
+    );
   }
 
   Future<void> clear() async {
