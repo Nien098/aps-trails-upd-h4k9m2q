@@ -98,25 +98,6 @@ class _GuideScreenState extends State<GuideScreen> {
   Duration _pausedTotal = Duration.zero; // accumulated across every pause
   Timer? _checkpointTimer;
 
-  /// Set once the walker bails out via any of the three Turn-back options
-  /// (see [_openBailOutMenu]) — hides the Turn-back button (one-way for the
-  /// rest of this walk) regardless of which option they picked. The saved
-  /// [Trail] itself is never touched by any of the three, so a later normal
-  /// walk of it is unaffected.
-  bool _turnedBack = false;
-
-  /// A second, distinctly-coloured route line for the "shortest way back to
-  /// start" / "nearest road" bail-out options — kept separate from
-  /// [_routeLayer] (which keeps showing the original trail, greyed) so both
-  /// can be on screen together. Lazily created only if one of those options
-  /// is actually used.
-  RouteLayer? _escapeRouteLayer;
-
-  /// The path the off-route check compares against — null (meaning
-  /// [Trail.path]) until a computed escape route is installed, from then on
-  /// that route's own path.
-  List<LatLng>? _activePath;
-
   /// Elapsed walking time, excluding time spent paused (both banked pauses
   /// and, if currently paused, the one in progress).
   int get _elapsedSec {
@@ -320,9 +301,12 @@ class _GuideScreenState extends State<GuideScreen> {
   }
 
   /// Opens the three bail-out choices, then confirms and executes whichever
-  /// one is picked. Reached from the Turn-back button — hidden once
-  /// [_turnedBack] regardless of which option was used, since all three are
-  /// one-way for the rest of this walk.
+  /// one is picked. Reached from the Turn-back button, which stays available
+  /// throughout: all three options replace this screen with a fresh
+  /// GuideScreen for the new route (see [_reverseCourse]/
+  /// [_installComputedRoute]) rather than mutating this one in place, so
+  /// there's always a genuinely fresh walk-in-progress that could, in turn,
+  /// reasonably be bailed out of again if needed.
   Future<void> _openBailOutMenu() async {
     final mode = await showModalBottomSheet<_BailOutMode>(
       context: context,
@@ -562,35 +546,57 @@ class _GuideScreenState extends State<GuideScreen> {
         toast: 'Guiding you the shortest way to the nearest road');
   }
 
-  /// Shared by [_routeToStart]/[_routeToNearestRoad]: draws [path] as a
-  /// second, distinctly-coloured route line (the original trail's line
-  /// greys out rather than disappearing, so it's clear it's no longer the
-  /// active route), and replaces the walk's cues with freshly generated
-  /// turn-by-turn cues for this new path — already correctly oriented for
-  /// walking it start-to-end, so unlike [_reverseCourse] these must NOT be
-  /// run through [reverseCueInPlace] a second time.
+  /// Shared by [_routeToStart]/[_routeToNearestRoad]: installs [path] as the
+  /// walk's new route, with freshly generated turn-by-turn cues along it.
+  ///
+  /// Like [_reverseCourse], this replaces the whole screen with a fresh
+  /// GuideScreen rather than redrawing the current one's map layers —
+  /// updating an already-on-screen cue layer with new markers has
+  /// repeatedly proven unreliable on-device (see [CueLayer]'s doc), and this
+  /// case has an even more basic version of that same class of bug: the
+  /// generated cues were being set on [_cues] (governing which cues actually
+  /// fire) but [_drawCues] groups its map markers from [Trail.cues] — the
+  /// *original* trail's cues, never updated to match — so a computed route's
+  /// cues fired and spoke correctly but never had a marker pin drawn on the
+  /// map at all. Rebuilding the screen against a genuinely new [Trail] whose
+  /// own `.cues` are the computed ones sidesteps both problems at once,
+  /// exactly like the reversal fix did.
+  ///
+  /// Trade-off: the original trail's line no longer stays visible, greyed
+  /// out, alongside the computed one (there's only one active [Trail] once
+  /// the screen is rebuilt) — a minor visual loss against a walker actually
+  /// being guided the whole way, not just partway.
   Future<void> _installComputedRoute(List<LatLng> path, {required String toast}) async {
-    final c = _c;
-    if (c == null) return;
-    await _routeLayer?.setRoute(widget.trail.path, '#9E9E9E');
-    _escapeRouteLayer ??= RouteLayer(c, id: 'escape-route');
-    await _escapeRouteLayer!.ensure();
-    await _escapeRouteLayer!.setRoute(path, '#E91E63');
-    final cues = suggestCues(path);
-    setState(() {
-      _cues
-        ..clear()
-        ..addAll(cues);
-      _nextIndex = 0;
-      _turnedBack = true;
-      _activeCard = null;
-      _activePath = path;
-      _offRoute = false;
-      _offRouteCardShown = false;
-    });
+    final t = widget.trail;
+    final computedTrail = Trail(
+      id: t.id,
+      name: t.name,
+      regionId: t.regionId,
+      color: '#E91E63',
+      path: path,
+      cues: suggestCues(path),
+      createdAt: t.createdAt,
+      walkedMeters: t.walkedMeters,
+      walkCount: t.walkCount,
+      elevGainMeters: t.elevGainMeters,
+    );
+    final checkpoint = WalkCheckpoint(
+      trailId: t.id ?? -1,
+      trailName: t.name,
+      startedAt: _startedAt ?? DateTime.now(),
+      pausedTotalSec: _pausedTotal.inSeconds,
+      wasPaused: _paused,
+      nextIndex: 0,
+      walkedMeters: _walkMeters,
+      elevGainMeters: _elevGain,
+      lastPos: _lastPos,
+      track: _track,
+    );
+    if (!mounted) return;
     _toast(toast);
-    _drawCues();
-    _writeCheckpoint();
+    Navigator.of(context).pushReplacement(MaterialPageRoute(
+      builder: (_) => GuideScreen(trail: computedTrail, resume: checkpoint),
+    ));
   }
 
   void _toast(String msg) {
@@ -709,16 +715,14 @@ class _GuideScreenState extends State<GuideScreen> {
       setState(() => _distToNext = null);
     }
 
-    // Off-route check against whichever path is actually active — the
-    // trail's own drawn path normally, or a computed escape route once one
-    // has been installed (see _installComputedRoute); otherwise a walker
-    // correctly following a "shortest way back" route that legitimately
-    // leaves the original trail would be endlessly told they're off-trail.
-    // Skipped on a tick that fired a cue. Announcements are fire-and-forget
-    // so they never block updates.
-    final activePath = _activePath ?? widget.trail.path;
-    if (!firedCue && activePath.length >= 2) {
-      final d = distanceToPath(me, activePath);
+    // Off-route check against the trail's own path — a computed "shortest
+    // way back"/"nearest road" route is a genuinely different Trail (see
+    // _installComputedRoute), not a same-screen detour, so this always means
+    // whichever route is actually being walked right now. Skipped on a tick
+    // that fired a cue. Announcements are fire-and-forget so they never
+    // block updates.
+    if (!firedCue && widget.trail.path.length >= 2) {
+      final d = distanceToPath(me, widget.trail.path);
       if (!_offRoute && d > _offRouteMeters) {
         _offRoute = true;
         setState(() {
@@ -1197,7 +1201,7 @@ class _GuideScreenState extends State<GuideScreen> {
                 elevGain: _elevGain,
                 onStop: _stop,
                 onPauseResume: _paused ? _resumeWalk : _pauseWalk,
-                onTurnBack: _turnedBack ? null : _openBailOutMenu,
+                onTurnBack: _openBailOutMenu,
                 debugText: _debugText(),
               ),
             ),
