@@ -65,6 +65,19 @@ class _AuthorScreenState extends State<AuthorScreen> {
   final List<LatLng> _dragPreview = [];
   bool _convertingDragPoint = false;
 
+  /// While true, a drag on the map draws a trail stroke by nudging each
+  /// sampled point onto the nearest trail/road, instead of tap-to-tap
+  /// routing — see [_onStrokePanEnd]/[TrailRouter.snapPoint]. Mirrors what
+  /// record mode's post-recording cleanup does (nudge, never guess-route),
+  /// for authors who'd rather trace a trail by hand than tap point-to-point.
+  bool _dragDrawMode = false;
+
+  /// Screen-space drag-in-progress trace for [_dragDrawMode] — same
+  /// min-spacing/cap approach as [_dragPoints], kept separate since the two
+  /// drag modes are mutually exclusive but shouldn't share bookkeeping.
+  final List<Offset> _strokePoints = [];
+  bool _committingStroke = false;
+
   /// The drawn boundary outline (closed ring) constraining auto-generation,
   /// or null to fall back to whatever's currently on screen (existing
   /// behaviour).
@@ -392,6 +405,86 @@ class _AuthorScreenState extends State<AuthorScreen> {
   Future<void> _clearBoundary() async {
     setState(() => _genBoundary = null);
     await _boundaryLayer?.setPolygon(null);
+  }
+
+  void _toggleDragDraw() {
+    setState(() {
+      _dragDrawMode = !_dragDrawMode;
+      _strokePoints.clear();
+    });
+  }
+
+  void _onStrokePanStart(DragStartDetails d) {
+    setState(() {
+      _strokePoints
+        ..clear()
+        ..add(d.localPosition);
+    });
+  }
+
+  void _onStrokePanUpdate(DragUpdateDetails d) {
+    if (_strokePoints.isNotEmpty &&
+        (_strokePoints.length >= _dragPointCap ||
+            (d.localPosition - _strokePoints.last).distance < _dragPointSpacing)) {
+      return;
+    }
+    setState(() => _strokePoints.add(d.localPosition));
+  }
+
+  /// Converts the finished drag into map points, then nudges each one onto
+  /// the nearest trail/road within range — the same per-point local snap
+  /// [record_trail_screen._cleanPath] uses, and for the same reason: routing
+  /// between points (what "Follow trails" tap mode does via
+  /// [TrailRouter.connect]) can send a whole stretch off toward an unrelated
+  /// nearby trail when there's a gap; a local nudge can only pull a point a
+  /// short bounded distance, so the drawn shape is always preserved.
+  Future<void> _onStrokePanEnd(DragEndDetails _) async {
+    final c = _c;
+    final points = List<Offset>.of(_strokePoints);
+    setState(() => _strokePoints.clear());
+    if (c == null || points.length < 2 || _committingStroke) return;
+    final minX = points.map((p) => p.dx).reduce(min);
+    final maxX = points.map((p) => p.dx).reduce(max);
+    final minY = points.map((p) => p.dy).reduce(min);
+    final maxY = points.map((p) => p.dy).reduce(max);
+    // A negligible drag (an accidental tap/flick in this mode) isn't a
+    // deliberate stroke — ignore it rather than adding a near-zero-length
+    // segment.
+    if (maxX - minX < 12 && maxY - minY < 12) return;
+
+    setState(() => _committingStroke = true);
+    try {
+      final dpr = MediaQuery.of(context).devicePixelRatio;
+      final raw = await Future.wait(
+          points.map((p) => c.toLatLng(Point(p.dx * dpr, p.dy * dpr))));
+      final simplified = simplifyPath(raw, 8);
+      if (simplified.length < 2) return;
+      final router = TrailRouter(c);
+      final snapped = <LatLng>[];
+      for (final p in simplified) {
+        final s = await router.snapPoint(p);
+        if (snapped.isEmpty || metersBetween(snapped.last, s) >= 3) {
+          snapped.add(s);
+        }
+      }
+      if (snapped.length < 2 || !mounted) return;
+      setState(() {
+        if (_trail.anchors.isEmpty) {
+          _trail.anchors.add(snapped.first);
+          _segments.add([snapped.first]);
+        } else if (metersBetween(_trail.anchors.last, snapped.first) > 3) {
+          _trail.anchors.add(snapped.first);
+          _segments.add([_trail.anchors[_trail.anchors.length - 2], snapped.first]);
+        }
+        _trail.anchors.add(snapped.last);
+        _segments.add(snapped);
+        _trail.path = _composePath();
+        _dirty = true;
+      });
+      await _redraw();
+    } finally {
+      if (mounted) setState(() => _committingStroke = false);
+    }
   }
 
   /// Flattens the per-anchor segments into the full route polyline.
@@ -1389,7 +1482,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
               onMapClick: _onMapClick,
               onMapLongClick: _onMapLongClick,
               myLocationEnabled: true, // show the author's position dot
-              gesturesEnabled: !_drawBoundaryMode,
+              gesturesEnabled: !_drawBoundaryMode && !_dragDrawMode,
             ),
             // Absorbs drag input while drawing a generation-boundary outline
             // — only present in that mode, so it never steals ordinary taps
@@ -1436,6 +1529,58 @@ class _AuthorScreenState extends State<AuthorScreen> {
                             TextButton(
                               onPressed: _toggleDrawBoundary,
                               child: const Text('Cancel'),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            // Absorbs drag input while tracing a trail stroke by hand —
+            // same idea as the boundary drag detector above, but with no
+            // live preview: the raw drag isn't converted/snapped until
+            // release (see _onStrokePanEnd), matching how record mode's own
+            // cleanup only nudges points after Stop, not while recording.
+            if (_dragDrawMode)
+              Positioned.fill(
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onPanStart: _onStrokePanStart,
+                  onPanUpdate: _onStrokePanUpdate,
+                  onPanEnd: _onStrokePanEnd,
+                ),
+              ),
+            if (_dragDrawMode)
+              Positioned(
+                top: 12,
+                left: 0,
+                right: 0,
+                child: Center(
+                  child: MediaQuery.withClampedTextScaling(
+                    maxScaleFactor: 1.3,
+                    child: Card(
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 16, vertical: 10),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            _committingStroke
+                                ? const SizedBox(
+                                    width: 18,
+                                    height: 18,
+                                    child: CircularProgressIndicator(
+                                        strokeWidth: 2))
+                                : const Icon(Icons.gesture),
+                            const SizedBox(width: 10),
+                            Text(_committingStroke
+                                ? 'Snapping to trail…'
+                                : 'Drag along the trail — it\'ll nudge onto the nearest mapped path'),
+                            const SizedBox(width: 10),
+                            TextButton(
+                              onPressed: _toggleDragDraw,
+                              child: const Text('Done'),
                             ),
                           ],
                         ),
@@ -1559,7 +1704,13 @@ class _AuthorScreenState extends State<AuthorScreen> {
                           .formatDistance(pathLength(_trail.path)),
                       freeMove: _freeMove,
                       expanded: _modeBarExpanded,
-                      onModeChanged: (v) => setState(() => _cueMode = v),
+                      onModeChanged: (v) => setState(() {
+                        _cueMode = v;
+                        if (v) {
+                          _dragDrawMode = false;
+                          _strokePoints.clear();
+                        }
+                      }),
                       onFollowChanged: (v) => setState(() => _follow = v),
                       onFreeMoveChanged: (v) =>
                           setState(() => _freeMove = v),
@@ -1575,6 +1726,8 @@ class _AuthorScreenState extends State<AuthorScreen> {
                           : _openGenerator,
                       drawBoundaryActive: _drawBoundaryMode,
                       onToggleDrawBoundary: _toggleDrawBoundary,
+                      dragDrawActive: _dragDrawMode,
+                      onToggleDragDraw: _toggleDragDraw,
                     ),
             ),
             if (_moving != null)
@@ -1668,6 +1821,8 @@ class _ModeBar extends StatelessWidget {
     required this.onGenerate,
     required this.drawBoundaryActive,
     required this.onToggleDrawBoundary,
+    required this.dragDrawActive,
+    required this.onToggleDragDraw,
   });
 
   final bool cueMode;
@@ -1688,6 +1843,11 @@ class _ModeBar extends StatelessWidget {
   /// [_AuthorScreenState._drawBoundaryMode].
   final bool drawBoundaryActive;
   final VoidCallback onToggleDrawBoundary;
+
+  /// Whether a hand-drawn trail stroke is currently being traced — see
+  /// [_AuthorScreenState._dragDrawMode].
+  final bool dragDrawActive;
+  final VoidCallback onToggleDragDraw;
 
   @override
   Widget build(BuildContext context) {
@@ -1731,6 +1891,17 @@ class _ModeBar extends StatelessWidget {
                     isSelected: drawBoundaryActive,
                     icon: const Icon(Icons.draw),
                     onPressed: onToggleDrawBoundary,
+                  ),
+                  IconButton(
+                    visualDensity: VisualDensity.compact,
+                    tooltip: cueMode
+                        ? 'Switch to Draw path to trace a trail by hand'
+                        : dragDrawActive
+                            ? 'Stop tracing'
+                            : 'Trace a trail by dragging — nudges onto the nearest mapped path',
+                    isSelected: dragDrawActive,
+                    icon: const Icon(Icons.gesture),
+                    onPressed: cueMode ? null : onToggleDragDraw,
                   ),
                   const Spacer(),
                   IconButton(
