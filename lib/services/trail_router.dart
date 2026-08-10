@@ -389,16 +389,23 @@ class TrailRouter {
     return Rect.fromLTRB(minX - pad, minY - pad, maxX + pad, maxY + pad);
   }
 
-  /// Nudges [p] onto the nearest trail/road within [_snapMeters], if any —
-  /// a pure local lookup with no pathfinding/routing between points. Used by
-  /// record-mode cleanup so a single unmapped or gappy spot can't drag an
-  /// entire segment into a router-guessed detour the way [connect]'s
-  /// shortest-path search could (see [record_trail_screen._cleanPath]).
-  Future<LatLng> snapPoint(LatLng p, {Rect? rect}) async {
+  /// Nudges [p] onto the nearest trail/road within [maxMeters] (defaults to
+  /// [_snapMeters]), if any — a pure local lookup with no pathfinding/routing
+  /// between points. Used by record-mode cleanup and hand-drawn tracing so a
+  /// single unmapped or gappy spot can't drag an entire segment into a
+  /// router-guessed detour the way [connect]'s shortest-path search could
+  /// (see [record_trail_screen._cleanPath]). Callers tracing a hand-drawn
+  /// stroke can pass a looser [maxMeters] than a single tap would want —
+  /// since this never routes between points, widening it only ever pulls an
+  /// individual point a bit further toward what's actually mapped, it can
+  /// never invent a detour the way loosening [connect]'s detour-factor cap
+  /// could.
+  Future<LatLng> snapPoint(LatLng p, {Rect? rect, double? maxMeters}) async {
     final r = rect ?? await _rectAround(null, p);
     final graph = await _buildGraph(r);
     final snap = graph.nearestOnEdge(p);
-    return (snap != null && snap.meters <= _snapMeters) ? snap.point : p;
+    final limit = maxMeters ?? _snapMeters;
+    return (snap != null && snap.meters <= limit) ? snap.point : p;
   }
 
   /// Routes between two existing anchors WITHOUT re-snapping them (used when

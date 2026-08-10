@@ -42,6 +42,12 @@ class _AuthorScreenState extends State<AuthorScreen> {
   RouteLayer? _routeLayer;
   BoundaryLayer? _boundaryLayer;
 
+  /// Separate layer just for the raw in-progress drag trace in
+  /// [_dragDrawMode] — kept apart from [_routeLayer] (which always shows the
+  /// trail's actual committed path) so a live preview never has to touch or
+  /// restore that real data mid-drag.
+  RouteLayer? _strokeLayer;
+
   /// While true, a drag on the map draws a generation-boundary outline
   /// instead of panning the camera or placing an anchor/cue — see
   /// [_onBoundaryPanStart]/[_onBoundaryPanEnd] and [BaseMap.gesturesEnabled].
@@ -77,6 +83,15 @@ class _AuthorScreenState extends State<AuthorScreen> {
   /// drag modes are mutually exclusive but shouldn't share bookkeeping.
   final List<Offset> _strokePoints = [];
   bool _committingStroke = false;
+
+  /// Geographic trace of the drag in progress, pushed live to [_strokeLayer]
+  /// so the raw, unsnapped path is visible as it's drawn (unlike the final
+  /// result, this is never snapped — that only happens once on release, see
+  /// [_onStrokePanEnd]). Same self-throttling approach as [_dragPreview].
+  final List<LatLng> _strokePreview = [];
+  bool _convertingStrokePoint = false;
+
+  static const _strokePreviewColor = '#FF6D00';
 
   /// The drawn boundary outline (closed ring) constraining auto-generation,
   /// or null to fall back to whatever's currently on screen (existing
@@ -297,6 +312,8 @@ class _AuthorScreenState extends State<AuthorScreen> {
     await _routeLayer!.ensure();
     _boundaryLayer = BoundaryLayer(_c!);
     await _boundaryLayer!.ensure();
+    _strokeLayer = RouteLayer(_c!, id: 'strokePreview');
+    await _strokeLayer!.ensure();
     await _redraw();
   }
 
@@ -407,11 +424,13 @@ class _AuthorScreenState extends State<AuthorScreen> {
     await _boundaryLayer?.setPolygon(null);
   }
 
-  void _toggleDragDraw() {
+  Future<void> _toggleDragDraw() async {
     setState(() {
       _dragDrawMode = !_dragDrawMode;
       _strokePoints.clear();
+      _strokePreview.clear();
     });
+    await _strokeLayer?.setRoute(const [], _strokePreviewColor);
   }
 
   void _onStrokePanStart(DragStartDetails d) {
@@ -419,6 +438,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
       _strokePoints
         ..clear()
         ..add(d.localPosition);
+      _strokePreview.clear();
     });
   }
 
@@ -429,6 +449,27 @@ class _AuthorScreenState extends State<AuthorScreen> {
       return;
     }
     setState(() => _strokePoints.add(d.localPosition));
+    _pushStrokePreview(d.localPosition);
+  }
+
+  /// Best-effort live preview of the raw (unsnapped) drag, drawn via
+  /// [_strokeLayer] so a finger/pointer drag is actually visible while it's
+  /// happening — self-throttles like [_pushDragPreview] rather than queueing.
+  Future<void> _pushStrokePreview(Offset p) async {
+    final c = _c;
+    if (c == null || _convertingStrokePoint || !mounted) return;
+    _convertingStrokePoint = true;
+    try {
+      final dpr = MediaQuery.of(context).devicePixelRatio;
+      final latlng = await c.toLatLng(Point(p.dx * dpr, p.dy * dpr));
+      if (!mounted || !_dragDrawMode) return;
+      _strokePreview.add(latlng);
+      if (_strokePreview.length >= 2) {
+        await _strokeLayer?.setRoute(_strokePreview, _strokePreviewColor);
+      }
+    } finally {
+      _convertingStrokePoint = false;
+    }
   }
 
   /// Converts the finished drag into map points, then nudges each one onto
@@ -441,7 +482,11 @@ class _AuthorScreenState extends State<AuthorScreen> {
   Future<void> _onStrokePanEnd(DragEndDetails _) async {
     final c = _c;
     final points = List<Offset>.of(_strokePoints);
-    setState(() => _strokePoints.clear());
+    setState(() {
+      _strokePoints.clear();
+      _strokePreview.clear();
+    });
+    unawaited(_strokeLayer?.setRoute(const [], _strokePreviewColor));
     if (c == null || points.length < 2 || _committingStroke) return;
     final minX = points.map((p) => p.dx).reduce(min);
     final maxX = points.map((p) => p.dx).reduce(max);
@@ -462,7 +507,12 @@ class _AuthorScreenState extends State<AuthorScreen> {
       final router = TrailRouter(c);
       final snapped = <LatLng>[];
       for (final p in simplified) {
-        final s = await router.snapPoint(p);
+        // Looser than a single tap's snap distance — a hand-drawn stroke is
+        // a rougher trace than a deliberate tap, and since this never routes
+        // between points (see snapPoint's doc), a wider radius only ever
+        // pulls one point a bit further toward what's mapped, it can't
+        // invent a detour the way a looser routing tolerance could.
+        final s = await router.snapPoint(p, maxMeters: 50);
         if (snapped.isEmpty || metersBetween(snapped.last, s) >= 3) {
           snapped.add(s);
         }
