@@ -118,15 +118,6 @@ class _AuthorScreenState extends State<AuthorScreen> {
   /// own long-press-to-move interaction.
   int? _grabSegIdx;
   int? _grabLocalIdx;
-
-  /// Local index bounds (inclusive) of the live-preview window around
-  /// [_grabLocalIdx] — see [_previewWindow]. Purely cosmetic (computed once
-  /// at grab time from the un-edited segment); the real, trail-aware ripple
-  /// boundary is decided by [TrailRouter.rippleRealign] on release, this
-  /// just keeps the preview from implying an edit scope far larger than
-  /// what a release could actually change.
-  int? _grabWindowLo;
-  int? _grabWindowHi;
   Offset? _lastAdjustOffset;
   bool _convertingAdjustPoint = false;
   bool _adjustingLine = false;
@@ -472,8 +463,6 @@ class _AuthorScreenState extends State<AuthorScreen> {
         _adjustLineMode = false;
         _grabSegIdx = null;
         _grabLocalIdx = null;
-        _grabWindowLo = null;
-        _grabWindowHi = null;
       }
     });
     await _strokeLayer?.setRoute(const [], _strokePreviewColor);
@@ -623,8 +612,6 @@ class _AuthorScreenState extends State<AuthorScreen> {
       _adjustLineMode = !_adjustLineMode;
       _grabSegIdx = null;
       _grabLocalIdx = null;
-      _grabWindowLo = null;
-      _grabWindowHi = null;
       _lastAdjustOffset = null;
       if (_adjustLineMode) {
         _dragDrawMode = false;
@@ -659,18 +646,6 @@ class _AuthorScreenState extends State<AuthorScreen> {
     return (bestSeg, bestIdx);
   }
 
-  /// Local index bounds around [grabIndex] within [seg], out to
-  /// [TrailRouter.rippleMaxSteps] points in each direction — matches
-  /// [TrailRouter.rippleRealign]'s own cap exactly (an index-count limit,
-  /// not a distance one — see that method's doc for why a per-point-count
-  /// bound is safer than a cumulative-metres one) so what's previewed here
-  /// can never show a stretch larger than what a release could touch.
-  (int, int) _previewWindow(List<LatLng> seg, int grabIndex) {
-    final hi = (grabIndex + TrailRouter.rippleMaxSteps).clamp(0, seg.length - 1);
-    final lo = (grabIndex - TrailRouter.rippleMaxSteps).clamp(0, seg.length - 1);
-    return (lo, hi);
-  }
-
   Future<void> _onAdjustPanStart(DragStartDetails d) async {
     final c = _c;
     if (c == null) return;
@@ -680,13 +655,9 @@ class _AuthorScreenState extends State<AuthorScreen> {
         .toLatLng(Point(d.localPosition.dx * dpr, d.localPosition.dy * dpr));
     if (!mounted || !_adjustLineMode || gen != _previewGeneration) return;
     final hit = _nearestSegmentVertex(latlng);
-    final window =
-        hit == null ? null : _previewWindow(_segments[hit.$1], hit.$2);
     setState(() {
       _grabSegIdx = hit?.$1;
       _grabLocalIdx = hit?.$2;
-      _grabWindowLo = window?.$1;
-      _grabWindowHi = window?.$2;
     });
   }
 
@@ -695,23 +666,21 @@ class _AuthorScreenState extends State<AuthorScreen> {
     _pushAdjustPreview(d.localPosition);
   }
 
-  /// Live "string pull" preview: redraws only the bounded window around the
-  /// grabbed vertex (see [_previewWindow]) with that vertex moved to the
-  /// current drag position — not the whole segment, so dragging a small
-  /// local kink on a long, sparsely-anchored segment (e.g. a whole
-  /// auto-generated loop) doesn't visually imply the entire loop is up for
-  /// editing. The rest of the trail (still shown by [_routeLayer]) doesn't
-  /// change until release, when [TrailRouter.rippleRealign] recalculates
-  /// the corrected shape within that same real bound.
+  /// Live "string pull" preview: shows ONLY the point immediately before and
+  /// after the grabbed one, at their real, unmoved positions, with the
+  /// grabbed point itself following the drag between them — like a string
+  /// pinned at both ends. No trail lookup happens here at all; this is pure
+  /// on-screen geometry, so nothing about the surrounding trail can be
+  /// implied or affected while dragging. The actual re-alignment — deciding
+  /// where the mapped trail really is and rippling that correction out to
+  /// further neighbours — is [TrailRouter.rippleRealign], which only runs
+  /// once, in [_onAdjustPanEnd], after the point is dropped.
   Future<void> _pushAdjustPreview(Offset p) async {
     final c = _c;
     final segIdx = _grabSegIdx, localIdx = _grabLocalIdx;
-    final lo = _grabWindowLo, hi = _grabWindowHi;
     if (c == null ||
         segIdx == null ||
         localIdx == null ||
-        lo == null ||
-        hi == null ||
         _convertingAdjustPoint ||
         !mounted) {
       return;
@@ -727,8 +696,8 @@ class _AuthorScreenState extends State<AuthorScreen> {
           gen != _previewGeneration) {
         return;
       }
-      final preview = List<LatLng>.of(_segments[segIdx].sublist(lo, hi + 1));
-      preview[localIdx - lo] = latlng;
+      final seg = _segments[segIdx];
+      final preview = [seg[localIdx - 1], latlng, seg[localIdx + 1]];
       await _strokeLayer?.setRoute(preview, _strokePreviewColor);
     } finally {
       _convertingAdjustPoint = false;
@@ -746,8 +715,6 @@ class _AuthorScreenState extends State<AuthorScreen> {
       _previewGeneration++;
       _grabSegIdx = null;
       _grabLocalIdx = null;
-      _grabWindowLo = null;
-      _grabWindowHi = null;
       _lastAdjustOffset = null;
     });
     unawaited(_strokeLayer?.setRoute(const [], _strokePreviewColor));
@@ -2052,8 +2019,6 @@ class _AuthorScreenState extends State<AuthorScreen> {
                             _adjustLineMode = false;
                             _grabSegIdx = null;
                             _grabLocalIdx = null;
-                            _grabWindowLo = null;
-                            _grabWindowHi = null;
                           }
                         });
                         if (v) {
