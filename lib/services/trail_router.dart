@@ -582,10 +582,28 @@ class _Graph {
     }
   }
 
-  /// Union-finds together any two nodes within [toleranceMeters] of each
-  /// other, then rewrites nodes/edges/segments onto the canonical (root) key
-  /// of each group. Fixes near-miss disconnects between fragments of what is
-  /// really one continuous trail (see [_buildGraph]).
+  /// Union-finds together any two *loose-end* nodes (degree <= 1 — i.e. not
+  /// already connected to more than one other point) within
+  /// [toleranceMeters] of each other, then rewrites nodes/edges/segments
+  /// onto the canonical (root) key of each group. Fixes near-miss
+  /// disconnects between fragments of what is really one continuous trail
+  /// (see [_buildGraph]).
+  ///
+  /// The degree<=1 restriction matters more than it looks: an earlier
+  /// version merged *any* two nearby nodes regardless of how connected they
+  /// already were. That's fine at a tight tolerance (a few metres only ever
+  /// catches a genuine same-way tile-split gap), but widening the tolerance
+  /// to close real multi-tile trail gaps (see the tolerance constant's own
+  /// doc) made it start welding together nodes that were never the same
+  /// path at all — two different, already-connected streets running close
+  /// together in a dense residential grid, for instance — corrupting the
+  /// graph into something Dijkstra could only find absurd, rejected-as-too-
+  /// long routes through, which is indistinguishable from routing having
+  /// stopped working (on-device testing showed exactly that: dense-area
+  /// "Follow trails" regressed hard right when this tolerance widened).
+  /// Only ever bridging genuine loose ends removes that risk: a real
+  /// mid-street node already has 2+ connections and is never a merge
+  /// candidate, no matter how wide the tolerance gets.
   void _mergeNearbyNodes(double toleranceMeters) {
     final keys = nodes.keys.toList();
     final parent = <String, String>{for (final k in keys) k: k};
@@ -598,8 +616,12 @@ class _Graph {
       return r;
     }
 
+    bool isLooseEnd(String k) => (adj[k]?.length ?? 0) <= 1;
+
     for (var i = 0; i < keys.length; i++) {
+      if (!isLooseEnd(keys[i])) continue;
       for (var j = i + 1; j < keys.length; j++) {
+        if (!isLooseEnd(keys[j])) continue;
         if (metersBetween(nodes[keys[i]]!, nodes[keys[j]]!) <=
             toleranceMeters) {
           final ri = find(keys[i]), rj = find(keys[j]);
