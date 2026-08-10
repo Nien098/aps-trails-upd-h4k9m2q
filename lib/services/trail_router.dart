@@ -462,36 +462,33 @@ class TrailRouter {
   /// [rippleRealign].
   static const _rippleStopMeters = 1.5;
 
-  /// Hard cap (m, each direction) on how far a single grab-and-pull can
-  /// ripple, regardless of the [_rippleStopMeters] early-exit — see
-  /// [rippleRealign]'s doc for why this exists as a second, independent
-  /// limit. Also used by [author_screen.dart]'s live preview so what's
-  /// shown while dragging matches what a release can actually change.
-  static const rippleMaxDistanceMeters = 40.0;
+  /// Hard cap on how many points a single grab-and-pull can ripple onto in
+  /// each direction, regardless of the [_rippleStopMeters] early-exit — see
+  /// [rippleRealign]'s doc. Also used by [author_screen.dart] so a longer
+  /// distorted stretch is worked in a few bounded grabs rather than one
+  /// unpredictable one.
+  static const rippleMaxSteps = 12;
+
+  /// How much more strongly [rippleRealign] resists switching which mapped
+  /// trail edge it's following, compared to [snapStroke]'s default — see
+  /// [_Graph._nearestSegSticky]'s doc for why a plain per-point search is
+  /// unsafe here: an out-and-back trail's outbound and return legs are
+  /// often mapped only 10-20m apart, and once a ripple jumps onto the wrong
+  /// one it keeps drifting away from the point actually being edited.
+  static const _rippleHysteresisMeters = 20.0;
 
   /// Applies a manual correction to one interior point of a drawn [segment]
   /// (the author dragged [grabIndex] to [newPosition]), then ripples that
   /// correction out to its neighbours on each side — re-snapping each in
-  /// turn onto the mapped trail/road network, biased to stay on the same
-  /// edge as the point just before it (see [_Graph._nearestSegSticky]) —
-  /// until a neighbour's re-aligned position would land within
-  /// [_rippleStopMeters] of where it already was. That neighbour and
-  /// everything beyond it in that direction are left untouched: the author
-  /// was tracing a real trail, so a stretch that already matches the trail
+  /// turn onto the mapped trail/road network, strongly biased to stay on
+  /// the same edge as the point just before it (see [_rippleHysteresisMeters])
+  /// — until a neighbour's re-aligned position would land within
+  /// [_rippleStopMeters] of where it already was, or [rippleMaxSteps] points
+  /// have been touched on that side, whichever comes first. Everything
+  /// beyond where the ripple stops is left untouched: the author was
+  /// tracing a real trail, so a stretch that already matches the trail
   /// doesn't need correcting, and stopping there means one manual nudge
   /// only affects the stretch that was actually off.
-  ///
-  /// Also hard-capped at [rippleMaxDistanceMeters] of original-path distance
-  /// from the grab point in each direction, independent of whether the
-  /// "already aligned" condition ever triggers — on a long, sparsely
-  /// anchored segment (e.g. a whole auto-generated loop with only two real
-  /// anchors), leaving the ripple otherwise unbounded meant one small local
-  /// nudge could, in principle, keep re-snapping for the segment's entire
-  /// length before happening to land within the stop margin somewhere far
-  /// away, producing edits far larger and less predictable than the actual
-  /// problem spot. Grabbing again right where the first ripple stopped
-  /// still lets an author work along a longer distorted stretch in a few
-  /// bounded steps instead.
   ///
   /// Never crosses [segment]'s own first/last point (its anchors) — those
   /// belong to the neighbouring segment too, so moving them here could
@@ -508,32 +505,35 @@ class TrailRouter {
     final out = List<LatLng>.of(segment);
     final graph = await _buildGraph(await _rectAroundAll(segment));
 
-    final seed = graph._nearestSegSticky(newPosition, null);
+    final seed = graph._nearestSegSticky(newPosition, null,
+        hysteresisMeters: _rippleHysteresisMeters);
     out[grabIndex] =
         (seed != null && seed.meters <= maxMeters) ? seed.point : newPosition;
 
     var currentSeg = seed?.seg;
-    var traveled = 0.0;
-    for (var i = grabIndex + 1; i < out.length - 1; i++) {
-      traveled += metersBetween(segment[i - 1], segment[i]);
-      if (traveled > rippleMaxDistanceMeters) break;
-      final r = graph._nearestSegSticky(segment[i], currentSeg);
+    var hi = grabIndex;
+    for (var n = 0; n < rippleMaxSteps && hi + 1 < out.length - 1; n++) {
+      final i = hi + 1;
+      final r = graph._nearestSegSticky(segment[i], currentSeg,
+          hysteresisMeters: _rippleHysteresisMeters);
       if (r == null || r.meters > maxMeters) break;
       if (metersBetween(r.point, segment[i]) <= _rippleStopMeters) break;
       out[i] = r.point;
       currentSeg = r.seg;
+      hi = i;
     }
 
     currentSeg = seed?.seg;
-    traveled = 0.0;
-    for (var i = grabIndex - 1; i > 0; i--) {
-      traveled += metersBetween(segment[i + 1], segment[i]);
-      if (traveled > rippleMaxDistanceMeters) break;
-      final r = graph._nearestSegSticky(segment[i], currentSeg);
+    var lo = grabIndex;
+    for (var n = 0; n < rippleMaxSteps && lo - 1 > 0; n++) {
+      final i = lo - 1;
+      final r = graph._nearestSegSticky(segment[i], currentSeg,
+          hysteresisMeters: _rippleHysteresisMeters);
       if (r == null || r.meters > maxMeters) break;
       if (metersBetween(r.point, segment[i]) <= _rippleStopMeters) break;
       out[i] = r.point;
       currentSeg = r.seg;
+      lo = i;
     }
 
     return out;
@@ -909,12 +909,23 @@ class _Graph {
   static const _stickyHysteresisMeters = 8.0;
 
   /// Like [_nearestSeg], but keeps [preferred] (the edge the previous point
-  /// in a stroke snapped to) unless a different edge beats it by more than
-  /// [_stickyHysteresisMeters] — small enough that switching to a genuinely
-  /// different, closer trail still happens (the author really did move onto
-  /// another path), but large enough that two trails crossing or running
-  /// close together don't cause every other point to flip between them.
-  ({LatLng point, double meters, _Seg seg})? _nearestSegSticky(LatLng p, _Seg? preferred) {
+  /// snapped to) unless a different edge beats it by more than
+  /// [hysteresisMeters] (defaults to [_stickyHysteresisMeters]) — small
+  /// enough that switching to a genuinely different, closer trail still
+  /// happens (the author really did move onto another path), but large
+  /// enough that two trails crossing or running close together don't cause
+  /// every other point to flip between them. [rippleRealign] passes a much
+  /// larger override: an out-and-back trail's outbound and return legs are
+  /// often mapped as two separate, near-parallel line features only 10-20m
+  /// apart, and a ripple that jumps onto the wrong one mid-walk keeps
+  /// drifting further from the original line with every subsequent point —
+  /// visibly "disconnecting" from the trail being edited — so ripple needs
+  /// a much stronger bias to stay put than a single stroke-snap does.
+  ({LatLng point, double meters, _Seg seg})? _nearestSegSticky(
+    LatLng p,
+    _Seg? preferred, {
+    double hysteresisMeters = _stickyHysteresisMeters,
+  }) {
     ({LatLng point, double meters, _Seg seg})? best;
     ({LatLng point, double meters})? onPreferred;
     for (final seg in _segments) {
@@ -929,7 +940,7 @@ class _Graph {
     if (preferred != null &&
         onPreferred != null &&
         best != null &&
-        onPreferred.meters <= best.meters + _stickyHysteresisMeters) {
+        onPreferred.meters <= best.meters + hysteresisMeters) {
       return (point: onPreferred.point, meters: onPreferred.meters, seg: preferred);
     }
     return best;

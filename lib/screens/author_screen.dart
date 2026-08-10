@@ -93,6 +93,16 @@ class _AuthorScreenState extends State<AuthorScreen> {
 
   static const _strokePreviewColor = '#FF6D00';
 
+  /// Bumped on every toggle, mode switch, and grab-start affecting either
+  /// drag mode's preview layer. [_pushStrokePreview]/[_pushAdjustPreview]
+  /// capture it before their async lat/lng conversion and re-check it
+  /// after — if it changed while the conversion was in flight (a new grab
+  /// started, the tool was toggled off, or the mode switched to Add cue),
+  /// that stale result is dropped instead of being pushed to the map, where
+  /// it would otherwise render a leftover line from a drag that's no longer
+  /// current — real geometry, but disconnected from what's on screen now.
+  int _previewGeneration = 0;
+
   /// While true, a drag on the map grabs the nearest interior point of the
   /// drawn line and pulls it, re-aligning the surrounding stretch onto the
   /// mapped trail as it goes — see [_onAdjustPanEnd]/[TrailRouter.rippleRealign].
@@ -450,6 +460,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
 
   Future<void> _toggleDragDraw() async {
     setState(() {
+      _previewGeneration++;
       _dragDrawMode = !_dragDrawMode;
       _strokePoints.clear();
       _strokePreview.clear();
@@ -466,6 +477,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
 
   void _onStrokePanStart(DragStartDetails d) {
     setState(() {
+      _previewGeneration++;
       _strokePoints
         ..clear()
         ..add(d.localPosition);
@@ -489,11 +501,12 @@ class _AuthorScreenState extends State<AuthorScreen> {
   Future<void> _pushStrokePreview(Offset p) async {
     final c = _c;
     if (c == null || _convertingStrokePoint || !mounted) return;
+    final gen = _previewGeneration;
     _convertingStrokePoint = true;
     try {
       final dpr = MediaQuery.of(context).devicePixelRatio;
       final latlng = await c.toLatLng(Point(p.dx * dpr, p.dy * dpr));
-      if (!mounted || !_dragDrawMode) return;
+      if (!mounted || !_dragDrawMode || gen != _previewGeneration) return;
       _strokePreview.add(latlng);
       if (_strokePreview.length >= 2) {
         await _strokeLayer?.setRoute(_strokePreview, _strokePreviewColor);
@@ -514,6 +527,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
     final c = _c;
     final points = List<Offset>.of(_strokePoints);
     setState(() {
+      _previewGeneration++;
       _strokePoints.clear();
       _strokePreview.clear();
     });
@@ -580,6 +594,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
 
   Future<void> _toggleAdjustLine() async {
     setState(() {
+      _previewGeneration++;
       _adjustLineMode = !_adjustLineMode;
       _grabSegIdx = null;
       _grabLocalIdx = null;
@@ -619,34 +634,26 @@ class _AuthorScreenState extends State<AuthorScreen> {
     return (bestSeg, bestIdx);
   }
 
-  /// Local index bounds around [grabIndex] within [seg] out to
-  /// [TrailRouter.rippleMaxDistanceMeters] of original-path distance in each
-  /// direction — see [_grabWindowLo]/[_grabWindowHi]'s doc.
+  /// Local index bounds around [grabIndex] within [seg], out to
+  /// [TrailRouter.rippleMaxSteps] points in each direction — matches
+  /// [TrailRouter.rippleRealign]'s own cap exactly (an index-count limit,
+  /// not a distance one — see that method's doc for why a per-point-count
+  /// bound is safer than a cumulative-metres one) so what's previewed here
+  /// can never show a stretch larger than what a release could touch.
   (int, int) _previewWindow(List<LatLng> seg, int grabIndex) {
-    var hi = grabIndex;
-    var traveled = 0.0;
-    while (hi < seg.length - 1) {
-      traveled += metersBetween(seg[hi], seg[hi + 1]);
-      if (traveled > TrailRouter.rippleMaxDistanceMeters) break;
-      hi++;
-    }
-    var lo = grabIndex;
-    traveled = 0.0;
-    while (lo > 0) {
-      traveled += metersBetween(seg[lo], seg[lo - 1]);
-      if (traveled > TrailRouter.rippleMaxDistanceMeters) break;
-      lo--;
-    }
+    final hi = (grabIndex + TrailRouter.rippleMaxSteps).clamp(0, seg.length - 1);
+    final lo = (grabIndex - TrailRouter.rippleMaxSteps).clamp(0, seg.length - 1);
     return (lo, hi);
   }
 
   Future<void> _onAdjustPanStart(DragStartDetails d) async {
     final c = _c;
     if (c == null) return;
+    final gen = ++_previewGeneration;
     final dpr = MediaQuery.of(context).devicePixelRatio;
     final latlng = await c
         .toLatLng(Point(d.localPosition.dx * dpr, d.localPosition.dy * dpr));
-    if (!mounted || !_adjustLineMode) return;
+    if (!mounted || !_adjustLineMode || gen != _previewGeneration) return;
     final hit = _nearestSegmentVertex(latlng);
     final window =
         hit == null ? null : _previewWindow(_segments[hit.$1], hit.$2);
@@ -684,11 +691,17 @@ class _AuthorScreenState extends State<AuthorScreen> {
         !mounted) {
       return;
     }
+    final gen = _previewGeneration;
     _convertingAdjustPoint = true;
     try {
       final dpr = MediaQuery.of(context).devicePixelRatio;
       final latlng = await c.toLatLng(Point(p.dx * dpr, p.dy * dpr));
-      if (!mounted || !_adjustLineMode || _grabSegIdx != segIdx) return;
+      if (!mounted ||
+          !_adjustLineMode ||
+          _grabSegIdx != segIdx ||
+          gen != _previewGeneration) {
+        return;
+      }
       final preview = List<LatLng>.of(_segments[segIdx].sublist(lo, hi + 1));
       preview[localIdx - lo] = latlng;
       await _strokeLayer?.setRoute(preview, _strokePreviewColor);
@@ -705,6 +718,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
     final segIdx = _grabSegIdx, localIdx = _grabLocalIdx;
     final offset = _lastAdjustOffset;
     setState(() {
+      _previewGeneration++;
       _grabSegIdx = null;
       _grabLocalIdx = null;
       _grabWindowLo = null;
@@ -2002,18 +2016,26 @@ class _AuthorScreenState extends State<AuthorScreen> {
                           .formatDistance(pathLength(_trail.path)),
                       freeMove: _freeMove,
                       expanded: _modeBarExpanded,
-                      onModeChanged: (v) => setState(() {
-                        _cueMode = v;
+                      onModeChanged: (v) {
+                        setState(() {
+                          _cueMode = v;
+                          if (v) {
+                            _previewGeneration++;
+                            _dragDrawMode = false;
+                            _strokePoints.clear();
+                            _strokePreview.clear();
+                            _adjustLineMode = false;
+                            _grabSegIdx = null;
+                            _grabLocalIdx = null;
+                            _grabWindowLo = null;
+                            _grabWindowHi = null;
+                          }
+                        });
                         if (v) {
-                          _dragDrawMode = false;
-                          _strokePoints.clear();
-                          _adjustLineMode = false;
-                          _grabSegIdx = null;
-                          _grabLocalIdx = null;
-                          _grabWindowLo = null;
-                          _grabWindowHi = null;
+                          unawaited(
+                              _strokeLayer?.setRoute(const [], _strokePreviewColor));
                         }
-                      }),
+                      },
                       onFollowChanged: (v) => setState(() => _follow = v),
                       onFreeMoveChanged: (v) =>
                           setState(() => _freeMove = v),
