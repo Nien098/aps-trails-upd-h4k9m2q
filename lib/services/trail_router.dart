@@ -457,6 +457,61 @@ class TrailRouter {
     return Rect.fromLTRB(minX - pad, minY - pad, maxX + pad, maxY + pad);
   }
 
+  /// Margin (m) a re-aligned point may still differ from its current
+  /// position by and be considered "already correctly aligned" — see
+  /// [rippleRealign].
+  static const _rippleStopMeters = 1.5;
+
+  /// Applies a manual correction to one interior point of a drawn [segment]
+  /// (the author dragged [grabIndex] to [newPosition]), then ripples that
+  /// correction out to its neighbours on each side — re-snapping each in
+  /// turn onto the mapped trail/road network, biased to stay on the same
+  /// edge as the point just before it (see [_Graph._nearestSegSticky]) —
+  /// until a neighbour's re-aligned position would land within
+  /// [_rippleStopMeters] of where it already was. That neighbour and
+  /// everything beyond it in that direction are left untouched: the author
+  /// was tracing a real trail, so a stretch that already matches the trail
+  /// doesn't need correcting, and stopping there means one manual nudge
+  /// only affects the stretch that was actually off. Never crosses
+  /// [segment]'s own first/last point (its anchors) — those belong to the
+  /// neighbouring segment too, so moving them here could desync the two.
+  Future<List<LatLng>> rippleRealign(
+    List<LatLng> segment,
+    int grabIndex,
+    LatLng newPosition, {
+    double maxMeters = 50,
+  }) async {
+    if (segment.length < 3 || grabIndex <= 0 || grabIndex >= segment.length - 1) {
+      return segment;
+    }
+    final out = List<LatLng>.of(segment);
+    final graph = await _buildGraph(await _rectAroundAll(segment));
+
+    final seed = graph._nearestSegSticky(newPosition, null);
+    out[grabIndex] =
+        (seed != null && seed.meters <= maxMeters) ? seed.point : newPosition;
+
+    var currentSeg = seed?.seg;
+    for (var i = grabIndex + 1; i < out.length - 1; i++) {
+      final r = graph._nearestSegSticky(segment[i], currentSeg);
+      if (r == null || r.meters > maxMeters) break;
+      if (metersBetween(r.point, segment[i]) <= _rippleStopMeters) break;
+      out[i] = r.point;
+      currentSeg = r.seg;
+    }
+
+    currentSeg = seed?.seg;
+    for (var i = grabIndex - 1; i > 0; i--) {
+      final r = graph._nearestSegSticky(segment[i], currentSeg);
+      if (r == null || r.meters > maxMeters) break;
+      if (metersBetween(r.point, segment[i]) <= _rippleStopMeters) break;
+      out[i] = r.point;
+      currentSeg = r.seg;
+    }
+
+    return out;
+  }
+
   /// Routes between two existing anchors WITHOUT re-snapping them (used when
   /// re-joining the trail after a middle anchor is deleted). Falls back to a
   /// straight segment when there's no connected trail.

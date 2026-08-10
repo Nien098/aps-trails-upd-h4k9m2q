@@ -93,6 +93,21 @@ class _AuthorScreenState extends State<AuthorScreen> {
 
   static const _strokePreviewColor = '#FF6D00';
 
+  /// While true, a drag on the map grabs the nearest interior point of the
+  /// drawn line and pulls it, re-aligning the surrounding stretch onto the
+  /// mapped trail as it goes — see [_onAdjustPanEnd]/[TrailRouter.rippleRealign].
+  bool _adjustLineMode = false;
+
+  /// Which segment/local-index of [_segments] is currently grabbed, or null
+  /// when nothing's being dragged — see [_nearestSegmentVertex]. Never an
+  /// anchor (index 0 or a segment's last index): those already have their
+  /// own long-press-to-move interaction.
+  int? _grabSegIdx;
+  int? _grabLocalIdx;
+  Offset? _lastAdjustOffset;
+  bool _convertingAdjustPoint = false;
+  bool _adjustingLine = false;
+
   /// The drawn boundary outline (closed ring) constraining auto-generation,
   /// or null to fall back to whatever's currently on screen (existing
   /// behaviour).
@@ -429,6 +444,11 @@ class _AuthorScreenState extends State<AuthorScreen> {
       _dragDrawMode = !_dragDrawMode;
       _strokePoints.clear();
       _strokePreview.clear();
+      if (_dragDrawMode) {
+        _adjustLineMode = false;
+        _grabSegIdx = null;
+        _grabLocalIdx = null;
+      }
     });
     await _strokeLayer?.setRoute(const [], _strokePreviewColor);
   }
@@ -544,6 +564,127 @@ class _AuthorScreenState extends State<AuthorScreen> {
       await _redraw();
     } finally {
       if (mounted) setState(() => _committingStroke = false);
+    }
+  }
+
+  Future<void> _toggleAdjustLine() async {
+    setState(() {
+      _adjustLineMode = !_adjustLineMode;
+      _grabSegIdx = null;
+      _grabLocalIdx = null;
+      _lastAdjustOffset = null;
+      if (_adjustLineMode) {
+        _dragDrawMode = false;
+        _strokePoints.clear();
+      }
+    });
+    await _strokeLayer?.setRoute(const [], _strokePreviewColor);
+  }
+
+  /// Finds the (segment index, local index) of the interior vertex in
+  /// [_segments] closest to [p] — "grab the line" for [_adjustLineMode].
+  /// Deliberately excludes each segment's first/last point (its anchors):
+  /// those already have their own long-press-to-move interaction, and
+  /// moving one would also have to stay in sync with the neighbouring
+  /// segment that shares it, which this simpler per-segment tool doesn't
+  /// attempt.
+  (int, int)? _nearestSegmentVertex(LatLng p, {double maxMeters = 15}) {
+    int? bestSeg, bestIdx;
+    var bestDist = maxMeters;
+    for (var s = 0; s < _segments.length; s++) {
+      final seg = _segments[s];
+      for (var i = 1; i < seg.length - 1; i++) {
+        final d = metersBetween(p, seg[i]);
+        if (d < bestDist) {
+          bestDist = d;
+          bestSeg = s;
+          bestIdx = i;
+        }
+      }
+    }
+    if (bestSeg == null || bestIdx == null) return null;
+    return (bestSeg, bestIdx);
+  }
+
+  Future<void> _onAdjustPanStart(DragStartDetails d) async {
+    final c = _c;
+    if (c == null) return;
+    final dpr = MediaQuery.of(context).devicePixelRatio;
+    final latlng = await c
+        .toLatLng(Point(d.localPosition.dx * dpr, d.localPosition.dy * dpr));
+    if (!mounted || !_adjustLineMode) return;
+    final hit = _nearestSegmentVertex(latlng);
+    setState(() {
+      _grabSegIdx = hit?.$1;
+      _grabLocalIdx = hit?.$2;
+    });
+  }
+
+  void _onAdjustPanUpdate(DragUpdateDetails d) {
+    _lastAdjustOffset = d.localPosition;
+    _pushAdjustPreview(d.localPosition);
+  }
+
+  /// Live "string pull" preview: redraws just the grabbed segment with its
+  /// grabbed vertex moved to the current drag position — the rest of the
+  /// trail (still shown by [_routeLayer]) doesn't change until release, when
+  /// [TrailRouter.rippleRealign] actually recalculates the corrected shape.
+  Future<void> _pushAdjustPreview(Offset p) async {
+    final c = _c;
+    final segIdx = _grabSegIdx, localIdx = _grabLocalIdx;
+    if (c == null ||
+        segIdx == null ||
+        localIdx == null ||
+        _convertingAdjustPoint ||
+        !mounted) {
+      return;
+    }
+    _convertingAdjustPoint = true;
+    try {
+      final dpr = MediaQuery.of(context).devicePixelRatio;
+      final latlng = await c.toLatLng(Point(p.dx * dpr, p.dy * dpr));
+      if (!mounted || !_adjustLineMode || _grabSegIdx != segIdx) return;
+      final preview = List<LatLng>.of(_segments[segIdx]);
+      preview[localIdx] = latlng;
+      await _strokeLayer?.setRoute(preview, _strokePreviewColor);
+    } finally {
+      _convertingAdjustPoint = false;
+    }
+  }
+
+  /// Commits the grab: re-aligns the dragged point and ripples the
+  /// correction out to its neighbours within the same segment — see
+  /// [TrailRouter.rippleRealign].
+  Future<void> _onAdjustPanEnd(DragEndDetails _) async {
+    final c = _c;
+    final segIdx = _grabSegIdx, localIdx = _grabLocalIdx;
+    final offset = _lastAdjustOffset;
+    setState(() {
+      _grabSegIdx = null;
+      _grabLocalIdx = null;
+      _lastAdjustOffset = null;
+    });
+    unawaited(_strokeLayer?.setRoute(const [], _strokePreviewColor));
+    if (c == null || segIdx == null || localIdx == null || offset == null) {
+      return;
+    }
+
+    setState(() => _adjustingLine = true);
+    try {
+      final dpr = MediaQuery.of(context).devicePixelRatio;
+      final newPos =
+          await c.toLatLng(Point(offset.dx * dpr, offset.dy * dpr));
+      if (!mounted) return;
+      final realigned =
+          await TrailRouter(c).rippleRealign(_segments[segIdx], localIdx, newPos);
+      setState(() {
+        _segments[segIdx] = realigned;
+        _trail.path = _composePath();
+        _dirty = true;
+      });
+      await _redraw();
+    } finally {
+      if (mounted) setState(() => _adjustingLine = false);
     }
   }
 
@@ -1542,7 +1683,8 @@ class _AuthorScreenState extends State<AuthorScreen> {
               onMapClick: _onMapClick,
               onMapLongClick: _onMapLongClick,
               myLocationEnabled: true, // show the author's position dot
-              gesturesEnabled: !_drawBoundaryMode && !_dragDrawMode,
+              gesturesEnabled:
+                  !_drawBoundaryMode && !_dragDrawMode && !_adjustLineMode,
             ),
             // Absorbs drag input while drawing a generation-boundary outline
             // — only present in that mode, so it never steals ordinary taps
@@ -1640,6 +1782,55 @@ class _AuthorScreenState extends State<AuthorScreen> {
                             const SizedBox(width: 10),
                             TextButton(
                               onPressed: _toggleDragDraw,
+                              child: const Text('Done'),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            // Absorbs drag input while grabbing/pulling a point on the drawn
+            // line — see _onAdjustPanEnd/TrailRouter.rippleRealign.
+            if (_adjustLineMode)
+              Positioned.fill(
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onPanStart: _onAdjustPanStart,
+                  onPanUpdate: _onAdjustPanUpdate,
+                  onPanEnd: _onAdjustPanEnd,
+                ),
+              ),
+            if (_adjustLineMode)
+              Positioned(
+                top: 12,
+                left: 0,
+                right: 0,
+                child: Center(
+                  child: MediaQuery.withClampedTextScaling(
+                    maxScaleFactor: 1.3,
+                    child: Card(
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 16, vertical: 10),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            _adjustingLine
+                                ? const SizedBox(
+                                    width: 18,
+                                    height: 18,
+                                    child: CircularProgressIndicator(
+                                        strokeWidth: 2))
+                                : const Icon(Icons.tune),
+                            const SizedBox(width: 10),
+                            Text(_adjustingLine
+                                ? 'Re-aligning…'
+                                : 'Drag a point on the line to pull it onto the trail'),
+                            const SizedBox(width: 10),
+                            TextButton(
+                              onPressed: _toggleAdjustLine,
                               child: const Text('Done'),
                             ),
                           ],
@@ -1769,6 +1960,9 @@ class _AuthorScreenState extends State<AuthorScreen> {
                         if (v) {
                           _dragDrawMode = false;
                           _strokePoints.clear();
+                          _adjustLineMode = false;
+                          _grabSegIdx = null;
+                          _grabLocalIdx = null;
                         }
                       }),
                       onFollowChanged: (v) => setState(() => _follow = v),
@@ -1788,6 +1982,8 @@ class _AuthorScreenState extends State<AuthorScreen> {
                       onToggleDrawBoundary: _toggleDrawBoundary,
                       dragDrawActive: _dragDrawMode,
                       onToggleDragDraw: _toggleDragDraw,
+                      adjustLineActive: _adjustLineMode,
+                      onToggleAdjustLine: _toggleAdjustLine,
                     ),
             ),
             if (_moving != null)
@@ -1883,6 +2079,8 @@ class _ModeBar extends StatelessWidget {
     required this.onToggleDrawBoundary,
     required this.dragDrawActive,
     required this.onToggleDragDraw,
+    required this.adjustLineActive,
+    required this.onToggleAdjustLine,
   });
 
   final bool cueMode;
@@ -1908,6 +2106,11 @@ class _ModeBar extends StatelessWidget {
   /// [_AuthorScreenState._dragDrawMode].
   final bool dragDrawActive;
   final VoidCallback onToggleDragDraw;
+
+  /// Whether the line-adjust ("grab and pull a point") tool is active —
+  /// see [_AuthorScreenState._adjustLineMode].
+  final bool adjustLineActive;
+  final VoidCallback onToggleAdjustLine;
 
   @override
   Widget build(BuildContext context) {
@@ -1962,6 +2165,17 @@ class _ModeBar extends StatelessWidget {
                     isSelected: dragDrawActive,
                     icon: const Icon(Icons.gesture),
                     onPressed: cueMode ? null : onToggleDragDraw,
+                  ),
+                  IconButton(
+                    visualDensity: VisualDensity.compact,
+                    tooltip: cueMode
+                        ? 'Switch to Draw path to adjust the line'
+                        : adjustLineActive
+                            ? 'Stop adjusting'
+                            : 'Grab a point on the line and pull it onto the trail',
+                    isSelected: adjustLineActive,
+                    icon: const Icon(Icons.tune),
+                    onPressed: cueMode ? null : onToggleAdjustLine,
                   ),
                   const Spacer(),
                   IconButton(
