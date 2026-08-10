@@ -502,7 +502,17 @@ class _AuthorScreenState extends State<AuthorScreen> {
       final dpr = MediaQuery.of(context).devicePixelRatio;
       final raw = await Future.wait(
           points.map((p) => c.toLatLng(Point(p.dx * dpr, p.dy * dpr))));
-      final simplified = simplifyPath(raw, 8);
+      // A much tighter tolerance than record mode's cleanup (8m, sized to
+      // remove real GPS jitter) — these points come from a precise on-screen
+      // drag, not noisy GPS, so there's no jitter to remove. Collapsing the
+      // stroke down to only a few widely-spaced anchors was the actual cause
+      // of the drawn line jumping far from the real drag: each anchor snaps
+      // independently, so if two survive far apart they can nudge onto two
+      // different nearby trail fragments, turning the straight line between
+      // them into a chord that cuts across whatever's between those trails.
+      // Keeping far more points close together means neighbouring snaps
+      // consistently land on the same real trail instead.
+      final simplified = simplifyPath(raw, 2.5);
       if (simplified.length < 2) return;
       final router = TrailRouter(c);
       final snapped = <LatLng>[];
