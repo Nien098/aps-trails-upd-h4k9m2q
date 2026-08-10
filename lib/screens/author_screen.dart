@@ -514,15 +514,15 @@ class _AuthorScreenState extends State<AuthorScreen> {
       // consistently land on the same real trail instead.
       final simplified = simplifyPath(raw, 2.5);
       if (simplified.length < 2) return;
-      final router = TrailRouter(c);
+      // snapStroke (not a per-point snapPoint loop) so the whole stroke is
+      // queried as one consistent graph and consecutive points stay on the
+      // same trail edge unless a different one is meaningfully closer — see
+      // its doc for why an independent per-point search could zig-zag right
+      // where two trails cross or run close together.
+      final rawSnapped =
+          await TrailRouter(c).snapStroke(simplified, maxMeters: 50);
       final snapped = <LatLng>[];
-      for (final p in simplified) {
-        // Looser than a single tap's snap distance — a hand-drawn stroke is
-        // a rougher trace than a deliberate tap, and since this never routes
-        // between points (see snapPoint's doc), a wider radius only ever
-        // pulls one point a bit further toward what's mapped, it can't
-        // invent a detour the way a looser routing tolerance could.
-        final s = await router.snapPoint(p, maxMeters: 50);
+      for (final s in rawSnapped) {
         if (snapped.isEmpty || metersBetween(snapped.last, s) >= 3) {
           snapped.add(s);
         }

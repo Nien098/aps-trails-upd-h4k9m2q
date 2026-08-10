@@ -391,21 +391,70 @@ class TrailRouter {
 
   /// Nudges [p] onto the nearest trail/road within [maxMeters] (defaults to
   /// [_snapMeters]), if any — a pure local lookup with no pathfinding/routing
-  /// between points. Used by record-mode cleanup and hand-drawn tracing so a
-  /// single unmapped or gappy spot can't drag an entire segment into a
-  /// router-guessed detour the way [connect]'s shortest-path search could
-  /// (see [record_trail_screen._cleanPath]). Callers tracing a hand-drawn
-  /// stroke can pass a looser [maxMeters] than a single tap would want —
-  /// since this never routes between points, widening it only ever pulls an
-  /// individual point a bit further toward what's actually mapped, it can
-  /// never invent a detour the way loosening [connect]'s detour-factor cap
-  /// could.
+  /// between points. Used by record-mode cleanup so a single unmapped or
+  /// gappy spot can't drag an entire segment into a router-guessed detour the
+  /// way [connect]'s shortest-path search could (see
+  /// [record_trail_screen._cleanPath]).
   Future<LatLng> snapPoint(LatLng p, {Rect? rect, double? maxMeters}) async {
     final r = rect ?? await _rectAround(null, p);
     final graph = await _buildGraph(r);
     final snap = graph.nearestOnEdge(p);
     final limit = maxMeters ?? _snapMeters;
     return (snap != null && snap.meters <= limit) ? snap.point : p;
+  }
+
+  /// Snaps every point of a hand-drawn [points] trace onto the mapped
+  /// trail/road network, biased to stay on whichever edge the previous point
+  /// snapped to rather than re-searching from scratch each time. A plain
+  /// independent-per-point "nearest edge" search can flip onto a different,
+  /// merely-a-touch-closer trail right where two paths cross or run close
+  /// together, producing a visible zig-zag/detour even when the drag stayed
+  /// on the real trail the whole way — since the author was tracing an
+  /// actual trail, the edge they were already snapped to is almost always
+  /// still the right one nearby, so it's only abandoned when a different
+  /// edge is meaningfully closer (see [_Graph._nearestSegSticky]), not just
+  /// marginally so.
+  ///
+  /// Also builds a single graph over the whole stroke's bounding box up
+  /// front, rather than a fresh small one per point — so every point sees
+  /// the same, consistent set of nearby features instead of each point's
+  /// tiny query box independently including or excluding nearby fragments.
+  Future<List<LatLng>> snapStroke(List<LatLng> points, {double maxMeters = 50}) async {
+    if (points.isEmpty) return points;
+    final graph = await _buildGraph(await _rectAroundAll(points));
+    final out = <LatLng>[];
+    _Seg? currentSeg;
+    for (final p in points) {
+      final result = graph._nearestSegSticky(p, currentSeg);
+      if (result != null && result.meters <= maxMeters) {
+        out.add(result.point);
+        currentSeg = result.seg;
+      } else {
+        out.add(p);
+        // Lost the trail (nothing close enough) — free to pick up any
+        // nearby edge fresh next point, rather than staying stuck trying to
+        // match an edge that's no longer actually close.
+        currentSeg = null;
+      }
+    }
+    return out;
+  }
+
+  /// Screen-space rect enclosing every one of [points] (with padding), same
+  /// idea as [_rectAround] but for an arbitrary trace instead of just two
+  /// endpoints — used by [snapStroke] so the whole stroke is queried at once.
+  Future<Rect> _rectAroundAll(List<LatLng> points) async {
+    final screens = await Future.wait(points.map(controller.toScreenLocation));
+    var minX = screens.first.x.toDouble(), maxX = minX;
+    var minY = screens.first.y.toDouble(), maxY = minY;
+    for (final s in screens.skip(1)) {
+      minX = math.min(minX, s.x.toDouble());
+      maxX = math.max(maxX, s.x.toDouble());
+      minY = math.min(minY, s.y.toDouble());
+      maxY = math.max(maxY, s.y.toDouble());
+    }
+    const pad = 350.0;
+    return Rect.fromLTRB(minX - pad, minY - pad, maxX + pad, maxY + pad);
   }
 
   /// Routes between two existing anchors WITHOUT re-snapping them (used when
@@ -771,6 +820,37 @@ class _Graph {
   ({LatLng point, double meters})? nearestOnEdge(LatLng p) {
     final r = _nearestSeg(p);
     return r == null ? null : (point: r.point, meters: r.meters);
+  }
+
+  /// Margin (m) [preferred] is allowed to lose by and still be kept — see
+  /// [_nearestSegSticky].
+  static const _stickyHysteresisMeters = 8.0;
+
+  /// Like [_nearestSeg], but keeps [preferred] (the edge the previous point
+  /// in a stroke snapped to) unless a different edge beats it by more than
+  /// [_stickyHysteresisMeters] — small enough that switching to a genuinely
+  /// different, closer trail still happens (the author really did move onto
+  /// another path), but large enough that two trails crossing or running
+  /// close together don't cause every other point to flip between them.
+  ({LatLng point, double meters, _Seg seg})? _nearestSegSticky(LatLng p, _Seg? preferred) {
+    ({LatLng point, double meters, _Seg seg})? best;
+    ({LatLng point, double meters})? onPreferred;
+    for (final seg in _segments) {
+      final r = _nearestOnSegment(p, seg.a, seg.b);
+      if (best == null || r.meters < best.meters) {
+        best = (point: r.point, meters: r.meters, seg: seg);
+      }
+      if (identical(seg, preferred)) {
+        onPreferred = (point: r.point, meters: r.meters);
+      }
+    }
+    if (preferred != null &&
+        onPreferred != null &&
+        best != null &&
+        onPreferred.meters <= best.meters + _stickyHysteresisMeters) {
+      return (point: onPreferred.point, meters: onPreferred.meters, seg: preferred);
+    }
+    return best;
   }
 
   static String edgeId(String a, String b) =>
