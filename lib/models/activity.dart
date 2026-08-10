@@ -173,3 +173,70 @@ class WalkCheckpoint {
         track: _decodeTrack(r['track'] as String?),
       );
 }
+
+/// A checkpoint of an in-progress *recording* (RecordTrailScreen), written
+/// periodically and on pause so a recording session interrupted by the app
+/// being killed — not a deliberate Stop — can be resumed instead of losing
+/// the whole walk. Unlike [WalkCheckpoint], there's no trail id to key this
+/// by yet (the trail doesn't exist until the recording finishes and is
+/// saved), so only one recording checkpoint is ever kept at a time — the app
+/// only supports recording one trail at a time anyway. Cleared once the
+/// recording ends normally (deliberate Stop) or the walker discards it.
+class RecordingCheckpoint {
+  RecordingCheckpoint({
+    required this.regionId,
+    required this.startedAt,
+    this.pausedTotalSec = 0,
+    this.wasPaused = false,
+    required this.walkedMeters,
+    required this.elevGainMeters,
+    required this.path,
+    List<TrackPoint>? track,
+  }) : track = track ?? [];
+
+  final String regionId;
+  final DateTime startedAt;
+  final int pausedTotalSec;
+  final bool wasPaused;
+  final double walkedMeters;
+  final double elevGainMeters;
+
+  /// The recorded (raw, not yet cleaned/simplified) path so far.
+  final List<LatLng> path;
+  final List<TrackPoint> track;
+
+  static String _encodePath(List<LatLng> path) =>
+      jsonEncode(path.map((p) => [p.latitude, p.longitude]).toList());
+
+  static List<LatLng> _decodePath(String? s) {
+    if (s == null || s.isEmpty) return [];
+    return [
+      for (final e in jsonDecode(s) as List)
+        LatLng((e[0] as num).toDouble(), (e[1] as num).toDouble()),
+    ];
+  }
+
+  Map<String, Object?> toRow() => {
+        'region_id': regionId,
+        'started_at': startedAt.millisecondsSinceEpoch,
+        'paused_total_sec': pausedTotalSec,
+        'was_paused': wasPaused ? 1 : 0,
+        'walked_meters': walkedMeters,
+        'elev_gain_meters': elevGainMeters,
+        'path': _encodePath(path),
+        'track': _encodeTrack(track),
+        'updated_at': DateTime.now().millisecondsSinceEpoch,
+      };
+
+  factory RecordingCheckpoint.fromRow(Map<String, Object?> r) =>
+      RecordingCheckpoint(
+        regionId: (r['region_id'] as String?) ?? 'coquitlam',
+        startedAt: DateTime.fromMillisecondsSinceEpoch(r['started_at'] as int),
+        pausedTotalSec: (r['paused_total_sec'] as int?) ?? 0,
+        wasPaused: (r['was_paused'] as int?) == 1,
+        walkedMeters: (r['walked_meters'] as num?)?.toDouble() ?? 0,
+        elevGainMeters: (r['elev_gain_meters'] as num?)?.toDouble() ?? 0,
+        path: _decodePath(r['path'] as String?),
+        track: _decodeTrack(r['track'] as String?),
+      );
+}

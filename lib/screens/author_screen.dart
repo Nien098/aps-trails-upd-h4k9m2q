@@ -1697,7 +1697,15 @@ class _ModeBar extends StatelessWidget {
     // rows have nowhere to grow, and "Draw path"/"Add cue" wrap down to one
     // character per line instead of just growing taller. Clamped rather
     // than disabled outright — 1.3x still gives real accessibility headroom,
-    // just not enough to break the layout.
+    // just not enough to break the layout. The segmented button now also
+    // gets its own full-width row (see below) rather than sharing one with
+    // four other icon buttons — on a narrower phone, or any phone at a
+    // large system font size, that left it almost no room and its labels
+    // wrapped one character per line ("Draw path" as "D/r/a/w"). Splitting
+    // the icon buttons onto their own row above fixes that regardless of
+    // text scale, instead of just further lowering the clamp (which would
+    // shrink accessibility headroom without addressing the real cause: not
+    // enough width, not too-large text).
     return MediaQuery.withClampedTextScaling(
       maxScaleFactor: 1.3,
       child: Card(
@@ -1707,10 +1715,6 @@ class _ModeBar extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              // A real Row slot for the collapse/hide icons (stacked
-              // vertically, beside the segmented button) rather than
-              // absolutely-positioned overlay icons — those sat right on
-              // top of the "Add cue" segment and looked cramped.
               Row(
                 children: [
                   IconButton(
@@ -1719,61 +1723,58 @@ class _ModeBar extends StatelessWidget {
                     icon: const Icon(Icons.auto_awesome),
                     onPressed: onGenerate,
                   ),
-                IconButton(
-                  visualDensity: VisualDensity.compact,
-                  tooltip: drawBoundaryActive
-                      ? 'Cancel drawing boundary area'
-                      : 'Draw a boundary area to constrain generation',
-                  isSelected: drawBoundaryActive,
-                  icon: const Icon(Icons.draw),
-                  onPressed: onToggleDrawBoundary,
-                ),
-                Expanded(
-                  child: Center(
-                    child: SegmentedButton<bool>(
-                      showSelectedIcon: false,
-                      segments: const [
-                        ButtonSegment(
-                            value: false,
-                            icon: Icon(Icons.timeline),
-                            label: Text('Draw path')),
-                        ButtonSegment(
-                            value: true,
-                            icon: Icon(Icons.add_location_alt),
-                            label: Text('Add cue')),
-                      ],
-                      selected: {cueMode},
-                      onSelectionChanged: (s) => onModeChanged(s.first),
-                    ),
+                  IconButton(
+                    visualDensity: VisualDensity.compact,
+                    tooltip: drawBoundaryActive
+                        ? 'Cancel drawing boundary area'
+                        : 'Draw a boundary area to constrain generation',
+                    isSelected: drawBoundaryActive,
+                    icon: const Icon(Icons.draw),
+                    onPressed: onToggleDrawBoundary,
                   ),
-                ),
-                Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    IconButton(
-                      visualDensity: VisualDensity.compact,
-                      constraints: const BoxConstraints(),
-                      padding: const EdgeInsets.all(4),
-                      iconSize: 20,
-                      tooltip: expanded ? 'Show less' : 'Show more',
-                      icon: Icon(
-                          expanded ? Icons.unfold_less : Icons.unfold_more),
-                      onPressed: () => onExpandedChanged(!expanded),
-                    ),
-                    IconButton(
-                      visualDensity: VisualDensity.compact,
-                      constraints: const BoxConstraints(),
-                      padding: const EdgeInsets.all(4),
-                      iconSize: 20,
-                      tooltip:
-                          'Hide — tap the icon in the corner to bring it back',
-                      icon: const Icon(Icons.close),
-                      onPressed: onHide,
-                    ),
+                  const Spacer(),
+                  IconButton(
+                    visualDensity: VisualDensity.compact,
+                    constraints: const BoxConstraints(),
+                    padding: const EdgeInsets.all(4),
+                    iconSize: 20,
+                    tooltip: expanded ? 'Show less' : 'Show more',
+                    icon: Icon(
+                        expanded ? Icons.unfold_less : Icons.unfold_more),
+                    onPressed: () => onExpandedChanged(!expanded),
+                  ),
+                  IconButton(
+                    visualDensity: VisualDensity.compact,
+                    constraints: const BoxConstraints(),
+                    padding: const EdgeInsets.all(4),
+                    iconSize: 20,
+                    tooltip:
+                        'Hide — tap the icon in the corner to bring it back',
+                    icon: const Icon(Icons.close),
+                    onPressed: onHide,
+                  ),
+                ],
+              ),
+              // Its own row, full width — see the comment above this method
+              // for why this used to share a row with four other buttons.
+              SizedBox(
+                width: double.infinity,
+                child: SegmentedButton<bool>(
+                  showSelectedIcon: false,
+                  segments: const [
+                    ButtonSegment(
+                        value: false,
+                        icon: Icon(Icons.timeline),
+                        label: Text('Draw path')),
+                    ButtonSegment(
+                        value: true,
+                        icon: Icon(Icons.add_location_alt),
+                        label: Text('Add cue')),
                   ],
+                  selected: {cueMode},
+                  onSelectionChanged: (s) => onModeChanged(s.first),
                 ),
-              ],
-            ),
+              ),
             const SizedBox(height: 8),
             // Live planned length of the trail as it's drawn.
             Row(

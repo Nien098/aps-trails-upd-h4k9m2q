@@ -17,7 +17,7 @@ class TrailStore {
     final dir = await getDatabasesPath();
     _db = await openDatabase(
       p.join(dir, 'trailguide.db'),
-      version: 8,
+      version: 9,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE trails (
@@ -36,6 +36,7 @@ class TrailStore {
         ''');
         await _createActivities(db);
         await _createWalkProgress(db);
+        await _createRecordingProgress(db);
       },
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) {
@@ -65,6 +66,9 @@ class TrailStore {
         }
         if (oldVersion < 8) {
           await _createWalkProgress(db);
+        }
+        if (oldVersion < 9) {
+          await _createRecordingProgress(db);
         }
       },
     );
@@ -203,6 +207,43 @@ class TrailStore {
   Future<void> clearWalkCheckpoint(int trailId) async {
     final db = await _database;
     await db.delete('walk_progress', where: 'trail_id = ?', whereArgs: [trailId]);
+  }
+
+  /// One row, no key needed — only one recording can ever be in progress.
+  static Future<void> _createRecordingProgress(Database db) async {
+    await db.execute('''
+      CREATE TABLE recording_progress (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        region_id TEXT NOT NULL DEFAULT 'coquitlam',
+        started_at INTEGER NOT NULL,
+        paused_total_sec INTEGER NOT NULL DEFAULT 0,
+        was_paused INTEGER NOT NULL DEFAULT 0,
+        walked_meters REAL NOT NULL DEFAULT 0,
+        elev_gain_meters REAL NOT NULL DEFAULT 0,
+        path TEXT NOT NULL,
+        track TEXT,
+        updated_at INTEGER NOT NULL
+      )
+    ''');
+  }
+
+  /// Upserts the single in-progress-recording checkpoint.
+  Future<void> saveRecordingCheckpoint(RecordingCheckpoint c) async {
+    final db = await _database;
+    await db.insert('recording_progress', {'id': 1, ...c.toRow()},
+        conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+
+  Future<RecordingCheckpoint?> loadRecordingCheckpoint() async {
+    final db = await _database;
+    final rows = await db.query('recording_progress', limit: 1);
+    if (rows.isEmpty) return null;
+    return RecordingCheckpoint.fromRow(rows.first);
+  }
+
+  Future<void> clearRecordingCheckpoint() async {
+    final db = await _database;
+    await db.delete('recording_progress');
   }
 
   Trail _fromRow(Map<String, Object?> r) {

@@ -47,6 +47,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     // racing a second dialog if a shared file is also pending.
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       await _checkResume();
+      if (mounted) await _checkResumeRecording();
       if (mounted) await _checkImport();
     });
     // Quiet on-launch check; downloads automatically if a newer build exists
@@ -207,15 +208,23 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     if (fix == true) await NativeBridge.requestIgnoreBatteryOptimizations();
   }
 
-  Future<void> _recordTrail() async {
+  Future<void> _recordTrail({RecordingCheckpoint? resume}) async {
     await _maybeWarnBattery();
     if (!mounted) return;
+    final region = resume != null ? regionById(resume.regionId) : _activeRegion;
     final draft = await Navigator.push<Trail>(
       context,
       MaterialPageRoute(
-          builder: (_) => RecordTrailScreen(region: _activeRegion)),
+          builder: (_) => RecordTrailScreen(region: region, resume: resume)),
     );
     if (draft == null || !mounted) return;
+    await _finishRecordedTrail(draft);
+  }
+
+  /// Shared by a fresh recording and one resumed from a crash checkpoint:
+  /// hands the just-recorded draft to the author screen for review/save,
+  /// then logs it as an Activity against the trail's now-real id.
+  Future<void> _finishRecordedTrail(Trail draft) async {
     final saved = await Navigator.push<bool>(
       context,
       MaterialPageRoute(builder: (_) => AuthorScreen(trail: draft)),
@@ -237,7 +246,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       ));
       await Settings.instance.addWalk(draft.walkedMeters, draft.elevGainMeters);
     }
-    if (saved == true) setState(_reload);
+    if (saved == true && mounted) setState(_reload);
   }
 
   Future<void> _edit(Trail trail) async {
@@ -308,6 +317,42 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       if (mounted) setState(_reload);
     } else {
       await TrailStore.instance.clearWalkCheckpoint(cp.trailId);
+    }
+  }
+
+  /// Same idea as [_checkResume], but for an in-progress *recording*
+  /// (RecordTrailScreen) interrupted before a deliberate Stop — see
+  /// [RecordingCheckpoint]. Unlike a walk checkpoint, there's no trail to
+  /// look up (the trail doesn't exist yet), so the dialog just names the
+  /// region it was recorded in.
+  Future<void> _checkResumeRecording() async {
+    final cp = await TrailStore.instance.loadRecordingCheckpoint();
+    if (cp == null || !mounted) return;
+    final region = regionById(cp.regionId);
+    final resume = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Resume unfinished recording?'),
+        content: Text(
+            'It looks like a trail recording in ${region.name} didn\'t get '
+            'a chance to finish properly last time. Pick up where you left '
+            'off?'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Discard')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Resume')),
+        ],
+      ),
+    );
+    if (!mounted) return;
+    if (resume == true) {
+      await _recordTrail(resume: cp);
+    } else {
+      await TrailStore.instance.clearRecordingCheckpoint();
     }
   }
 

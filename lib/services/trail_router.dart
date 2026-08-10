@@ -434,7 +434,19 @@ class TrailRouter {
   /// for same-way tile-split gaps only) was too tight for that; widened to
   /// cover typical junction slop without merging genuinely distinct nearby
   /// trails (e.g. adjacent switchback legs) into one.
-  static const _mergeToleranceMeters = 8.0;
+  ///
+  /// Measured directly against this app's real downloaded map data (not
+  /// guessed): most gaps between disconnected trail fragments in a sparsely-
+  /// mapped area (Riverview Forest, Coquitlam) are 150-700m — genuinely
+  /// separate, unconnected trails in OpenStreetMap's data, not a seam this
+  /// number should ever bridge (doing so would silently invent a fake
+  /// straight-line "trail" between two unrelated real ones — the same class
+  /// of bug already found and fixed in the record-mode path-snapping code).
+  /// A small number of close-but-separate fragments (~20-28m apart) *were*
+  /// found and are plausibly the same real trail clipped oddly at a tile
+  /// boundary — 24m safely closes those without approaching the 150m+ range
+  /// where a "gap" is actually just two different trails.
+  static const _mergeToleranceMeters = 24.0;
 
   /// Queries every walkable-candidate layer (see [_roadSourceLayers]) and
   /// adds each returned feature's geometry to [graph], skipping any feature

@@ -8,7 +8,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:vibration/vibration.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
-import '../models/activity.dart' show TrackPoint;
+import '../models/activity.dart' show RecordingCheckpoint, TrackPoint;
 import '../models/region.dart';
 import '../models/trail.dart';
 import '../services/crash_log.dart';
@@ -19,6 +19,7 @@ import '../services/route_layer.dart';
 import '../services/settings.dart';
 import '../services/stillness_watchdog.dart';
 import '../services/trail_router.dart';
+import '../services/trail_store.dart';
 import '../widgets/base_map.dart';
 import '../widgets/big_action_card.dart';
 
@@ -27,8 +28,15 @@ import '../widgets/big_action_card.dart';
 /// actually walked, matching the direction she travelled — ready to save and
 /// use like any hand-drawn trail.
 class RecordTrailScreen extends StatefulWidget {
-  const RecordTrailScreen({super.key, required this.region});
+  const RecordTrailScreen({super.key, required this.region, this.resume});
   final Region region;
+
+  /// A crash-safe checkpoint to resume from (see [RecordingCheckpoint])
+  /// instead of starting a fresh recording — set when the walker chose
+  /// "Resume" from the unfinished-recording prompt HomeScreen shows after
+  /// the app was reopened following an interruption (killed process, phone
+  /// restart) rather than a deliberate Stop.
+  final RecordingCheckpoint? resume;
 
   @override
   State<RecordTrailScreen> createState() => _RecordTrailScreenState();
@@ -39,6 +47,7 @@ class _RecordTrailScreenState extends State<RecordTrailScreen> {
   RouteLayer? _route;
   StreamSubscription<Position>? _sub;
   Timer? _clock;
+  Timer? _checkpointTimer;
   final List<LatLng> _path = [];
   LatLng? _last;
   double _meters = 0;
@@ -46,6 +55,14 @@ class _RecordTrailScreenState extends State<RecordTrailScreen> {
   bool _stopping = false;
   bool _cleaning = false;
   String _status = 'Getting your location…';
+
+  // --- Pause/resume state --- (mirrors GuideScreen's identical mechanism;
+  // in-app only here, not wired to the background-notification pause/resume
+  // action GuideScreen also supports — recording is always a foreground,
+  // actively-walked-with-phone-in-hand session, unlike a long guided walk.)
+  bool _paused = false;
+  DateTime? _pausedAt;
+  Duration _pausedTotal = Duration.zero;
 
   /// Timestamped/elevation track and climb total for this walk — same
   /// fields GuideScreen logs as an Activity, so recording a trail also
@@ -57,8 +74,15 @@ class _RecordTrailScreenState extends State<RecordTrailScreen> {
   double? _smoothAlt;
   double? _elevRef;
 
-  int get _elapsedSec =>
-      _startedAt == null ? 0 : DateTime.now().difference(_startedAt!).inSeconds;
+  int get _elapsedSec {
+    if (_startedAt == null) return 0;
+    final pausedSoFar = _pausedTotal +
+        (_paused && _pausedAt != null
+            ? DateTime.now().difference(_pausedAt!)
+            : Duration.zero);
+    return DateTime.now().difference(_startedAt!).inSeconds -
+        pausedSoFar.inSeconds;
+  }
 
   final FlutterTts _tts = FlutterTts();
   late final StillnessWatchdog _watchdog =
@@ -69,6 +93,21 @@ class _RecordTrailScreenState extends State<RecordTrailScreen> {
     super.initState();
     WakelockPlus.enable();
     NativeBridge.onAcknowledgeStillness = _acknowledgeStillness;
+    final r = widget.resume;
+    if (r != null) {
+      _path.addAll(r.path);
+      if (_path.isNotEmpty) _last = _path.last;
+      _meters = r.walkedMeters;
+      _elevGain = r.elevGainMeters;
+      _track.addAll(r.track);
+      _startedAt = r.startedAt;
+      _pausedTotal = Duration(seconds: r.pausedTotalSec);
+      _paused = r.wasPaused;
+      // Same reasoning as GuideScreen's identical seeding: a resumed-while-
+      // paused checkpoint needs a real _pausedAt too, or the elapsed-time
+      // math (and a later Resume tap) would read a null gap as zero.
+      _pausedAt = _paused ? DateTime.now() : null;
+    }
     _initTts();
     _start();
   }
@@ -102,16 +141,70 @@ class _RecordTrailScreenState extends State<RecordTrailScreen> {
       return;
     }
     setState(() => _status = 'Recording');
-    _startedAt = DateTime.now();
+    _startedAt ??= DateTime.now(); // already set when resuming a checkpoint
     await _ensureBackgroundCapability();
     await NativeBridge.startTracking();
     _sub = Geolocator.getPositionStream(
       locationSettings: const LocationSettings(
           accuracy: LocationAccuracy.best, distanceFilter: 3),
     ).listen(_onPosition, onError: _onPositionError);
+    // Resumed into a paused checkpoint — freeze immediately rather than
+    // silently resuming GPS tracking without a fresh Resume tap.
+    if (_paused) _sub?.pause();
     _clock = Timer.periodic(const Duration(seconds: 1), (_) {
       if (mounted) setState(() {});
     });
+    _checkpointTimer =
+        Timer.periodic(const Duration(seconds: 15), (_) => _writeCheckpoint());
+  }
+
+  /// Checkpoints the recording so far so it can be resumed if the app is
+  /// killed before a deliberate Stop — see [RecordingCheckpoint]. Called
+  /// periodically and on pause/resume, mirroring GuideScreen's identical
+  /// [_writeCheckpoint].
+  Future<void> _writeCheckpoint() async {
+    if (_startedAt == null) return;
+    try {
+      await TrailStore.instance.saveRecordingCheckpoint(RecordingCheckpoint(
+        regionId: widget.region.id,
+        startedAt: _startedAt!,
+        pausedTotalSec: _pausedTotal.inSeconds,
+        wasPaused: _paused,
+        walkedMeters: _meters,
+        elevGainMeters: _elevGain,
+        path: _path,
+        track: _track,
+      ));
+    } catch (e, st) {
+      // A transient disk/sqflite error here shouldn't take down an
+      // in-progress recording — just means this checkpoint write is lost;
+      // the next periodic write (or the final clear on Stop) tries again.
+      CrashLog.log('Recording checkpoint write', e, st);
+    }
+  }
+
+  void _pauseRecording() {
+    if (_paused || _startedAt == null) return;
+    setState(() {
+      _paused = true;
+      _pausedAt = DateTime.now();
+    });
+    _sub?.pause();
+    _watchdog.pause();
+    _tts.stop();
+    _writeCheckpoint();
+  }
+
+  void _resumeRecording() {
+    if (!_paused) return;
+    setState(() {
+      _pausedTotal += DateTime.now().difference(_pausedAt ?? DateTime.now());
+      _paused = false;
+      _pausedAt = null;
+    });
+    _sub?.resume();
+    _watchdog.resume();
+    _writeCheckpoint();
   }
 
   /// See GuideScreen's identical handler for why this matters: without an
@@ -256,6 +349,9 @@ class _RecordTrailScreenState extends State<RecordTrailScreen> {
     if (c == null) return;
     _route = RouteLayer(c);
     await _route!.ensure();
+    // A resumed recording already has a path — draw it immediately instead
+    // of waiting for the next GPS fix to trigger the first draw.
+    if (_path.length >= 2) await _route!.setRoute(_path, '#1565C0');
   }
 
   Future<void> _stop() async {
@@ -263,10 +359,14 @@ class _RecordTrailScreenState extends State<RecordTrailScreen> {
     setState(() => _stopping = true);
     await _sub?.cancel();
     _clock?.cancel();
+    _checkpointTimer?.cancel();
     _watchdog.dispose();
     NativeBridge.cancelNudgeNotification();
     await NativeBridge.stopTracking();
     await WakelockPlus.disable();
+    // A deliberate Stop — successful or a too-short recording — always
+    // clears the checkpoint; there's nothing left to crash-resume into.
+    await TrailStore.instance.clearRecordingCheckpoint();
     if (_path.length < 2) {
       if (mounted) Navigator.pop(context);
       return;
@@ -332,6 +432,7 @@ class _RecordTrailScreenState extends State<RecordTrailScreen> {
   void dispose() {
     _sub?.cancel();
     _clock?.cancel();
+    _checkpointTimer?.cancel();
     _watchdog.dispose();
     _tts.stop();
     if (identical(NativeBridge.onAcknowledgeStillness, _acknowledgeStillness)) {
@@ -356,7 +457,8 @@ class _RecordTrailScreenState extends State<RecordTrailScreen> {
           children: [
             BaseMap(
               region: widget.region,
-              initialCamera: CameraPosition(target: widget.region.center, zoom: 16),
+              initialCamera: CameraPosition(
+                  target: _last ?? widget.region.center, zoom: 16),
               onMapCreated: (c) => _c = c,
               onStyleLoaded: _onStyleLoaded,
               myLocationEnabled: true,
@@ -391,8 +493,9 @@ class _RecordTrailScreenState extends State<RecordTrailScreen> {
                             Text(
                               _startedAt == null
                                   ? _status
-                                  : '${Settings.formatDuration(DateTime.now().difference(_startedAt!).inSeconds)}'
-                                      '  ·  ${Settings.instance.formatDistance(_meters)}',
+                                  : '${Settings.formatDuration(_elapsedSec)}'
+                                      '  ·  ${Settings.instance.formatDistance(_meters)}'
+                                      '${_paused ? '  ·  Paused' : ''}',
                               style: const TextStyle(
                                   fontSize: 15, color: Colors.black54),
                             ),
@@ -408,6 +511,23 @@ class _RecordTrailScreenState extends State<RecordTrailScreen> {
                           ],
                         ),
                       ),
+                      if (_startedAt != null) ...[
+                        FilledButton.icon(
+                          style: FilledButton.styleFrom(
+                            backgroundColor: const Color(0xFFEF6C00),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 14, vertical: 12),
+                          ),
+                          onPressed: _stopping
+                              ? null
+                              : (_paused ? _resumeRecording : _pauseRecording),
+                          icon: Icon(_paused ? Icons.play_arrow : Icons.pause,
+                              size: 24),
+                          label: Text(_paused ? 'Resume' : 'Pause',
+                              style: const TextStyle(fontSize: 16)),
+                        ),
+                        const SizedBox(width: 8),
+                      ],
                       FilledButton.icon(
                         style: FilledButton.styleFrom(
                           backgroundColor: const Color(0xFFC62828),
