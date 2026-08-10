@@ -462,6 +462,13 @@ class TrailRouter {
   /// [rippleRealign].
   static const _rippleStopMeters = 1.5;
 
+  /// Hard cap (m, each direction) on how far a single grab-and-pull can
+  /// ripple, regardless of the [_rippleStopMeters] early-exit — see
+  /// [rippleRealign]'s doc for why this exists as a second, independent
+  /// limit. Also used by [author_screen.dart]'s live preview so what's
+  /// shown while dragging matches what a release can actually change.
+  static const rippleMaxDistanceMeters = 40.0;
+
   /// Applies a manual correction to one interior point of a drawn [segment]
   /// (the author dragged [grabIndex] to [newPosition]), then ripples that
   /// correction out to its neighbours on each side — re-snapping each in
@@ -472,9 +479,23 @@ class TrailRouter {
   /// everything beyond it in that direction are left untouched: the author
   /// was tracing a real trail, so a stretch that already matches the trail
   /// doesn't need correcting, and stopping there means one manual nudge
-  /// only affects the stretch that was actually off. Never crosses
-  /// [segment]'s own first/last point (its anchors) — those belong to the
-  /// neighbouring segment too, so moving them here could desync the two.
+  /// only affects the stretch that was actually off.
+  ///
+  /// Also hard-capped at [rippleMaxDistanceMeters] of original-path distance
+  /// from the grab point in each direction, independent of whether the
+  /// "already aligned" condition ever triggers — on a long, sparsely
+  /// anchored segment (e.g. a whole auto-generated loop with only two real
+  /// anchors), leaving the ripple otherwise unbounded meant one small local
+  /// nudge could, in principle, keep re-snapping for the segment's entire
+  /// length before happening to land within the stop margin somewhere far
+  /// away, producing edits far larger and less predictable than the actual
+  /// problem spot. Grabbing again right where the first ripple stopped
+  /// still lets an author work along a longer distorted stretch in a few
+  /// bounded steps instead.
+  ///
+  /// Never crosses [segment]'s own first/last point (its anchors) — those
+  /// belong to the neighbouring segment too, so moving them here could
+  /// desync the two.
   Future<List<LatLng>> rippleRealign(
     List<LatLng> segment,
     int grabIndex,
@@ -492,7 +513,10 @@ class TrailRouter {
         (seed != null && seed.meters <= maxMeters) ? seed.point : newPosition;
 
     var currentSeg = seed?.seg;
+    var traveled = 0.0;
     for (var i = grabIndex + 1; i < out.length - 1; i++) {
+      traveled += metersBetween(segment[i - 1], segment[i]);
+      if (traveled > rippleMaxDistanceMeters) break;
       final r = graph._nearestSegSticky(segment[i], currentSeg);
       if (r == null || r.meters > maxMeters) break;
       if (metersBetween(r.point, segment[i]) <= _rippleStopMeters) break;
@@ -501,7 +525,10 @@ class TrailRouter {
     }
 
     currentSeg = seed?.seg;
+    traveled = 0.0;
     for (var i = grabIndex - 1; i > 0; i--) {
+      traveled += metersBetween(segment[i + 1], segment[i]);
+      if (traveled > rippleMaxDistanceMeters) break;
       final r = graph._nearestSegSticky(segment[i], currentSeg);
       if (r == null || r.meters > maxMeters) break;
       if (metersBetween(r.point, segment[i]) <= _rippleStopMeters) break;
