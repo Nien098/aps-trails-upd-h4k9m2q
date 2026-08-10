@@ -8,11 +8,11 @@ import 'geo.dart';
 import 'settings.dart';
 
 /// Which walkable surfaces auto-generation should prefer — see
-/// [TrailRouter.generate]'s `surface` param. [trails] means singletrack/park
-/// paths only (the `trails` + `sidewalks` style layers); [roads] means
-/// streets (the `roads-fill` + `sidewalks` layers); [mixed] is today's
-/// default — every walkable layer together, picking whatever's shortest
-/// regardless of surface.
+/// [TrailRouter.generate]'s `surface` param and [TrailRouter._includeFor].
+/// [trails] means singletrack/park paths only (plus sidewalks); [roads]
+/// means streets (plus sidewalks); [mixed] is today's default — every
+/// walkable surface together, picking whatever's shortest regardless of
+/// surface.
 enum Surface { trails, mixed, roads }
 
 /// A trail route generated automatically from the visible trail network.
@@ -73,8 +73,46 @@ class TrailRouter {
 
   final MapLibreMapController controller;
 
-  /// Style layers whose line geometry can be walked along.
-  static const _walkableLayers = ['trails', 'sidewalks', 'roads-fill'];
+  /// Every non-casing style layer that renders `roads` source-layer line
+  /// geometry — casing layers (e.g. `roads_major_casing_early`) deliberately
+  /// excluded since they render the *same* underlying features as their
+  /// paired fill layer purely for a wider-outline visual effect, which would
+  /// double-count every edge if both were queried. This list is generated
+  /// from the current style.json (see the node one-liner in the PR/commit
+  /// that added this), not hand-maintained — style layer *names* are a
+  /// presentation detail that can change with the basemap theme (as they
+  /// did when this app switched to Protomaps' official style), so which
+  /// *kind* of geometry counts as walkable is decided separately, from the
+  /// data itself (see [_isRoad]/[_isTrail]/[_isSidewalk]) — this list only
+  /// needs to cover every layer that could contain that data, not classify
+  /// it.
+  static const _roadSourceLayers = [
+    'roads_tunnels_other', 'roads_tunnels_minor', 'roads_tunnels_link',
+    'roads_tunnels_major', 'roads_tunnels_highway', 'roads_pier',
+    'roads_other', 'roads_link', 'roads_minor_service', 'roads_minor',
+    'roads_major', 'roads_highway', 'roads_rail',
+    'roads_bridges_other', 'roads_bridges_minor', 'roads_bridges_link',
+    'roads_bridges_major', 'roads_bridges_highway',
+  ];
+
+  static const _roadKinds = {'highway', 'major_road', 'medium_road', 'minor_road'};
+  static const _sidewalkDetails = {'sidewalk', 'crossing'};
+
+  static bool _isRoad(Map<String, dynamic> props) => _roadKinds.contains(props['kind']);
+  static bool _isSidewalk(Map<String, dynamic> props) =>
+      props['kind'] == 'path' && _sidewalkDetails.contains(props['kind_detail']);
+  static bool _isTrail(Map<String, dynamic> props) =>
+      props['kind'] == 'path' && !_sidewalkDetails.contains(props['kind_detail']);
+
+  /// Which of [_isRoad]/[_isTrail]/[_isSidewalk] count as walkable for a
+  /// given [Surface] preference — sidewalks are always included regardless,
+  /// same as before this was data-driven (a sidewalk is a reasonable way to
+  /// walk whether you asked for "trails" or "roads").
+  static bool Function(Map<String, dynamic>) _includeFor(Surface s) => switch (s) {
+        Surface.trails => (p) => _isTrail(p) || _isSidewalk(p),
+        Surface.roads => (p) => _isRoad(p) || _isSidewalk(p),
+        Surface.mixed => (p) => _isRoad(p) || _isTrail(p) || _isSidewalk(p),
+      };
 
   /// Max distance (m) a tap may be from a trail to snap onto it.
   static const _snapMeters = 30.0;
@@ -185,8 +223,8 @@ class TrailRouter {
         ? await _screenRectForPolygon(boundaryPolygon)
         : viewport;
 
-    Future<GeneratedRoute?> attempt(List<String> layers) async {
-      final graph = await _buildGraph(rect, layers: layers);
+    Future<GeneratedRoute?> attempt(Surface s) async {
+      final graph = await _buildGraph(rect, surface: s);
       if (boundaryPolygon != null) graph.restrictToPolygon(boundaryPolygon);
 
       final start = graph.spliceTempNode(center, 'GEN');
@@ -236,18 +274,13 @@ class TrailRouter {
       );
     }
 
-    final preferredLayers = switch (surface) {
-      Surface.trails => const ['trails', 'sidewalks'],
-      Surface.roads => const ['roads-fill', 'sidewalks'],
-      Surface.mixed => _walkableLayers,
-    };
-    final primary = await attempt(preferredLayers);
+    final primary = await attempt(surface);
     if (primary != null || surface == Surface.mixed) return primary;
 
     // The preferred surface alone couldn't even get started here — fall
     // back to every walkable layer rather than reporting "no trails found"
     // when a real (mixed-surface) route is actually available.
-    final fallback = await attempt(_walkableLayers);
+    final fallback = await attempt(Surface.mixed);
     if (fallback == null) return null;
     return GeneratedRoute(
       path: fallback.path,
@@ -369,9 +402,9 @@ class TrailRouter {
     return line;
   }
 
-  Future<_Graph> _buildGraph(Rect rect, {List<String> layers = _walkableLayers}) async {
+  Future<_Graph> _buildGraph(Rect rect, {Surface surface = Surface.mixed}) async {
     final graph = _Graph();
-    await _addFeaturesToGraph(graph, rect, layers, isRoad: false);
+    await _addFeaturesToGraph(graph, rect, include: _includeFor(surface));
     // A single real-world trail can arrive as several separate LineString
     // features (e.g. split around a line-label's placement point, or by tile
     // clipping) whose "shared" endpoint differs by a few metres between
@@ -384,14 +417,13 @@ class TrailRouter {
     return graph;
   }
 
-  /// Same idea as [_buildGraph], but keeps roads and trails/sidewalks
-  /// tagged separately (see [_Graph.roadNodeKeys]) — used by [nearestRoad],
-  /// which needs to tell the two apart rather than treat them as one
-  /// undifferentiated walkable network.
+  /// Same idea as [_buildGraph], but every edge is tagged isRoad/not per its
+  /// own data (see [_isRoad]) rather than being treated as one
+  /// undifferentiated walkable network — used by [nearestRoad], which needs
+  /// to tell the two apart.
   Future<_Graph> _buildTaggedGraph(Rect rect) async {
     final graph = _Graph();
-    await _addFeaturesToGraph(graph, rect, ['trails', 'sidewalks'], isRoad: false);
-    await _addFeaturesToGraph(graph, rect, ['roads-fill'], isRoad: true);
+    await _addFeaturesToGraph(graph, rect, include: _includeFor(Surface.mixed));
     graph._mergeNearbyNodes(_mergeToleranceMeters);
     return graph;
   }
@@ -404,20 +436,29 @@ class TrailRouter {
   /// trails (e.g. adjacent switchback legs) into one.
   static const _mergeToleranceMeters = 8.0;
 
+  /// Queries every walkable-candidate layer (see [_roadSourceLayers]) and
+  /// adds each returned feature's geometry to [graph], skipping any feature
+  /// [include] rejects (null means "everything roads/trails/sidewalks" —
+  /// see [_includeFor]) and tagging isRoad from the feature's own `kind`
+  /// (see [_isRoad]), not from which style layer it came from.
   Future<void> _addFeaturesToGraph(
     _Graph graph,
-    Rect rect,
-    List<String> layers, {
-    required bool isRoad,
+    Rect rect, {
+    bool Function(Map<String, dynamic> props)? include,
   }) async {
-    final raw = await controller.queryRenderedFeaturesInRect(rect, layers, null);
+    final raw =
+        await controller.queryRenderedFeaturesInRect(rect, _roadSourceLayers, null);
     for (final f in raw) {
       final feature = f is String ? jsonDecode(f) : f;
       if (feature is! Map) continue;
+      final props =
+          (feature['properties'] as Map?)?.cast<String, dynamic>() ?? const {};
+      if (include != null && !include(props)) continue;
       final geom = feature['geometry'];
       if (geom is! Map) continue;
       final type = geom['type'];
       final coords = geom['coordinates'];
+      final isRoad = _isRoad(props);
       if (type == 'LineString') {
         graph.addLine(coords, isRoad: isRoad);
       } else if (type == 'MultiLineString') {

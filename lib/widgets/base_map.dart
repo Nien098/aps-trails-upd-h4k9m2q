@@ -84,10 +84,23 @@ class _BaseMapState extends State<BaseMap> {
   }
 
   /// Applies the user's chosen colour/dash setting to the background map's
-  /// generic hiking-path layer ("trails" in style.json) — the "other trails
-  /// in the area" clutter, not a trail you've authored (those draw their own
-  /// per-trail colour on top, unaffected by this). Safe to call before the
-  /// style has loaded (no-op) or repeatedly (idempotent).
+  /// generic hiking-path layers — the "other trails in the area" clutter,
+  /// not a trail you've authored (those draw their own per-trail colour on
+  /// top, unaffected by this). Safe to call before the style has loaded
+  /// (no-op) or repeatedly (idempotent).
+  ///
+  /// Three layers, not one: the current style (Protomaps' official basemap
+  /// theme) splits path-like geometry into separate layers for normal/
+  /// bridge/tunnel rendering rather than one combined layer the way this
+  /// app's own earlier custom style did (that style named it plainly
+  /// "trails" — a name specific to that style, not a stable id this app can
+  /// rely on across basemap changes).
+  static const _pathLayerIds = [
+    'roads_other',
+    'roads_bridges_other',
+    'roads_tunnels_other',
+  ];
+
   void _onStyleLoaded() {
     _applyTrailLineStyle();
     widget.onStyleLoaded?.call();
@@ -96,14 +109,13 @@ class _BaseMapState extends State<BaseMap> {
   void _applyTrailLineStyle() {
     final c = _controller;
     if (c == null) return;
-    c.setLayerProperties(
-      'trails',
-      LineLayerProperties(
-        lineColor: Settings.instance.trailLineColor.value,
-        lineDasharray:
-            Settings.instance.trailLineDashed.value ? [2, 1.5] : null,
-      ),
+    final props = LineLayerProperties(
+      lineColor: Settings.instance.trailLineColor.value,
+      lineDasharray: Settings.instance.trailLineDashed.value ? [2, 1.5] : null,
     );
+    for (final id in _pathLayerIds) {
+      c.setLayerProperties(id, props);
+    }
   }
 
   KeyEventResult _onKey(FocusNode node, KeyEvent event) {
