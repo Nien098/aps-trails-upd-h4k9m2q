@@ -840,41 +840,81 @@ class _Graph {
   }
 
   /// Dijkstra between [from] and [to], each spliced onto its nearest trail.
-  /// Returns the followed polyline (including endpoints) or null if no path.
+  /// Returns the followed polyline (including endpoints), or null only if
+  /// neither endpoint could be spliced onto any trail geometry at all.
+  ///
+  /// [from] and [to] landing in different, disconnected pieces of the graph
+  /// (a real gap in the map data — a tile-boundary split too wide to bridge,
+  /// or a genuine break in the trail) no longer means giving up on the
+  /// whole segment and drawing one straight line from end to end, even
+  /// where 95% of that segment is sitting right on a perfectly good, fully-
+  /// mapped road. Instead this finds the closest pair of points across the
+  /// two disconnected pieces — one reachable from [from], one reachable
+  /// from [to] — follows real trail geometry up to each, and only bridges
+  /// the actual gap between them with a straight line. See [_closestBridge].
   List<LatLng>? route(LatLng from, LatLng to) {
     final startKey = spliceTempNode(from, 'FROM');
     final goalKey = spliceTempNode(to, 'TO');
     if (startKey.isEmpty || goalKey.isEmpty) return null;
 
-    final dist = <String, double>{startKey: 0};
-    final prev = <String, String>{};
-    final heap = _MinHeap()..push(startKey, 0);
+    final (dist, prev) = dijkstraTree(startKey);
+    if (dist.containsKey(goalKey)) {
+      final keys = tracePath(prev, startKey, goalKey);
+      return [from, for (final k in keys) nodes[k]!, to];
+    }
+    final bridged = _closestBridge(startKey, goalKey, dist, prev);
+    return bridged == null ? null : [from, ...bridged, to];
+  }
 
-    while (heap.isNotEmpty) {
-      final (node, d) = heap.pop();
-      if (node == goalKey) break;
-      if (d > (dist[node] ?? double.infinity)) continue;
-      for (final e in adj[node] ?? const <_Edge>[]) {
-        final nd = d + e.weight;
-        if (nd < (dist[e.to] ?? double.infinity)) {
-          dist[e.to] = nd;
-          prev[e.to] = node;
-          heap.push(e.to, nd);
+  /// Safety cap on the search in [_closestBridge] — a query rect can
+  /// legitimately return a few thousand graph nodes in a dense area; this
+  /// keeps the pairwise closest-point search from becoming a real cost on a
+  /// phone if both disconnected sides happen to be that large. Genuinely
+  /// exceeding it just falls back to the old "no path" behaviour for this
+  /// call, same as it always did — this is an enhancement over that
+  /// fallback, not a replacement safety net for it.
+  static const _maxBridgeSearchNodes = 1500;
+
+  /// [startKey] and [goalKey] are in different connected components (a real
+  /// gap). Finds the closest pair of nodes across the two reachable sets —
+  /// [distFromStart]/[prevFromStart] already computed by the caller — and
+  /// splices a straight line across just that gap, using real trail
+  /// geometry from [startKey] up to it and from it to [goalKey]. Returns
+  /// null if either reachable set is empty or over [_maxBridgeSearchNodes].
+  List<LatLng>? _closestBridge(String startKey, String goalKey,
+      Map<String, double> distFromStart, Map<String, String> prevFromStart) {
+    final (distFromGoal, prevFromGoal) = dijkstraTree(goalKey);
+    final fromKeys = distFromStart.keys.toList();
+    final goalKeys = distFromGoal.keys.toList();
+    if (fromKeys.isEmpty ||
+        goalKeys.isEmpty ||
+        fromKeys.length > _maxBridgeSearchNodes ||
+        goalKeys.length > _maxBridgeSearchNodes) {
+      return null;
+    }
+
+    String? bestA, bestB;
+    var bestGap = double.infinity;
+    for (final a in fromKeys) {
+      final pa = nodes[a]!;
+      for (final b in goalKeys) {
+        final d = metersBetween(pa, nodes[b]!);
+        if (d < bestGap) {
+          bestGap = d;
+          bestA = a;
+          bestB = b;
         }
       }
     }
+    if (bestA == null || bestB == null) return null;
 
-    if (!dist.containsKey(goalKey)) return null;
-
-    final keys = <String>[];
-    String? k = goalKey;
-    while (k != null) {
-      keys.insert(0, k);
-      if (k == startKey) break;
-      k = prev[k];
-    }
-    if (keys.isEmpty || keys.first != startKey) return null;
-    return [from, for (final key in keys) nodes[key]!, to];
+    final toA = tracePath(prevFromStart, startKey, bestA);
+    final fromB = tracePath(prevFromGoal, goalKey, bestB);
+    if (toA.isEmpty || fromB.isEmpty) return null;
+    return [
+      for (final k in toA) nodes[k]!,
+      for (final k in fromB.reversed) nodes[k]!,
+    ];
   }
 
   /// Dijkstra from [from] (spliced onto the graph) that stops at the first
