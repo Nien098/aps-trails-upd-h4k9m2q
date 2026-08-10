@@ -205,10 +205,46 @@ class _AuthorScreenState extends State<AuthorScreen> {
         }
       }
       if (idx < 0) idx = path.length - 1;
-      segs.add(path.sublist(cursor, idx + 1));
+      segs.add(_densify(path.sublist(cursor, idx + 1)));
       cursor = idx;
     }
     return segs;
+  }
+
+  /// Max real-world gap (m) [_densify] allows between consecutive points of
+  /// an editable segment.
+  static const _maxEditVertexGapMeters = 8.0;
+
+  /// Inserts straight-line-interpolated points along [seg] wherever two
+  /// consecutive points are more than [_maxEditVertexGapMeters] apart, so
+  /// every stretch of an editable segment has real, grabbable vertices at
+  /// roughly that spacing — without this, a stretch of real trail data with
+  /// few source vertices (a long straight OSM way, say) would leave the
+  /// line-adjust tool nothing to grab there, forcing a correction to land on
+  /// whichever distant vertex happens to exist instead of near the actual
+  /// problem spot. Purely a display/edit-time densification: every inserted
+  /// point sits exactly on the straight line between its two real
+  /// neighbours, so it doesn't change the path's shape, only how finely it
+  /// can be grabbed — [TrailRouter.generate]'s own routing/pathfinding is
+  /// untouched, this only runs on the result once it's handed to the editor.
+  List<LatLng> _densify(List<LatLng> seg) {
+    if (seg.length < 2) return seg;
+    final out = <LatLng>[seg.first];
+    for (var i = 1; i < seg.length; i++) {
+      final a = seg[i - 1], b = seg[i];
+      final gap = metersBetween(a, b);
+      final steps = gap > _maxEditVertexGapMeters
+          ? (gap / _maxEditVertexGapMeters).ceil()
+          : 1;
+      for (var s = 1; s <= steps; s++) {
+        final t = s / steps;
+        out.add(LatLng(
+          a.latitude + (b.latitude - a.latitude) * t,
+          a.longitude + (b.longitude - a.longitude) * t,
+        ));
+      }
+    }
+    return out;
   }
 
   void _onMapCreated(MapLibreMapController c) {
@@ -845,7 +881,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
       }
       setState(() {
         _trail.anchors.add(end);
-        _segments.add(segment);
+        _segments.add(_densify(segment));
         _trail.path = _composePath();
         _dirty = true;
       });
@@ -1009,17 +1045,17 @@ class _AuthorScreenState extends State<AuthorScreen> {
       anchors[idx] = tapped;
       if (idx > 0) {
         final prev = anchors[idx - 1];
-        _segments[idx] = (_follow && c != null)
+        _segments[idx] = _densify((_follow && c != null)
             ? await TrailRouter(c).between(prev, tapped)
-            : [prev, tapped];
+            : [prev, tapped]);
       } else if (_segments.isNotEmpty) {
         _segments[0] = [tapped];
       }
       if (idx < anchors.length - 1) {
         final next = anchors[idx + 1];
-        _segments[idx + 1] = (_follow && c != null)
+        _segments[idx + 1] = _densify((_follow && c != null)
             ? await TrailRouter(c).between(tapped, next)
-            : [tapped, next];
+            : [tapped, next]);
       }
       _trail.path = _composePath();
       _dirty = true;
@@ -1051,10 +1087,10 @@ class _AuthorScreenState extends State<AuthorScreen> {
     try {
       final prev = _trail.anchors[bestHop - 1];
       final next = _trail.anchors[bestHop];
-      final segA =
-          _follow ? await TrailRouter(c).between(prev, tapped) : [prev, tapped];
-      final segB =
-          _follow ? await TrailRouter(c).between(tapped, next) : [tapped, next];
+      final segA = _densify(
+          _follow ? await TrailRouter(c).between(prev, tapped) : [prev, tapped]);
+      final segB = _densify(
+          _follow ? await TrailRouter(c).between(tapped, next) : [tapped, next]);
       setState(() {
         _trail.anchors.insert(bestHop, tapped);
         _segments[bestHop] = segA;
