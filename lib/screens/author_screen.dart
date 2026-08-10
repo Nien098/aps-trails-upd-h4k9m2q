@@ -93,6 +93,10 @@ class _AuthorScreenState extends State<AuthorScreen> {
 
   static const _strokePreviewColor = '#FF6D00';
 
+  /// Real-anchor spacing along a committed drag-draw stroke — see the
+  /// commit logic in [_onStrokePanEnd] for why this exists.
+  static const _strokeAnchorIntervalMeters = 25.0;
+
   /// Bumped on every toggle, mode switch, and grab-start affecting either
   /// drag mode's preview layer. [_pushStrokePreview]/[_pushAdjustPreview]
   /// capture it before their async lat/lng conversion and re-check it
@@ -581,8 +585,29 @@ class _AuthorScreenState extends State<AuthorScreen> {
           _trail.anchors.add(snapped.first);
           _segments.add([_trail.anchors[_trail.anchors.length - 2], snapped.first]);
         }
-        _trail.anchors.add(snapped.last);
-        _segments.add(snapped);
+        // Real anchors every ~_strokeAnchorIntervalMeters along the stroke,
+        // not just at its start/end — a whole drag committed as one giant
+        // segment (the previous behaviour) left the line-adjust tool with
+        // only two real anchors on a long stroke, so it had to invent an
+        // artificial bound (a fixed ripple-step cap) to keep a grab from
+        // running the segment's entire length. Real, evenly-spaced anchors
+        // give every stretch a genuine, already-existing boundary at roughly
+        // the same scale a ripple would reach anyway, so an edit is bounded
+        // by real trail structure instead of an arbitrary cap — while still
+        // leaving several interior (non-anchor) points between consecutive
+        // anchors for the grab tool to operate on.
+        var last = _trail.anchors.last;
+        var sinceAnchor = <LatLng>[last];
+        for (var i = 1; i < snapped.length; i++) {
+          sinceAnchor.add(snapped[i]);
+          final isLast = i == snapped.length - 1;
+          if (isLast || pathLength(sinceAnchor) >= _strokeAnchorIntervalMeters) {
+            _trail.anchors.add(snapped[i]);
+            _segments.add(sinceAnchor);
+            last = snapped[i];
+            sinceAnchor = [last];
+          }
+        }
         _trail.path = _composePath();
         _dirty = true;
       });
