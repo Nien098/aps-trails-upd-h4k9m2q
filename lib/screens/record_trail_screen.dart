@@ -393,34 +393,37 @@ class _RecordTrailScreenState extends State<RecordTrailScreen> {
     if (mounted) Navigator.pop(context, draft);
   }
 
-  /// Removes GPS jitter (Douglas–Peucker), then snaps the simplified anchors
-  /// onto any mapped trail/road network — nudging the route onto real paths
-  /// where they exist, and keeping a clean straight line where they don't.
+  /// Removes GPS jitter (Douglas–Peucker), then nudges each simplified anchor
+  /// individually onto the nearest mapped trail/road, if one is close by.
+  /// Deliberately does NOT route between anchors — that used to hand the
+  /// path to the same shortest-path search auto-generation uses, and one
+  /// unmapped or gappy spot anywhere along the recording could send the
+  /// search off toward a completely unrelated nearby trail (e.g. cutting
+  /// through a park or parking lot), replacing an already-accurate recorded
+  /// segment with a router guess. A per-point local snap can only pull a
+  /// point a short, bounded distance toward what's actually mapped — it
+  /// can never invent a detour, so the recorded shape is always preserved.
   Future<List<LatLng>> _cleanPath(List<LatLng> raw) async {
     final anchors = simplifyPath(raw, 8);
     final c = _c;
     if (c == null || anchors.length < 2) return anchors;
     final router = TrailRouter(c);
-    final out = <LatLng>[anchors.first];
-    for (var i = 1; i < anchors.length; i++) {
-      final a = out.last, b = anchors[i];
-      if (metersBetween(a, b) < 3) continue;
-      // Bring both points into view so the trail/road network around them is
+    final out = <LatLng>[];
+    for (final a in anchors) {
+      // Bring the point into view so the trail/road network around it is
       // rendered and queryable (the router only sees on-screen features).
-      const pad = 0.004;
+      const pad = 0.0015;
       await c.moveCamera(CameraUpdate.newLatLngBounds(LatLngBounds(
-        southwest: LatLng(
-            (a.latitude < b.latitude ? a.latitude : b.latitude) - pad,
-            (a.longitude < b.longitude ? a.longitude : b.longitude) - pad),
-        northeast: LatLng(
-            (a.latitude > b.latitude ? a.latitude : b.latitude) + pad,
-            (a.longitude > b.longitude ? a.longitude : b.longitude) + pad),
+        southwest: LatLng(a.latitude - pad, a.longitude - pad),
+        northeast: LatLng(a.latitude + pad, a.longitude + pad),
       )));
       await Future.delayed(const Duration(milliseconds: 120));
-      final conn = await router.connect(from: a, to: b);
-      out.addAll(conn.polyline.skip(1));
+      final snapped = await router.snapPoint(a);
+      if (out.isEmpty || metersBetween(out.last, snapped) >= 3) {
+        out.add(snapped);
+      }
     }
-    return out;
+    return out.length >= 2 ? out : anchors;
   }
 
   String _defaultName() {

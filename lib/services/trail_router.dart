@@ -389,6 +389,18 @@ class TrailRouter {
     return Rect.fromLTRB(minX - pad, minY - pad, maxX + pad, maxY + pad);
   }
 
+  /// Nudges [p] onto the nearest trail/road within [_snapMeters], if any —
+  /// a pure local lookup with no pathfinding/routing between points. Used by
+  /// record-mode cleanup so a single unmapped or gappy spot can't drag an
+  /// entire segment into a router-guessed detour the way [connect]'s
+  /// shortest-path search could (see [record_trail_screen._cleanPath]).
+  Future<LatLng> snapPoint(LatLng p, {Rect? rect}) async {
+    final r = rect ?? await _rectAround(null, p);
+    final graph = await _buildGraph(r);
+    final snap = graph.nearestOnEdge(p);
+    return (snap != null && snap.meters <= _snapMeters) ? snap.point : p;
+  }
+
   /// Routes between two existing anchors WITHOUT re-snapping them (used when
   /// re-joining the trail after a middle anchor is deleted). Falls back to a
   /// straight segment when there's no connected trail.
