@@ -55,6 +55,30 @@ LatLng nearestPointOnPath(LatLng p, List<LatLng> path) {
   return best;
 }
 
+/// Nearest point lying ON polyline [path] to [p] — unlike [nearestPointOnPath],
+/// also reports which edge (index i means the segment path[i]-path[i+1]) the
+/// projection landed on, so a caller can splice a new vertex in at that exact
+/// spot if needed (used by the trail editor's grab-and-bend tool so a drag can
+/// start anywhere along the line, not just on an existing vertex). Returns
+/// null if nothing on the path is within [maxMeters].
+({LatLng point, int edgeIndex, double meters})? nearestPointOnPolyline(
+    LatLng p, List<LatLng> path, {double maxMeters = 15}) {
+  if (path.length < 2) return null;
+  int? bestEdge;
+  LatLng? bestPoint;
+  var bestDist = maxMeters;
+  for (var i = 0; i < path.length - 1; i++) {
+    final proj = _projectOntoSegment(p, path[i], path[i + 1]);
+    if (proj.meters < bestDist) {
+      bestDist = proj.meters;
+      bestEdge = i;
+      bestPoint = proj.point;
+    }
+  }
+  if (bestEdge == null || bestPoint == null) return null;
+  return (point: bestPoint, edgeIndex: bestEdge, meters: bestDist);
+}
+
 /// Nearest point on segment [a]–[b] to [p] (and its distance in metres), using
 /// a local equirectangular projection centred on [p] (accurate at trail scale).
 ({LatLng point, double meters}) _projectOntoSegment(LatLng p, LatLng a, LatLng b) {

@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'dart:math' show Point, max, min, sqrt;
+import 'dart:math' show Point, exp, max, min, sqrt;
 
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
@@ -107,20 +107,33 @@ class _AuthorScreenState extends State<AuthorScreen> {
   /// current — real geometry, but disconnected from what's on screen now.
   int _previewGeneration = 0;
 
-  /// While true, a drag on the map grabs the nearest interior point of the
-  /// drawn line and pulls it, re-aligning the surrounding stretch onto the
-  /// mapped trail as it goes — see [_onAdjustPanEnd]/[TrailRouter.rippleRealign].
+  /// While true, a drag on the map grabs a point anywhere on the drawn line
+  /// and bends the nearby stretch with it, like a flexible wire — see
+  /// [_onAdjustPanEnd]/[_deformSegment]. Purely geometric: nothing here ever
+  /// queries the mapped trail network, so the author aligns the bend onto
+  /// the visible trail themselves.
   bool _adjustLineMode = false;
 
   /// Which segment/local-index of [_segments] is currently grabbed, or null
-  /// when nothing's being dragged — see [_nearestSegmentVertex]. Never an
-  /// anchor (index 0 or a segment's last index): those already have their
-  /// own long-press-to-move interaction.
+  /// when nothing's being dragged. Never an anchor (a segment's first/last
+  /// point): those already have their own long-press-to-move interaction.
+  /// If the grab landed strictly between two existing vertices, a new one
+  /// was spliced into the segment at that exact spot (see
+  /// [_onAdjustPanStart]) so [_grabLocalIdx] always refers to a real point.
   int? _grabSegIdx;
   int? _grabLocalIdx;
+
+  /// Snapshot of `_segments[_grabSegIdx]` taken the moment it was grabbed
+  /// (after any vertex splice), and that vertex's pre-drag position. Every
+  /// preview/commit frame deforms fresh from this snapshot — never from a
+  /// previously-deformed frame — so a wandering drag can't compound
+  /// distortion; the applied displacement is always relative to where the
+  /// point truly started.
+  List<LatLng>? _grabOriginalSeg;
+  LatLng? _grabOriginalPoint;
+
   Offset? _lastAdjustOffset;
   bool _convertingAdjustPoint = false;
-  bool _adjustingLine = false;
 
   /// The drawn boundary outline (closed ring) constraining auto-generation,
   /// or null to fall back to whatever's currently on screen (existing
@@ -648,6 +661,8 @@ class _AuthorScreenState extends State<AuthorScreen> {
       _adjustLineMode = !_adjustLineMode;
       _grabSegIdx = null;
       _grabLocalIdx = null;
+      _grabOriginalSeg = null;
+      _grabOriginalPoint = null;
       _lastAdjustOffset = null;
       if (_adjustLineMode) {
         _dragDrawMode = false;
@@ -657,31 +672,65 @@ class _AuthorScreenState extends State<AuthorScreen> {
     await _strokeLayer?.setRoute(const [], _strokePreviewColor);
   }
 
-  /// Finds the (segment index, local index) of the interior vertex in
-  /// [_segments] closest to [p] — "grab the line" for [_adjustLineMode].
-  /// Deliberately excludes each segment's first/last point (its anchors):
-  /// those already have their own long-press-to-move interaction, and
-  /// moving one would also have to stay in sync with the neighbouring
-  /// segment that shares it, which this simpler per-segment tool doesn't
-  /// attempt.
-  (int, int)? _nearestSegmentVertex(LatLng p, {double maxMeters = 15}) {
-    int? bestSeg, bestIdx;
-    var bestDist = maxMeters;
-    for (var s = 0; s < _segments.length; s++) {
-      final seg = _segments[s];
-      for (var i = 1; i < seg.length - 1; i++) {
-        final d = metersBetween(p, seg[i]);
-        if (d < bestDist) {
-          bestDist = d;
-          bestSeg = s;
-          bestIdx = i;
-        }
-      }
-    }
-    if (bestSeg == null || bestIdx == null) return null;
-    return (bestSeg, bestIdx);
+  /// How far a grab-and-bend edit reaches from the grabbed point, in metres
+  /// of original-path distance — beyond this a point's weight (see
+  /// [_falloffWeight]) is effectively zero, so it's left untouched entirely.
+  static const _influenceRadiusMeters = 20.0;
+
+  /// Gaussian sigma tuned to roughly match "0m→100%, ~2m→94%, ~5m→66%,
+  /// ~10m→19%, ~15m→2%" — a single Gaussian can't hit every one of those
+  /// exactly, this is the closest single-sigma fit.
+  static const _falloffSigmaMeters = 5.5;
+
+  double _falloffWeight(double distanceMeters) {
+    final d = distanceMeters;
+    return exp(-(d * d) / (2 * _falloffSigmaMeters * _falloffSigmaMeters));
   }
 
+  /// Deforms [original] (a snapshot of a segment taken at grab time) by
+  /// moving the vertex at [grabIndex] from [from] to [to], and moving its
+  /// neighbours on each side by the same displacement scaled down with
+  /// distance — like bending a flexible wire at one point. Always computes
+  /// from [original], never from an already-deformed array, so repeated
+  /// calls during one drag never compound distortion. Stops at each
+  /// direction's first/last index (a segment's own anchors) even if
+  /// [_influenceRadiusMeters] would otherwise reach further, so an anchor
+  /// — shared with the neighbouring segment — never moves here.
+  List<LatLng> _deformSegment(
+      List<LatLng> original, int grabIndex, LatLng from, LatLng to) {
+    final dLat = to.latitude - from.latitude;
+    final dLng = to.longitude - from.longitude;
+    final out = List<LatLng>.of(original);
+
+    var traveled = 0.0;
+    for (var i = grabIndex; i < original.length - 1; i++) {
+      if (i > grabIndex) traveled += metersBetween(original[i - 1], original[i]);
+      if (traveled > _influenceRadiusMeters) break;
+      final w = _falloffWeight(traveled);
+      out[i] = LatLng(original[i].latitude + dLat * w,
+          original[i].longitude + dLng * w);
+    }
+
+    traveled = 0.0;
+    for (var i = grabIndex - 1; i > 0; i--) {
+      traveled += metersBetween(original[i + 1], original[i]);
+      if (traveled > _influenceRadiusMeters) break;
+      final w = _falloffWeight(traveled);
+      out[i] = LatLng(original[i].latitude + dLat * w,
+          original[i].longitude + dLng * w);
+    }
+
+    return out;
+  }
+
+  /// Grabs the line for [_adjustLineMode]: finds the nearest point lying ON
+  /// any segment's dense polyline (not just an existing vertex — see
+  /// [nearestPointOnPolyline]) within reach of [p], splicing a new vertex in
+  /// at that exact spot if it falls strictly between two existing ones, so
+  /// a drag can start truly anywhere along the line. Skips a hit too close
+  /// to a segment's own anchor: those already have their own
+  /// long-press-to-move interaction, and moving one here would have to stay
+  /// in sync with the neighbouring segment that shares it.
   Future<void> _onAdjustPanStart(DragStartDetails d) async {
     final c = _c;
     if (c == null) return;
@@ -690,10 +739,50 @@ class _AuthorScreenState extends State<AuthorScreen> {
     final latlng = await c
         .toLatLng(Point(d.localPosition.dx * dpr, d.localPosition.dy * dpr));
     if (!mounted || !_adjustLineMode || gen != _previewGeneration) return;
-    final hit = _nearestSegmentVertex(latlng);
+
+    int? bestSeg, bestEdge;
+    LatLng? bestPoint;
+    var bestDist = 15.0;
+    for (var s = 0; s < _segments.length; s++) {
+      final seg = _segments[s];
+      final hit = nearestPointOnPolyline(latlng, seg, maxMeters: bestDist);
+      if (hit == null) continue;
+      if (metersBetween(hit.point, seg.first) < 2 ||
+          metersBetween(hit.point, seg.last) < 2) {
+        continue;
+      }
+      bestSeg = s;
+      bestEdge = hit.edgeIndex;
+      bestPoint = hit.point;
+      bestDist = hit.meters;
+    }
+
+    if (bestSeg == null || bestEdge == null || bestPoint == null) {
+      setState(() {
+        _grabSegIdx = null;
+        _grabLocalIdx = null;
+        _grabOriginalSeg = null;
+        _grabOriginalPoint = null;
+      });
+      return;
+    }
+
+    final winningSeg = bestSeg, edge = bestEdge, point = bestPoint;
     setState(() {
-      _grabSegIdx = hit?.$1;
-      _grabLocalIdx = hit?.$2;
+      final seg = _segments[winningSeg];
+      int grabIdx;
+      if (metersBetween(point, seg[edge]) < 0.5) {
+        grabIdx = edge;
+      } else if (metersBetween(point, seg[edge + 1]) < 0.5) {
+        grabIdx = edge + 1;
+      } else {
+        seg.insert(edge + 1, point);
+        grabIdx = edge + 1;
+      }
+      _grabSegIdx = winningSeg;
+      _grabLocalIdx = grabIdx;
+      _grabOriginalSeg = List.of(seg);
+      _grabOriginalPoint = seg[grabIdx];
     });
   }
 
@@ -702,21 +791,22 @@ class _AuthorScreenState extends State<AuthorScreen> {
     _pushAdjustPreview(d.localPosition);
   }
 
-  /// Live "string pull" preview: shows ONLY the point immediately before and
-  /// after the grabbed one, at their real, unmoved positions, with the
-  /// grabbed point itself following the drag between them — like a string
-  /// pinned at both ends. No trail lookup happens here at all; this is pure
-  /// on-screen geometry, so nothing about the surrounding trail can be
-  /// implied or affected while dragging. The actual re-alignment — deciding
-  /// where the mapped trail really is and rippling that correction out to
-  /// further neighbours — is [TrailRouter.rippleRealign], which only runs
-  /// once, in [_onAdjustPanEnd], after the point is dropped.
+  /// Live preview of the wire-bend: deforms fresh from [_grabOriginalSeg]
+  /// (see [_deformSegment]) toward the current drag position and pushes the
+  /// whole result to [_strokeLayer]. Pure on-screen geometry — no trail
+  /// lookup happens here or anywhere else in this tool, so nothing about
+  /// the surrounding trail can be implied or affected while dragging.
   Future<void> _pushAdjustPreview(Offset p) async {
     final c = _c;
-    final segIdx = _grabSegIdx, localIdx = _grabLocalIdx;
+    final segIdx = _grabSegIdx,
+        original = _grabOriginalSeg,
+        grabIdx = _grabLocalIdx,
+        grabOriginal = _grabOriginalPoint;
     if (c == null ||
         segIdx == null ||
-        localIdx == null ||
+        original == null ||
+        grabIdx == null ||
+        grabOriginal == null ||
         _convertingAdjustPoint ||
         !mounted) {
       return;
@@ -732,49 +822,52 @@ class _AuthorScreenState extends State<AuthorScreen> {
           gen != _previewGeneration) {
         return;
       }
-      final seg = _segments[segIdx];
-      final preview = [seg[localIdx - 1], latlng, seg[localIdx + 1]];
-      await _strokeLayer?.setRoute(preview, _strokePreviewColor);
+      final deformed = _deformSegment(original, grabIdx, grabOriginal, latlng);
+      await _strokeLayer?.setRoute(deformed, _strokePreviewColor);
     } finally {
       _convertingAdjustPoint = false;
     }
   }
 
-  /// Commits the grab: re-aligns the dragged point and ripples the
-  /// correction out to its neighbours within the same segment — see
-  /// [TrailRouter.rippleRealign].
+  /// Commits the grab: deforms [_grabOriginalSeg] one final time toward the
+  /// drop position (see [_deformSegment]) and writes the result into
+  /// [_segments]. No trail lookup — the wire-bend result is the final
+  /// geometry.
   Future<void> _onAdjustPanEnd(DragEndDetails _) async {
     final c = _c;
-    final segIdx = _grabSegIdx, localIdx = _grabLocalIdx;
+    final segIdx = _grabSegIdx,
+        original = _grabOriginalSeg,
+        grabIdx = _grabLocalIdx,
+        grabOriginal = _grabOriginalPoint;
     final offset = _lastAdjustOffset;
     setState(() {
       _previewGeneration++;
       _grabSegIdx = null;
       _grabLocalIdx = null;
+      _grabOriginalSeg = null;
+      _grabOriginalPoint = null;
       _lastAdjustOffset = null;
     });
     unawaited(_strokeLayer?.setRoute(const [], _strokePreviewColor));
-    if (c == null || segIdx == null || localIdx == null || offset == null) {
+    if (c == null ||
+        segIdx == null ||
+        original == null ||
+        grabIdx == null ||
+        grabOriginal == null ||
+        offset == null) {
       return;
     }
 
-    setState(() => _adjustingLine = true);
-    try {
-      final dpr = MediaQuery.of(context).devicePixelRatio;
-      final newPos =
-          await c.toLatLng(Point(offset.dx * dpr, offset.dy * dpr));
-      if (!mounted) return;
-      final realigned =
-          await TrailRouter(c).rippleRealign(_segments[segIdx], localIdx, newPos);
-      setState(() {
-        _segments[segIdx] = realigned;
-        _trail.path = _composePath();
-        _dirty = true;
-      });
-      await _redraw();
-    } finally {
-      if (mounted) setState(() => _adjustingLine = false);
-    }
+    final dpr = MediaQuery.of(context).devicePixelRatio;
+    final newPos = await c.toLatLng(Point(offset.dx * dpr, offset.dy * dpr));
+    if (!mounted) return;
+    final deformed = _deformSegment(original, grabIdx, grabOriginal, newPos);
+    setState(() {
+      _segments[segIdx] = deformed;
+      _trail.path = _composePath();
+      _dirty = true;
+    });
+    await _redraw();
   }
 
   /// Flattens the per-anchor segments into the full route polyline.
@@ -1880,8 +1973,8 @@ class _AuthorScreenState extends State<AuthorScreen> {
                   ),
                 ),
               ),
-            // Absorbs drag input while grabbing/pulling a point on the drawn
-            // line — see _onAdjustPanEnd/TrailRouter.rippleRealign.
+            // Absorbs drag input while grabbing/bending a point on the drawn
+            // line — see _onAdjustPanEnd/_deformSegment.
             if (_adjustLineMode)
               Positioned.fill(
                 child: GestureDetector(
@@ -1906,17 +1999,9 @@ class _AuthorScreenState extends State<AuthorScreen> {
                         child: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            _adjustingLine
-                                ? const SizedBox(
-                                    width: 18,
-                                    height: 18,
-                                    child: CircularProgressIndicator(
-                                        strokeWidth: 2))
-                                : const Icon(Icons.tune),
+                            const Icon(Icons.tune),
                             const SizedBox(width: 10),
-                            Text(_adjustingLine
-                                ? 'Re-aligning…'
-                                : 'Drag a point on the line to pull it onto the trail'),
+                            const Text('Drag a point on the line to bend it'),
                             const SizedBox(width: 10),
                             TextButton(
                               onPressed: _toggleAdjustLine,
@@ -2269,7 +2354,7 @@ class _ModeBar extends StatelessWidget {
                         ? 'Switch to Draw path to adjust the line'
                         : adjustLineActive
                             ? 'Stop adjusting'
-                            : 'Grab a point on the line and pull it onto the trail',
+                            : 'Grab a point on the line and drag it — nearby points bend smoothly with it',
                     isSelected: adjustLineActive,
                     icon: const Icon(Icons.tune),
                     onPressed: cueMode ? null : onToggleAdjustLine,
