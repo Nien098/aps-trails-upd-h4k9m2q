@@ -1440,7 +1440,15 @@ class _AuthorScreenState extends State<AuthorScreen> {
         !await _confirm('Replace the current cues with suggested ones?')) {
       return;
     }
-    final suggested = suggestCues(_trail.path);
+    var junctions = <LatLng>[];
+    final c = _c;
+    if (c != null) {
+      final router = TrailRouter(c);
+      junctions = await router.junctionsNear(
+          _trail.path, await router.visibleViewportRect());
+    }
+    if (!mounted) return;
+    final suggested = suggestCues(_trail.path, junctions: junctions);
     setState(() {
       _trail.cues
         ..clear()
@@ -1510,9 +1518,10 @@ class _AuthorScreenState extends State<AuthorScreen> {
           (bounds.southwest.longitude + bounds.northeast.longitude) / 2,
         );
       }
+      final viewport = await router.visibleViewportRect();
       final route = await router.generate(
         center: center,
-        viewport: await router.visibleViewportRect(),
+        viewport: viewport,
         targetMeters: choice.meters,
         preferLoop: choice.loop,
         boundaryPolygon: boundary,
@@ -1525,6 +1534,10 @@ class _AuthorScreenState extends State<AuthorScreen> {
             : 'No trails found here — zoom to a trail area and try again');
         return;
       }
+      final junctions = choice.cues
+          ? await router.junctionsNear(route.path, viewport)
+          : const <LatLng>[];
+      if (!mounted) return;
       setState(() {
         _trail.path = route.path;
         _segments
@@ -1535,7 +1548,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
           // walking it start to finish naturally assigns correct stack order.
           _trail.cues
             ..clear()
-            ..addAll(suggestCues(route.path));
+            ..addAll(suggestCues(route.path, junctions: junctions));
         }
         _dirty = true;
       });

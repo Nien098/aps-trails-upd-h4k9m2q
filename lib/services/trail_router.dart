@@ -337,6 +337,34 @@ class TrailRouter {
   Future<Rect> visibleViewportRect() async =>
       _screenRectForBounds(await controller.getVisibleRegion());
 
+  /// Real trail/road junctions (graph degree >= 3 — a genuine fork, not just
+  /// a mid-line vertex or dead end) within [toleranceMeters] of [path], built
+  /// from whatever's rendered inside [rect] — same viewport-dependent
+  /// limitation as every other query on this class (only sees currently
+  /// rendered geometry). Used by [suggestCues]-style cue generation to place
+  /// a "stay straight" cue at a fork the route passes through without
+  /// turning, so a walker isn't left guessing which branch is the route.
+  ///
+  /// Distance-based matching, not exact-coordinate/key equality: [path] may
+  /// be graph nodes verbatim ([generate]'s output) or points snapped onto an
+  /// edge interpolation (hand-drawn/drag-traced/recorded paths via
+  /// [snapStroke]/[snapPoint]), so exact matching would miss real junctions
+  /// on non-generated paths. [toleranceMeters] defaults to 8m, matching the
+  /// vertex spacing `author_screen.dart`'s `_densify` already treats as
+  /// "close enough to be the same point."
+  Future<List<LatLng>> junctionsNear(
+    List<LatLng> path,
+    Rect rect, {
+    double toleranceMeters = 8,
+    Surface surface = Surface.mixed,
+  }) async {
+    final graph = await _buildGraph(rect, surface: surface);
+    return [
+      for (final j in graph.junctionNodes())
+        if (distanceToPath(j, path) <= toleranceMeters) j,
+    ];
+  }
+
   /// Projects [bounds]'s 4 corners into the same native-pixel space as
   /// [visibleViewportRect] and returns their bounding [Rect] — shared so any
   /// caller with an arbitrary geographic box (not just "whatever's on screen
@@ -862,6 +890,14 @@ class _Graph {
       a.compareTo(b) <= 0 ? '$a|$b' : '$b|$a';
 
   LatLng nodeAt(String key) => nodes[key]!;
+
+  /// Coordinates of every node with degree >= [minDegree] (a real
+  /// fork/junction, not a mid-line vertex or dead end) — surfaced via
+  /// [TrailRouter.junctionsNear] without exposing this graph itself.
+  List<LatLng> junctionNodes({int minDegree = 3}) => [
+        for (final k in nodes.keys)
+          if ((adj[k]?.length ?? 0) >= minDegree) nodes[k]!,
+      ];
 
   /// Shortest-path tree (distances + predecessors) from [startKey] over the
   /// whole graph, used to pick a turnaround point at a target distance.

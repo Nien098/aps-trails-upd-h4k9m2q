@@ -7,12 +7,19 @@ import 'geo.dart';
 
 /// Auto-suggests direction cues along a walking [path] from its geometry alone:
 /// a Start cue at the beginning, Left/Right cues wherever the route turns
-/// sharply, and a Finish cue at the end. Bearings are measured over a short
-/// distance window so a dense polyline's jitter (and gentle curves) don't spam
-/// cues, and cues are kept a minimum distance apart. [order] is assigned
+/// sharply, a U-turn cue instead of Left/Right when a turn is close enough to
+/// a full reversal (a dead-end turnaround) to make either label meaningless,
+/// and a Finish cue at the end. Bearings are measured over a short distance
+/// window so a dense polyline's jitter (and gentle curves) don't spam cues,
+/// and cues are kept a minimum distance apart. [order] is assigned
 /// sequentially as the path is walked start to finish, so an out-and-back or
 /// loop's full path (both legs) naturally comes out correctly ordered with no
 /// special-casing needed.
+///
+/// If [junctions] (real trail/road forks — see TrailRouter.junctionsNear) is
+/// given, a fork the path passes straight through (no turn cue would
+/// otherwise fire there) gets a Stay-straight cue instead of silence, so a
+/// walker at a real fork isn't left to guess which branch is the route.
 ///
 /// Works on any trail, hand-drawn or generated — the author can edit or delete
 /// each suggestion afterwards like a normal cue.
@@ -21,6 +28,9 @@ List<Cue> suggestCues(
   double turnThresholdDeg = 35,
   double windowMeters = 18,
   double minSpacingMeters = 45,
+  double uturnThresholdDeg = 150,
+  List<LatLng> junctions = const [],
+  double junctionMatchMeters = 8,
 }) {
   final cues = <Cue>[];
   if (path.length < 2) return cues;
@@ -52,10 +62,27 @@ List<Cue> suggestCues(
     final before = pointAt(d - windowMeters);
     final after = pointAt(d + windowMeters);
     final turn = _turnAngle(before, path[i], after);
-    if (turn.abs() < turnThresholdDeg) continue;
+    final isJunction = junctions
+        .any((j) => metersBetween(j, path[i]) <= junctionMatchMeters);
 
+    if (turn.abs() < turnThresholdDeg) {
+      // No directional turn here — but a real fork still needs a cue
+      // telling the walker to ignore it and stay straight.
+      if (!isJunction) continue;
+      cues.add(Cue(
+        type: CueType.straight,
+        position: path[i],
+        order: cues.length,
+      ));
+      lastCueDist = d;
+      continue;
+    }
+
+    final type = turn.abs() >= uturnThresholdDeg
+        ? CueType.uturn
+        : (turn > 0 ? CueType.right : CueType.left);
     cues.add(Cue(
-      type: turn > 0 ? CueType.right : CueType.left,
+      type: type,
       position: path[i],
       order: cues.length,
     ));
