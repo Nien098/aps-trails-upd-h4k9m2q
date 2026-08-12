@@ -177,6 +177,55 @@ class _AuthorScreenState extends State<AuthorScreen> {
   /// i-1 → i (segment 0 is just [anchor0]). Undo drops the last of each.
   final List<List<LatLng>> _segments = [];
 
+  /// Snapshots of (anchors, segments, cues) taken right before every
+  /// geometry-mutating action — tap-drawn/dragged/nudged points, cue
+  /// add/edit/move/delete, and the clear/suggest/generate actions. Undo pops
+  /// the most recent one and restores it wholesale, so it always reverts
+  /// whatever was actually just done instead of special-casing one kind of
+  /// edit (the old behaviour only ever dropped the last drawn anchor, so a
+  /// nudge or cue edit had no undo at all and could only be lost).
+  final List<_EditSnapshot> _undoStack = [];
+  static const _maxUndo = 30;
+
+  void _pushUndo() {
+    _undoStack.add(_EditSnapshot(
+      anchors: List.of(_trail.anchors),
+      segments: [for (final s in _segments) List.of(s)],
+      cues: [for (final c in _trail.cues) _cloneCue(c)],
+    ));
+    if (_undoStack.length > _maxUndo) _undoStack.removeAt(0);
+  }
+
+  static Cue _cloneCue(Cue c) => Cue(
+        type: c.type,
+        position: c.position,
+        order: c.order,
+        label: c.label,
+        spoken: c.spoken,
+        radiusMeters: c.radiusMeters,
+      );
+
+  void _undo() {
+    if (_undoStack.isEmpty) return;
+    final snap = _undoStack.removeLast();
+    setState(() {
+      _trail.anchors
+        ..clear()
+        ..addAll(snap.anchors);
+      _segments
+        ..clear()
+        ..addAll(snap.segments);
+      _trail.cues
+        ..clear()
+        ..addAll(snap.cues);
+      _trail.path = _composePath();
+      _moving = null;
+      _movingAnchor = null;
+      _dirty = true;
+    });
+    _redraw();
+  }
+
   // Map drawn markers back to their data for tap-to-edit / tap-to-delete.
   final Map<String, Cue> _symbolToCue = {};
   final Map<String, Cue> _circleToCue = {};
@@ -287,6 +336,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
       final idx = _circleToAnchor[circle.id];
       if (idx != null) {
         final moving = _moving!;
+        _pushUndo();
         setState(() {
           moving.position = _trail.anchors[idx];
           _moving = null;
@@ -615,6 +665,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
         }
       }
       if (snapped.length < 2 || !mounted) return;
+      _pushUndo();
       setState(() {
         if (_trail.anchors.isEmpty) {
           _trail.anchors.add(snapped.first);
@@ -768,6 +819,11 @@ class _AuthorScreenState extends State<AuthorScreen> {
     }
 
     final winningSeg = bestSeg, edge = bestEdge, point = bestPoint;
+    // Pushed here (grab start), not on release — a splice below already
+    // mutates _segments even if the drag that follows barely moves
+    // anything, and undo should always be able to revert to before the
+    // grab even landed.
+    _pushUndo();
     setState(() {
       final seg = _segments[winningSeg];
       int grabIdx;
@@ -927,6 +983,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
     final cue = await showCueEditor(context,
         position: position, initialOrder: _nextCueOrder);
     if (cue == null) return;
+    _pushUndo();
     setState(() => _insertCueAtOrder(cue));
     _dirty = true;
     await _redraw();
@@ -939,6 +996,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
     if (cue == null) return;
     final target =
         _freeMove ? tapped : nearestPointOnPath(tapped, _trail.path);
+    _pushUndo();
     setState(() {
       cue.position = target;
       _moving = null;
@@ -972,6 +1030,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
         end = tap;
         segment = from == null ? [tap] : [from, tap];
       }
+      _pushUndo();
       setState(() {
         _trail.anchors.add(end);
         _segments.add(_densify(segment));
@@ -1048,6 +1107,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
       final another = await showCueEditor(context,
           position: sorted.first.position, initialOrder: _nextCueOrder);
       if (!mounted || another == null) return;
+      _pushUndo();
       setState(() => _insertCueAtOrder(another));
       _dirty = true;
       await _redraw();
@@ -1059,6 +1119,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
   Future<void> _editCue(Cue cue) async {
     final result = await showCueEditor(context, position: cue.position, existing: cue);
     if (result == deletedCueSentinel) {
+      _pushUndo();
       setState(() => _trail.cues.remove(cue));
     } else if (result == addAnotherCueSentinel) {
       // Defaults to after the highest cue number anywhere on the trail, not
@@ -1069,6 +1130,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
       final another = await showCueEditor(context,
           position: cue.position, initialOrder: _nextCueOrder);
       if (!mounted || another == null) return;
+      _pushUndo();
       setState(() => _insertCueAtOrder(another));
       _dirty = true;
       await _redraw();
@@ -1076,6 +1138,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
     } else if (result != null) {
       // order is deliberately left untouched — editing a cue's type/text
       // shouldn't move its place in the firing sequence.
+      _pushUndo();
       setState(() {
         cue
           ..type = result.type
@@ -1132,6 +1195,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
     final idx = _movingAnchor;
     if (idx == null) return;
     final c = _c;
+    _pushUndo();
     setState(() => _busy = true);
     try {
       final anchors = _trail.anchors;
@@ -1176,6 +1240,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
       }
     }
     if (bestHop < 0) return; // not close enough to any existing line
+    _pushUndo();
     setState(() => _busy = true);
     try {
       final prev = _trail.anchors[bestHop - 1];
@@ -1221,6 +1286,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
     final anchors = _trail.anchors;
     if (i < 0 || i >= anchors.length) return;
     final c = _c;
+    _pushUndo();
     setState(() => _busy = true);
     try {
       if (anchors.length == 1) {
@@ -1449,6 +1515,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
     }
     if (!mounted) return;
     final suggested = suggestCues(_trail.path, junctions: junctions);
+    _pushUndo();
     setState(() {
       _trail.cues
         ..clear()
@@ -1538,6 +1605,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
           ? await router.junctionsNear(route.path, viewport)
           : const <LatLng>[];
       if (!mounted) return;
+      _pushUndo();
       setState(() {
         _trail.path = route.path;
         _segments
@@ -1587,17 +1655,6 @@ class _AuthorScreenState extends State<AuthorScreen> {
     }
   }
 
-  void _undoLastPoint() {
-    if (_trail.anchors.isEmpty) return;
-    setState(() {
-      _trail.anchors.removeLast();
-      if (_segments.isNotEmpty) _segments.removeLast();
-      _trail.path = _composePath();
-      _dirty = true;
-    });
-    _redraw();
-  }
-
   Future<bool> _confirm(String title) async {
     final ok = await showDialog<bool>(
       context: context,
@@ -1619,6 +1676,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
   Future<void> _clearPath() async {
     if (_trail.anchors.isEmpty) return;
     if (!await _confirm('Clear the whole path?')) return;
+    _pushUndo();
     setState(() {
       _trail.anchors.clear();
       _segments.clear();
@@ -1631,6 +1689,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
   Future<void> _clearCues() async {
     if (_trail.cues.isEmpty) return;
     if (!await _confirm('Delete all cues?')) return;
+    _pushUndo();
     setState(() {
       _trail.cues.clear();
       _dirty = true;
@@ -1699,6 +1758,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
   Future<void> _clearAll() async {
     if (_trail.anchors.isEmpty && _trail.cues.isEmpty) return;
     if (!await _confirm('Clear the path and all cues?')) return;
+    _pushUndo();
     setState(() {
       _trail.anchors.clear();
       _segments.clear();
@@ -1821,28 +1881,16 @@ class _AuthorScreenState extends State<AuthorScreen> {
               ],
             ),
           ),
+          // Kept to just 3 tappable widgets — Undo, Save, and one overflow
+          // menu for everything else (trail colour, cue order, suggest/clear)
+          // — a longer action row here used to silently clip off the edge of
+          // the bar on narrower phones or at a larger system text size,
+          // sometimes losing the cue-list button entirely with no visible
+          // sign it was ever there.
           actions: [
             IconButton(
-              tooltip: 'Trail colour',
-              onPressed: _pickColor,
-              icon: Container(
-                width: 22,
-                height: 22,
-                decoration: BoxDecoration(
-                  color: _hexColor(_trail.color),
-                  shape: BoxShape.circle,
-                  border: Border.all(color: Colors.white, width: 2),
-                ),
-              ),
-            ),
-            IconButton(
-              tooltip: 'Cue order',
-              onPressed: _trail.cues.isEmpty ? null : _openCueList,
-              icon: const Icon(Icons.format_list_numbered),
-            ),
-            IconButton(
-              tooltip: 'Undo last point',
-              onPressed: _undoLastPoint,
+              tooltip: 'Undo last action',
+              onPressed: _undoStack.isEmpty ? null : _undo,
               icon: const Icon(Icons.undo),
             ),
             IconButton(
@@ -1851,19 +1899,47 @@ class _AuthorScreenState extends State<AuthorScreen> {
               icon: const Icon(Icons.save),
             ),
             PopupMenuButton<String>(
-              tooltip: 'Clear',
+              tooltip: 'More',
               onSelected: (v) {
+                if (v == 'color') _pickColor();
+                if (v == 'cues') _openCueList();
                 if (v == 'suggest') _suggestCuesForPath();
                 if (v == 'path') _clearPath();
-                if (v == 'cues') _clearCues();
+                if (v == 'clearCues') _clearCues();
                 if (v == 'all') _clearAll();
               },
-              itemBuilder: (_) => const [
+              itemBuilder: (_) => [
                 PopupMenuItem(
+                  value: 'color',
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 18,
+                        height: 18,
+                        decoration: BoxDecoration(
+                          color: _hexColor(_trail.color),
+                          shape: BoxShape.circle,
+                          border: Border.all(color: Colors.white, width: 2),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      const Text('Trail colour'),
+                    ],
+                  ),
+                ),
+                PopupMenuItem(
+                  value: 'cues',
+                  enabled: _trail.cues.isNotEmpty,
+                  child: const Text('Cue order'),
+                ),
+                const PopupMenuDivider(),
+                const PopupMenuItem(
                     value: 'suggest', child: Text('Suggest turn cues')),
-                PopupMenuItem(value: 'path', child: Text('Clear path')),
-                PopupMenuItem(value: 'cues', child: Text('Clear all cues')),
-                PopupMenuItem(value: 'all', child: Text('Clear everything')),
+                const PopupMenuItem(value: 'path', child: Text('Clear path')),
+                const PopupMenuItem(
+                    value: 'clearCues', child: Text('Clear all cues')),
+                const PopupMenuItem(
+                    value: 'all', child: Text('Clear everything')),
               ],
             ),
           ],
@@ -2307,6 +2383,19 @@ class _ModeBar extends StatelessWidget {
   final bool adjustLineActive;
   final VoidCallback onToggleAdjustLine;
 
+  /// Explicit high-contrast "on" style for the three drawing-tool toggles
+  /// above — the default Material 3 `isSelected` tonal fill is derived from
+  /// this app's green seed colour (see main.dart), so on a screen that's
+  /// already mostly green it read as barely-there pale green whether a tool
+  /// was on or off. Amber/orange matches the existing "something is
+  /// happening" accent already used elsewhere in this screen (the drag-draw
+  /// preview line, the moving-cue/anchor banners), so it reads as active
+  /// without adding a new colour meaning.
+  static final ButtonStyle _activeToolStyle = IconButton.styleFrom(
+    backgroundColor: const Color(0xFFFF6D00),
+    foregroundColor: Colors.white,
+  );
+
   @override
   Widget build(BuildContext context) {
     // A few phones (Samsung's Settings → Display font/zoom range in
@@ -2347,6 +2436,7 @@ class _ModeBar extends StatelessWidget {
                         ? 'Cancel drawing boundary area'
                         : 'Draw a boundary area to constrain generation',
                     isSelected: drawBoundaryActive,
+                    style: drawBoundaryActive ? _activeToolStyle : null,
                     icon: const Icon(Icons.draw),
                     onPressed: onToggleDrawBoundary,
                   ),
@@ -2358,6 +2448,7 @@ class _ModeBar extends StatelessWidget {
                             ? 'Stop tracing'
                             : 'Trace a trail by dragging — nudges onto the nearest mapped path',
                     isSelected: dragDrawActive,
+                    style: dragDrawActive ? _activeToolStyle : null,
                     icon: const Icon(Icons.gesture),
                     onPressed: cueMode ? null : onToggleDragDraw,
                   ),
@@ -2369,6 +2460,7 @@ class _ModeBar extends StatelessWidget {
                             ? 'Stop adjusting'
                             : 'Grab a point on the line and drag it — nearby points bend smoothly with it',
                     isSelected: adjustLineActive,
+                    style: adjustLineActive ? _activeToolStyle : null,
                     icon: const Icon(Icons.tune),
                     onPressed: cueMode ? null : onToggleAdjustLine,
                   ),
@@ -2469,6 +2561,15 @@ class _ModeBar extends StatelessWidget {
       ),
     );
   }
+}
+
+/// A restore point for [_AuthorScreenState._undo] — see [_AuthorScreenState._pushUndo].
+class _EditSnapshot {
+  const _EditSnapshot(
+      {required this.anchors, required this.segments, required this.cues});
+  final List<LatLng> anchors;
+  final List<List<LatLng>> segments;
+  final List<Cue> cues;
 }
 
 /// A chosen target length + shape for auto-generation.
