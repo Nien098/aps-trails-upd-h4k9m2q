@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' show Point, exp, max, min, sqrt;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:maplibre_gl/maplibre_gl.dart';
@@ -456,7 +457,20 @@ class _AuthorScreenState extends State<AuthorScreen> {
       _drawBoundaryMode = !_drawBoundaryMode;
       _dragPoints.clear();
       _dragPreview.clear();
+      // These three drawing tools are mutually exclusive — without turning
+      // the others off here, switching tools left a previous tool's icon
+      // stuck showing "active" (and its now-stale hint banner still on
+      // screen) even though this tool had taken over.
+      if (_drawBoundaryMode) {
+        _previewGeneration++;
+        _dragDrawMode = false;
+        _strokePoints.clear();
+        _adjustLineMode = false;
+        _grabSegIdx = null;
+        _grabLocalIdx = null;
+      }
     });
+    await _strokeLayer?.setRoute(const [], _strokePreviewColor);
     // Cancelling mid-drag (or toggling the mode off) can leave the last
     // pushed live-preview shape on the map — restore whatever boundary was
     // actually confirmed before (or clear it if there wasn't one).
@@ -562,29 +576,36 @@ class _AuthorScreenState extends State<AuthorScreen> {
         _adjustLineMode = false;
         _grabSegIdx = null;
         _grabLocalIdx = null;
+        _drawBoundaryMode = false;
+        _dragPoints.clear();
+        _dragPreview.clear();
       }
     });
+    // Only needed when turning this tool on (which just force-cleared
+    // boundary mode above) — restores whatever boundary was actually
+    // confirmed before, in case a boundary drag was left mid-preview.
+    if (_dragDrawMode) await _boundaryLayer?.setPolygon(_genBoundary);
     await _strokeLayer?.setRoute(const [], _strokePreviewColor);
   }
 
-  void _onStrokePanStart(DragStartDetails d) {
+  void _onStrokePanStart(Offset p) {
     setState(() {
       _previewGeneration++;
       _strokePoints
         ..clear()
-        ..add(d.localPosition);
+        ..add(p);
       _strokePreview.clear();
     });
   }
 
-  void _onStrokePanUpdate(DragUpdateDetails d) {
+  void _onStrokePanUpdate(Offset p) {
     if (_strokePoints.isNotEmpty &&
         (_strokePoints.length >= _dragPointCap ||
-            (d.localPosition - _strokePoints.last).distance < _dragPointSpacing)) {
+            (p - _strokePoints.last).distance < _dragPointSpacing)) {
       return;
     }
-    setState(() => _strokePoints.add(d.localPosition));
-    _pushStrokePreview(d.localPosition);
+    setState(() => _strokePoints.add(p));
+    _pushStrokePreview(p);
   }
 
   /// Best-effort live preview of the raw (unsnapped) drag, drawn via
@@ -615,7 +636,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
   /// [TrailRouter.connect]) can send a whole stretch off toward an unrelated
   /// nearby trail when there's a gap; a local nudge can only pull a point a
   /// short bounded distance, so the drawn shape is always preserved.
-  Future<void> _onStrokePanEnd(DragEndDetails _) async {
+  Future<void> _onStrokePanEnd() async {
     final c = _c;
     final points = List<Offset>.of(_strokePoints);
     setState(() {
@@ -718,8 +739,15 @@ class _AuthorScreenState extends State<AuthorScreen> {
       if (_adjustLineMode) {
         _dragDrawMode = false;
         _strokePoints.clear();
+        _drawBoundaryMode = false;
+        _dragPoints.clear();
+        _dragPreview.clear();
       }
     });
+    // Only needed when turning this tool on (which just force-cleared
+    // boundary mode above) — restores whatever boundary was actually
+    // confirmed before, in case a boundary drag was left mid-preview.
+    if (_adjustLineMode) await _boundaryLayer?.setPolygon(_genBoundary);
     await _strokeLayer?.setRoute(const [], _strokePreviewColor);
   }
 
@@ -782,13 +810,12 @@ class _AuthorScreenState extends State<AuthorScreen> {
   /// to a segment's own anchor: those already have their own
   /// long-press-to-move interaction, and moving one here would have to stay
   /// in sync with the neighbouring segment that shares it.
-  Future<void> _onAdjustPanStart(DragStartDetails d) async {
+  Future<void> _onAdjustPanStart(Offset p) async {
     final c = _c;
     if (c == null) return;
     final gen = ++_previewGeneration;
     final dpr = MediaQuery.of(context).devicePixelRatio;
-    final latlng = await c
-        .toLatLng(Point(d.localPosition.dx * dpr, d.localPosition.dy * dpr));
+    final latlng = await c.toLatLng(Point(p.dx * dpr, p.dy * dpr));
     if (!mounted || !_adjustLineMode || gen != _previewGeneration) return;
 
     int? bestSeg, bestEdge;
@@ -842,9 +869,9 @@ class _AuthorScreenState extends State<AuthorScreen> {
     });
   }
 
-  void _onAdjustPanUpdate(DragUpdateDetails d) {
-    _lastAdjustOffset = d.localPosition;
-    _pushAdjustPreview(d.localPosition);
+  void _onAdjustPanUpdate(Offset p) {
+    _lastAdjustOffset = p;
+    _pushAdjustPreview(p);
   }
 
   /// Live preview of the wire-bend: deforms fresh from [_grabOriginalSeg]
@@ -889,7 +916,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
   /// drop position (see [_deformSegment]) and writes the result into
   /// [_segments]. No trail lookup — the wire-bend result is the final
   /// geometry.
-  Future<void> _onAdjustPanEnd(DragEndDetails _) async {
+  Future<void> _onAdjustPanEnd() async {
     final c = _c;
     final segIdx = _grabSegIdx,
         original = _grabOriginalSeg,
@@ -1476,24 +1503,6 @@ class _AuthorScreenState extends State<AuthorScreen> {
     await _c?.animateCamera(CameraUpdate.newLatLngZoom(here, 16));
   }
 
-  /// Adds a path point (or opens the cue editor) at the walker's current GPS
-  /// position — so an author can build a trail by walking it.
-  Future<void> _markHere() async {
-    final here = await _myLocation();
-    if (here == null || !mounted) return;
-    await _c?.animateCamera(CameraUpdate.newLatLng(here));
-    if (!mounted) return;
-    if (_cueMode) {
-      final cue = await showCueEditor(context,
-          position: here, initialOrder: _nextCueOrder);
-      if (!mounted || cue == null) return;
-      setState(() => _insertCueAtOrder(cue));
-      _dirty = true;
-      await _redraw();
-    } else {
-      await _addAnchor(here);
-    }
-  }
 
   /// Suggests turn cues along the currently drawn path. Adds them alongside any
   /// existing cues (after confirming a replace when cues are already present).
@@ -1646,6 +1655,20 @@ class _AuthorScreenState extends State<AuthorScreen> {
   Future<void> _resetView() async {
     await _c?.animateCamera(CameraUpdate.bearingTo(0));
     await _c?.animateCamera(CameraUpdate.tiltTo(0));
+  }
+
+  /// Same scroll-to-zoom convention as [BaseMap]'s own mouse-wheel handling
+  /// — needed again here because the full-screen absorber overlay each
+  /// drawing tool puts on top of the map (to claim drag input for itself)
+  /// is opaque to hit-testing, which stops the map's own [Listener]
+  /// underneath from ever seeing the scroll signal at all. Without this,
+  /// mouse-wheel zoom (the desktop/emulator input path) silently stopped
+  /// working the moment any drawing tool was turned on.
+  void _onToolOverlayWheel(PointerSignalEvent event) {
+    if (event is! PointerScrollEvent) return;
+    _c?.animateCamera(event.scrollDelta.dy < 0
+        ? CameraUpdate.zoomIn()
+        : CameraUpdate.zoomOut());
   }
 
   void _toast(String msg) {
@@ -1968,11 +1991,18 @@ class _AuthorScreenState extends State<AuthorScreen> {
             // work for the final result.
             if (_drawBoundaryMode)
               Positioned.fill(
-                child: GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onPanStart: _onBoundaryPanStart,
-                  onPanUpdate: _onBoundaryPanUpdate,
-                  onPanEnd: _onBoundaryPanEnd,
+                // Outer Listener forwards mouse-wheel zoom to the map — the
+                // GestureDetector below is opaque to hit-testing, which
+                // would otherwise stop BaseMap's own wheel-zoom Listener
+                // underneath it from ever seeing the scroll signal.
+                child: Listener(
+                  onPointerSignal: _onToolOverlayWheel,
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onPanStart: _onBoundaryPanStart,
+                    onPanUpdate: _onBoundaryPanUpdate,
+                    onPanEnd: _onBoundaryPanEnd,
+                  ),
                 ),
               ),
             if (_drawBoundaryMode)
@@ -2017,11 +2047,11 @@ class _AuthorScreenState extends State<AuthorScreen> {
             // cleanup only nudges points after Stop, not while recording.
             if (_dragDrawMode)
               Positioned.fill(
-                child: GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onPanStart: _onStrokePanStart,
-                  onPanUpdate: _onStrokePanUpdate,
-                  onPanEnd: _onStrokePanEnd,
+                child: _DrawGestureSurface(
+                  controller: _c,
+                  onStart: _onStrokePanStart,
+                  onUpdate: _onStrokePanUpdate,
+                  onEnd: _onStrokePanEnd,
                 ),
               ),
             if (_dragDrawMode)
@@ -2066,11 +2096,11 @@ class _AuthorScreenState extends State<AuthorScreen> {
             // line — see _onAdjustPanEnd/_deformSegment.
             if (_adjustLineMode)
               Positioned.fill(
-                child: GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onPanStart: _onAdjustPanStart,
-                  onPanUpdate: _onAdjustPanUpdate,
-                  onPanEnd: _onAdjustPanEnd,
+                child: _DrawGestureSurface(
+                  controller: _c,
+                  onStart: _onAdjustPanStart,
+                  onUpdate: _onAdjustPanUpdate,
+                  onEnd: _onAdjustPanEnd,
                 ),
               ),
             if (_adjustLineMode)
@@ -2144,16 +2174,6 @@ class _AuthorScreenState extends State<AuthorScreen> {
             Positioned(
               right: 12,
               top: 12,
-              child: FloatingActionButton.extended(
-                heroTag: 'markHere',
-                onPressed: _busy ? null : _markHere,
-                icon: const Icon(Icons.my_location),
-                label: const Text('Mark here'),
-              ),
-            ),
-            Positioned(
-              right: 12,
-              top: 78,
               child: FloatingActionButton.small(
                 heroTag: 'resetView',
                 tooltip: 'Face north / flat',
@@ -2163,7 +2183,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
             ),
             Positioned(
               right: 12,
-              top: 132,
+              top: 66,
               child: FloatingActionButton.small(
                 heroTag: 'centerMe',
                 tooltip: 'Center on my location',
@@ -2559,6 +2579,102 @@ class _ModeBar extends StatelessWidget {
         ),
       ),
       ),
+    );
+  }
+}
+
+/// Wraps the single-finger drag used by the drag-draw and line-adjust tools
+/// so a second finger landing mid-drag pans the camera instead of distorting
+/// the draw. The map's own gestures are disabled while either tool is active
+/// (see [BaseMap.gesturesEnabled]) — otherwise a single-finger touch here
+/// would also drag the camera underneath the draw — which means two-finger
+/// panning has to be reimplemented by hand instead of just falling through
+/// to the map's native gesture handling. Also forwards mouse-wheel scroll to
+/// [controller] for zoom, since this widget's opaque hit-testing would
+/// otherwise stop [BaseMap]'s own wheel-zoom [Listener] underneath it from
+/// ever seeing the signal.
+class _DrawGestureSurface extends StatefulWidget {
+  const _DrawGestureSurface({
+    required this.controller,
+    required this.onStart,
+    required this.onUpdate,
+    required this.onEnd,
+  });
+
+  final MapLibreMapController? controller;
+  final ValueChanged<Offset> onStart;
+  final ValueChanged<Offset> onUpdate;
+  final VoidCallback onEnd;
+
+  @override
+  State<_DrawGestureSurface> createState() => _DrawGestureSurfaceState();
+}
+
+class _DrawGestureSurfaceState extends State<_DrawGestureSurface> {
+  final Map<int, Offset> _pointers = {};
+  bool _drawing = false;
+  bool _panningCamera = false;
+
+  void _onPointerDown(PointerDownEvent e) {
+    _pointers[e.pointer] = e.localPosition;
+    if (_pointers.length == 1) {
+      _drawing = true;
+      widget.onStart(e.localPosition);
+    } else if (_pointers.length == 2 && _drawing) {
+      // A second finger landed mid single-finger draw — abandon the draw
+      // (it never gets an onEnd, so nothing partial commits) and switch the
+      // rest of this gesture to panning the camera instead.
+      _drawing = false;
+      _panningCamera = true;
+    }
+  }
+
+  void _onPointerMove(PointerMoveEvent e) {
+    final prev = _pointers[e.pointer];
+    if (prev == null) return;
+    _pointers[e.pointer] = e.localPosition;
+    if (_panningCamera) {
+      // scrollBy's dx/dy are logical (dp) pixels, not native device pixels —
+      // unlike toLatLng/toScreenLocation elsewhere in this file, the
+      // platform side multiplies by density itself. Averaged across active
+      // fingers so a two-finger drag tracks their midpoint rather than
+      // whichever finger's move event happens to arrive last. Sign is
+      // inverted from the delta so the map content follows the fingers
+      // (natural touch-drag panning), matching scrollBy's own documented
+      // "positive dx moves the camera target east" convention.
+      final delta = e.localPosition - prev;
+      widget.controller?.moveCamera(CameraUpdate.scrollBy(
+          -delta.dx / _pointers.length, -delta.dy / _pointers.length));
+    } else if (_drawing && _pointers.length == 1) {
+      widget.onUpdate(e.localPosition);
+    }
+  }
+
+  void _endPointer(int pointer) {
+    _pointers.remove(pointer);
+    if (_pointers.isEmpty) {
+      if (_drawing) widget.onEnd();
+      _drawing = false;
+      _panningCamera = false;
+    }
+  }
+
+  void _onWheel(PointerSignalEvent event) {
+    if (event is! PointerScrollEvent) return;
+    widget.controller?.animateCamera(event.scrollDelta.dy < 0
+        ? CameraUpdate.zoomIn()
+        : CameraUpdate.zoomOut());
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Listener(
+      behavior: HitTestBehavior.opaque,
+      onPointerDown: _onPointerDown,
+      onPointerMove: _onPointerMove,
+      onPointerUp: (e) => _endPointer(e.pointer),
+      onPointerCancel: (e) => _endPointer(e.pointer),
+      onPointerSignal: _onWheel,
     );
   }
 }
