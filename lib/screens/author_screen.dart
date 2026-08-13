@@ -477,23 +477,23 @@ class _AuthorScreenState extends State<AuthorScreen> {
     await _boundaryLayer?.setPolygon(_genBoundary);
   }
 
-  void _onBoundaryPanStart(DragStartDetails d) {
+  void _onBoundaryPanStart(Offset p) {
     setState(() {
       _dragPoints
         ..clear()
-        ..add(d.localPosition);
+        ..add(p);
       _dragPreview.clear();
     });
   }
 
-  void _onBoundaryPanUpdate(DragUpdateDetails d) {
+  void _onBoundaryPanUpdate(Offset p) {
     if (_dragPoints.isNotEmpty &&
         (_dragPoints.length >= _dragPointCap ||
-            (d.localPosition - _dragPoints.last).distance < _dragPointSpacing)) {
+            (p - _dragPoints.last).distance < _dragPointSpacing)) {
       return;
     }
-    setState(() => _dragPoints.add(d.localPosition));
-    _pushDragPreview(d.localPosition);
+    setState(() => _dragPoints.add(p));
+    _pushDragPreview(p);
   }
 
   /// Best-effort live preview via the map's own rendering (see
@@ -519,7 +519,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
     }
   }
 
-  Future<void> _onBoundaryPanEnd(DragEndDetails _) async {
+  Future<void> _onBoundaryPanEnd() async {
     final c = _c;
     final points = List<Offset>.of(_dragPoints);
     setState(() {
@@ -1628,7 +1628,14 @@ class _AuthorScreenState extends State<AuthorScreen> {
             ..addAll(suggestCues(route.path, junctions: junctions));
         }
         _dirty = true;
+        // The boundary outline has done its job once a route's been
+        // generated inside it — leaving it on screen afterwards just reads
+        // as a leftover shape with no purpose (and a re-generate is meant
+        // to use the current view/anchors, not silently re-apply an old
+        // boundary the author has no way to tell is still in effect).
+        if (boundary != null) _genBoundary = null;
       });
+      if (boundary != null) await _boundaryLayer?.setPolygon(null);
       await _redraw();
       final dist = Settings.instance.formatDistance(route.meters);
       final cueNote = choice.cues ? ' · ${_trail.cues.length} cues' : '';
@@ -1657,19 +1664,6 @@ class _AuthorScreenState extends State<AuthorScreen> {
     await _c?.animateCamera(CameraUpdate.tiltTo(0));
   }
 
-  /// Same scroll-to-zoom convention as [BaseMap]'s own mouse-wheel handling
-  /// — needed again here because the full-screen absorber overlay each
-  /// drawing tool puts on top of the map (to claim drag input for itself)
-  /// is opaque to hit-testing, which stops the map's own [Listener]
-  /// underneath from ever seeing the scroll signal at all. Without this,
-  /// mouse-wheel zoom (the desktop/emulator input path) silently stopped
-  /// working the moment any drawing tool was turned on.
-  void _onToolOverlayWheel(PointerSignalEvent event) {
-    if (event is! PointerScrollEvent) return;
-    _c?.animateCamera(event.scrollDelta.dy < 0
-        ? CameraUpdate.zoomIn()
-        : CameraUpdate.zoomOut());
-  }
 
   void _toast(String msg) {
     if (mounted) {
@@ -1991,18 +1985,11 @@ class _AuthorScreenState extends State<AuthorScreen> {
             // work for the final result.
             if (_drawBoundaryMode)
               Positioned.fill(
-                // Outer Listener forwards mouse-wheel zoom to the map — the
-                // GestureDetector below is opaque to hit-testing, which
-                // would otherwise stop BaseMap's own wheel-zoom Listener
-                // underneath it from ever seeing the scroll signal.
-                child: Listener(
-                  onPointerSignal: _onToolOverlayWheel,
-                  child: GestureDetector(
-                    behavior: HitTestBehavior.opaque,
-                    onPanStart: _onBoundaryPanStart,
-                    onPanUpdate: _onBoundaryPanUpdate,
-                    onPanEnd: _onBoundaryPanEnd,
-                  ),
+                child: _DrawGestureSurface(
+                  controller: _c,
+                  onStart: _onBoundaryPanStart,
+                  onUpdate: _onBoundaryPanUpdate,
+                  onEnd: _onBoundaryPanEnd,
                 ),
               ),
             if (_drawBoundaryMode)
@@ -2133,64 +2120,6 @@ class _AuthorScreenState extends State<AuthorScreen> {
                   ),
                 ),
               ),
-            if (_genBoundary != null &&
-                !_drawBoundaryMode &&
-                _moving == null &&
-                _movingAnchor == null)
-              Positioned(
-                left: 12,
-                right: 12,
-                bottom: 190 + MediaQuery.viewPaddingOf(context).bottom,
-                child: MediaQuery.withClampedTextScaling(
-                  maxScaleFactor: 1.3,
-                  child: Card(
-                    elevation: 4,
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 14, vertical: 10),
-                      child: Row(
-                        children: [
-                          const Icon(Icons.draw),
-                          const SizedBox(width: 10),
-                          const Expanded(
-                            child: Text('Boundary area set',
-                                style: TextStyle(fontWeight: FontWeight.w600)),
-                          ),
-                          TextButton(
-                            onPressed: _clearBoundary,
-                            child: const Text('Clear'),
-                          ),
-                          FilledButton(
-                            onPressed: _busy ? null : _openGenerator,
-                            child: const Text('Generate here'),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            // Top-right so the (variable-height) mode bar never covers it.
-            Positioned(
-              right: 12,
-              top: 12,
-              child: FloatingActionButton.small(
-                heroTag: 'resetView',
-                tooltip: 'Face north / flat',
-                onPressed: _resetView,
-                child: const Icon(Icons.explore),
-              ),
-            ),
-            Positioned(
-              right: 12,
-              top: 66,
-              child: FloatingActionButton.small(
-                heroTag: 'centerMe',
-                tooltip: 'Center on my location',
-                onPressed: _centerOnMe,
-                child: const Icon(Icons.gps_fixed),
-              ),
-            ),
             if (_busy)
               const Positioned(
                 top: 12,
@@ -2213,23 +2142,80 @@ class _AuthorScreenState extends State<AuthorScreen> {
                 ),
               ),
             Positioned(
-              left: _modeBarHidden ? null : 12,
+              // Always full-width (not just when the mode bar itself is
+              // showing) — the boundary-generate card below needs the same
+              // width whether or not the mode bar is currently collapsed to
+              // its small restore icon.
+              left: 12,
               right: 12,
               // Lift above the Android nav bar (0 on gesture-nav phones).
               bottom: 16 + MediaQuery.viewPaddingOf(context).bottom,
-              child: _modeBarHidden
-                  // Hidden entirely — just a small corner FAB (same style as
-                  // the map's other small FABs) to bring it back, restoring
-                  // whatever expanded/collapsed state it was in before.
-                  ? FloatingActionButton.small(
-                      heroTag: 'modeBarRestore',
-                      tooltip: 'Show trail controls',
-                      onPressed: () => setState(() => _modeBarHidden = false),
-                      child: Icon(_cueMode
-                          ? Icons.add_location_alt
-                          : Icons.timeline),
+              // Stacked in one Column (rather than two independently
+              // Positioned cards with a hand-tuned pixel gap) so the
+              // boundary-generate card always sits directly above whatever
+              // occupies this corner — the full mode bar, or just its
+              // collapsed restore icon — instead of the fixed offset it used
+              // to have, which put it behind the mode bar whenever the mode
+              // bar grew taller than that offset assumed.
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (_genBoundary != null &&
+                      !_drawBoundaryMode &&
+                      _moving == null &&
+                      _movingAnchor == null) ...[
+                    MediaQuery.withClampedTextScaling(
+                      maxScaleFactor: 1.3,
+                      child: Card(
+                        elevation: 4,
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 14, vertical: 10),
+                          child: Row(
+                            children: [
+                              const Icon(Icons.draw),
+                              const SizedBox(width: 10),
+                              const Expanded(
+                                child: Text('Boundary area set',
+                                    style:
+                                        TextStyle(fontWeight: FontWeight.w600)),
+                              ),
+                              TextButton(
+                                onPressed: _clearBoundary,
+                                child: const Text('Clear'),
+                              ),
+                              FilledButton(
+                                onPressed: _busy ? null : _openGenerator,
+                                child: const Text('Generate here'),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                  ],
+                  if (_modeBarHidden)
+                    // Hidden entirely — just a small corner FAB (same style
+                    // as the map's other small FABs) to bring it back,
+                    // restoring whatever expanded/collapsed state it was in
+                    // before. Align keeps it hugging the right edge instead
+                    // of stretching to the Column's full width.
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: FloatingActionButton.small(
+                        heroTag: 'modeBarRestore',
+                        tooltip: 'Show trail controls',
+                        onPressed: () =>
+                            setState(() => _modeBarHidden = false),
+                        child: Icon(_cueMode
+                            ? Icons.add_location_alt
+                            : Icons.timeline),
+                      ),
                     )
-                  : _ModeBar(
+                  else
+                    _ModeBar(
                       cueMode: _cueMode,
                       follow: _follow,
                       anchorCount: _trail.anchors.length,
@@ -2275,13 +2261,19 @@ class _AuthorScreenState extends State<AuthorScreen> {
                       onToggleDragDraw: _toggleDragDraw,
                       adjustLineActive: _adjustLineMode,
                       onToggleAdjustLine: _toggleAdjustLine,
+                      onResetView: _resetView,
+                      onCenterMe: _centerOnMe,
                     ),
+                ],
+              ),
             ),
             if (_moving != null)
               Positioned(
                 left: 12,
                 right: 12,
-                bottom: 190 + MediaQuery.viewPaddingOf(context).bottom,
+                // Bumped from the mode bar's old baseline height to clear
+                // the view-control row (face-north/center-me) added to it.
+                bottom: 224 + MediaQuery.viewPaddingOf(context).bottom,
                 child: MediaQuery.withClampedTextScaling(
                   maxScaleFactor: 1.3,
                   child: Card(
@@ -2312,7 +2304,9 @@ class _AuthorScreenState extends State<AuthorScreen> {
               Positioned(
                 left: 12,
                 right: 12,
-                bottom: 190 + MediaQuery.viewPaddingOf(context).bottom,
+                // Bumped from the mode bar's old baseline height to clear
+                // the view-control row (face-north/center-me) added to it.
+                bottom: 224 + MediaQuery.viewPaddingOf(context).bottom,
                 child: MediaQuery.withClampedTextScaling(
                   maxScaleFactor: 1.3,
                   child: Card(
@@ -2372,6 +2366,8 @@ class _ModeBar extends StatelessWidget {
     required this.onToggleDragDraw,
     required this.adjustLineActive,
     required this.onToggleAdjustLine,
+    required this.onResetView,
+    required this.onCenterMe,
   });
 
   final bool cueMode;
@@ -2402,6 +2398,13 @@ class _ModeBar extends StatelessWidget {
   /// see [_AuthorScreenState._adjustLineMode].
   final bool adjustLineActive;
   final VoidCallback onToggleAdjustLine;
+
+  /// Snaps the camera back to north/flat, and centres it on the author's
+  /// current GPS position — moved in here (off the map's edge, where they
+  /// used to float as separate FABs) so they sit with the rest of the
+  /// editor's controls instead of overlapping the map.
+  final VoidCallback onResetView;
+  final VoidCallback onCenterMe;
 
   /// Explicit high-contrast "on" style for the three drawing-tool toggles
   /// above — the default Material 3 `isSelected` tonal fill is derived from
@@ -2505,6 +2508,36 @@ class _ModeBar extends StatelessWidget {
                     icon: const Icon(Icons.close),
                     onPressed: onHide,
                   ),
+                ],
+              ),
+              // View controls (face-north, center-on-me) on their own slim
+              // row rather than crammed into the drawing-tool row above,
+              // which was already tight enough on narrow phones without
+              // adding two more icons to it. These used to float as
+              // separate FABs over the map itself, in the way of whatever
+              // was underneath them.
+              Row(
+                children: [
+                  IconButton(
+                    visualDensity: VisualDensity.compact,
+                    constraints: const BoxConstraints(),
+                    padding: const EdgeInsets.all(4),
+                    iconSize: 20,
+                    tooltip: 'Face north / flat',
+                    icon: const Icon(Icons.explore),
+                    onPressed: onResetView,
+                  ),
+                  const SizedBox(width: 4),
+                  IconButton(
+                    visualDensity: VisualDensity.compact,
+                    constraints: const BoxConstraints(),
+                    padding: const EdgeInsets.all(4),
+                    iconSize: 20,
+                    tooltip: 'Center on my location',
+                    icon: const Icon(Icons.gps_fixed),
+                    onPressed: onCenterMe,
+                  ),
+                  const Spacer(),
                 ],
               ),
               // Its own row, full width — see the comment above this method
@@ -2638,13 +2671,14 @@ class _DrawGestureSurfaceState extends State<_DrawGestureSurface> {
       // unlike toLatLng/toScreenLocation elsewhere in this file, the
       // platform side multiplies by density itself. Averaged across active
       // fingers so a two-finger drag tracks their midpoint rather than
-      // whichever finger's move event happens to arrive last. Sign is
-      // inverted from the delta so the map content follows the fingers
-      // (natural touch-drag panning), matching scrollBy's own documented
-      // "positive dx moves the camera target east" convention.
+      // whichever finger's move event happens to arrive last. Same sign as
+      // the raw delta (not inverted) — confirmed against scrollBy's actual
+      // on-device behaviour, which pans the map content in the direction
+      // the fingers move (the doc's "positive dx moves the camera target
+      // east" reads as the opposite of what it does in practice here).
       final delta = e.localPosition - prev;
       widget.controller?.moveCamera(CameraUpdate.scrollBy(
-          -delta.dx / _pointers.length, -delta.dy / _pointers.length));
+          delta.dx / _pointers.length, delta.dy / _pointers.length));
     } else if (_drawing && _pointers.length == 1) {
       widget.onUpdate(e.localPosition);
     }
