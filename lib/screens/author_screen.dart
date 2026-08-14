@@ -7,6 +7,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:maplibre_gl/maplibre_gl.dart';
 
 import '../cue_style.dart';
+import '../models/bookmark.dart';
 import '../models/region.dart';
 import '../models/trail.dart';
 import '../trail_colors.dart';
@@ -21,18 +22,27 @@ import '../services/trail_store.dart';
 import '../widgets/base_map.dart';
 import '../widgets/cue_editor_sheet.dart';
 import '../widgets/map_search_bar.dart';
+import 'bookmarks_screen.dart';
 import 'cue_list_screen.dart';
 
 /// Trail editor. Tap the map to lay the path (Path mode) or drop a labelled
 /// direction cue (Cue mode). Tap an existing cue marker to edit or delete it.
 class AuthorScreen extends StatefulWidget {
-  const AuthorScreen({super.key, this.trail, this.region});
+  const AuthorScreen({super.key, this.trail, this.region, this.initialCenter});
 
   /// Existing trail to edit, or null to start a new one.
   final Trail? trail;
 
   /// Region for a new trail (ignored when editing an existing trail).
   final Region? region;
+
+  /// Camera target for a brand-new trail (ignored when editing an existing
+  /// trail, which always opens on its own first point) — lets a map screen
+  /// jump straight into edit mode centered on a specific spot (e.g. a
+  /// bookmark) instead of the region's generic bookmarked center. Doesn't
+  /// place a starting anchor by itself; the author still taps the map to
+  /// begin drawing, same as any other new trail.
+  final LatLng? initialCenter;
 
   @override
   State<AuthorScreen> createState() => _AuthorScreenState();
@@ -1071,7 +1081,9 @@ class _AuthorScreenState extends State<AuthorScreen> {
   }
 
   CameraPosition get _initialCamera {
-    final target = _trail.path.isNotEmpty ? _trail.path.first : _region.center;
+    final target = _trail.path.isNotEmpty
+        ? _trail.path.first
+        : widget.initialCenter ?? _region.center;
     return CameraPosition(target: target, zoom: 15);
   }
 
@@ -1630,6 +1642,21 @@ class _AuthorScreenState extends State<AuthorScreen> {
   Future<void> _onSearchResult(SearchResult result) async {
     setState(() => _searchOpen = false);
     await jumpCamera(_c, result.position);
+  }
+
+  /// Opens the full bookmarks list and jumps to whichever one is picked —
+  /// same [_region]-confinement reasoning as [_onSearchResult]: a bookmark
+  /// outside it sits on a basemap this screen can't swap to mid-edit, so
+  /// that case just tells the author instead of silently doing nothing.
+  Future<void> _openBookmarks() async {
+    final picked = await Navigator.push<Bookmark>(
+        context, MaterialPageRoute(builder: (_) => const BookmarksScreen()));
+    if (picked == null || !mounted) return;
+    if (regionForPoint(picked.position).mapAsset != _region.mapAsset) {
+      _toast('"${picked.name}" is outside this trail\'s map area');
+      return;
+    }
+    await jumpCamera(_c, picked.position);
   }
 
 
@@ -2414,6 +2441,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
                       onResetView: _resetView,
                       onCenterMe: _centerOnMe,
                       onSearch: () => setState(() => _searchOpen = !_searchOpen),
+                      onBookmarks: _openBookmarks,
                     ),
                 ],
               ),
@@ -2520,6 +2548,7 @@ class _ModeBar extends StatelessWidget {
     required this.onResetView,
     required this.onCenterMe,
     required this.onSearch,
+    required this.onBookmarks,
   });
 
   final bool cueMode;
@@ -2558,6 +2587,7 @@ class _ModeBar extends StatelessWidget {
   final VoidCallback onResetView;
   final VoidCallback onCenterMe;
   final VoidCallback onSearch;
+  final VoidCallback onBookmarks;
 
   /// Explicit high-contrast "on" style for the three drawing-tool toggles
   /// above — the default Material 3 `isSelected` tonal fill is derived from
@@ -2699,6 +2729,16 @@ class _ModeBar extends StatelessWidget {
                     tooltip: 'Search streets and trails',
                     icon: const Icon(Icons.search),
                     onPressed: onSearch,
+                  ),
+                  const SizedBox(width: 4),
+                  IconButton(
+                    visualDensity: VisualDensity.compact,
+                    constraints: const BoxConstraints(),
+                    padding: const EdgeInsets.all(4),
+                    iconSize: 20,
+                    tooltip: 'Bookmarks',
+                    icon: const Icon(Icons.bookmark),
+                    onPressed: onBookmarks,
                   ),
                   const Spacer(),
                 ],

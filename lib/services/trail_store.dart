@@ -3,6 +3,7 @@ import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart' as p;
 
 import '../models/activity.dart';
+import '../models/bookmark.dart';
 import '../models/trail.dart';
 
 /// Local-first storage for trails, backed by a plain SQLite table.
@@ -18,7 +19,7 @@ class TrailStore {
     final dir = await getDatabasesPath();
     _db = await openDatabase(
       p.join(dir, 'trailguide.db'),
-      version: 9,
+      version: 10,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE trails (
@@ -38,6 +39,7 @@ class TrailStore {
         await _createActivities(db);
         await _createWalkProgress(db);
         await _createRecordingProgress(db);
+        await _createBookmarks(db);
       },
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) {
@@ -71,9 +73,26 @@ class TrailStore {
         if (oldVersion < 9) {
           await _createRecordingProgress(db);
         }
+        if (oldVersion < 10) {
+          await _createBookmarks(db);
+        }
       },
     );
     return _db!;
+  }
+
+  static Future<void> _createBookmarks(Database db) async {
+    await db.execute('''
+      CREATE TABLE bookmarks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        category TEXT NOT NULL DEFAULT 'other',
+        lat REAL NOT NULL,
+        lng REAL NOT NULL,
+        note TEXT NOT NULL DEFAULT '',
+        created_at INTEGER NOT NULL
+      )
+    ''');
   }
 
   static Future<void> _createActivities(Database db) async {
@@ -277,6 +296,48 @@ class TrailStore {
     final db = await _database;
     await db.delete('recording_progress');
   }
+
+  /// All saved bookmarks, newest first.
+  Future<List<Bookmark>> allBookmarks() async {
+    final db = await _database;
+    final rows = await db.query('bookmarks', orderBy: 'created_at DESC');
+    return rows.map(_bookmarkFromRow).toList();
+  }
+
+  Future<Bookmark> saveBookmark(Bookmark b) async {
+    final db = await _database;
+    final values = {
+      'name': b.name,
+      'category': b.category.name,
+      'lat': b.position.latitude,
+      'lng': b.position.longitude,
+      'note': b.note,
+      'created_at': b.createdAt.millisecondsSinceEpoch,
+    };
+    if (b.id == null) {
+      b.id = await db.insert('bookmarks', values);
+    } else {
+      await db.update('bookmarks', values, where: 'id = ?', whereArgs: [b.id]);
+    }
+    return b;
+  }
+
+  Future<void> deleteBookmark(int id) async {
+    final db = await _database;
+    await db.delete('bookmarks', where: 'id = ?', whereArgs: [id]);
+  }
+
+  Bookmark _bookmarkFromRow(Map<String, Object?> r) => Bookmark(
+        id: r['id'] as int,
+        name: r['name'] as String,
+        category: BookmarkCategory.values.firstWhere(
+          (c) => c.name == r['category'] as String,
+          orElse: () => BookmarkCategory.other,
+        ),
+        position: LatLng((r['lat'] as num).toDouble(), (r['lng'] as num).toDouble()),
+        note: (r['note'] as String?) ?? '',
+        createdAt: DateTime.fromMillisecondsSinceEpoch(r['created_at'] as int),
+      );
 
   Trail _fromRow(Map<String, Object?> r) {
     final path = Trail.pathFromJson(r['path'] as String);

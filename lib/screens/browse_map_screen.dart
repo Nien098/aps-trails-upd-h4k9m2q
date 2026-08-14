@@ -1,11 +1,19 @@
+import 'dart:math' show Point;
+
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:maplibre_gl/maplibre_gl.dart';
 
+import '../models/bookmark.dart';
 import '../models/region.dart';
+import '../services/bookmark_layer.dart';
 import '../services/search_service.dart';
+import '../services/trail_store.dart';
 import '../widgets/base_map.dart';
+import '../widgets/bookmark_edit_sheet.dart';
 import '../widgets/map_search_bar.dart';
+import 'author_screen.dart';
+import 'bookmarks_screen.dart';
 import 'region_picker_screen.dart';
 
 /// View-only offline map — pan/zoom/search freely, no trail or edit context,
@@ -27,6 +35,7 @@ class _BrowseMapScreenState extends State<BrowseMapScreen> {
   late Region _region = widget.region;
   MapLibreMapController? _c;
   bool _searchOpen = false;
+  BookmarkLayer? _bookmarkLayer;
 
   /// Set just before a basemap-swapping jump (see [_goTo]) so the freshly
   /// remounted [BaseMap] opens on the searched spot instead of the new
@@ -36,7 +45,138 @@ class _BrowseMapScreenState extends State<BrowseMapScreen> {
   CameraPosition get _initialCamera =>
       _pendingCamera ?? CameraPosition(target: _region.center, zoom: 13);
 
-  void _onMapCreated(MapLibreMapController c) => _c = c;
+  void _onMapCreated(MapLibreMapController c) {
+    _c = c;
+    _bookmarkLayer = BookmarkLayer(c);
+    _bookmarkLayer!.listen(_onBookmarkTapped);
+  }
+
+  /// Bookmark markers use the circle/symbol annotation API (see
+  /// [BookmarkLayer]), which — like [AuthorScreen]'s cue markers — needs the
+  /// style loaded before it'll draw, not just the controller created.
+  Future<void> _onStyleLoaded() => _loadBookmarks();
+
+  /// (Re)loads bookmarks onto the map, filtered to whatever's reachable on
+  /// the currently-loaded basemap — same reasoning as
+  /// [SearchService.search]'s `confineTo`: a bookmark elsewhere would jump
+  /// to nothing rendered if tapped, since it lives on a different pmtiles
+  /// file. Called after `onStyleLoaded` (a basemap swap remounts [BaseMap],
+  /// which re-fires it) and after any add/edit/delete so the pins stay
+  /// current.
+  Future<void> _loadBookmarks() async {
+    final all = await TrailStore.instance.allBookmarks();
+    final reachable = all
+        .where((b) => regionForPoint(b.position).mapAsset == _region.mapAsset)
+        .toList();
+    await _bookmarkLayer?.setBookmarks(reachable);
+  }
+
+  Future<void> _onMapLongClick(Point<double> point, LatLng coords) async {
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.bookmark_add),
+              title: const Text('Add bookmark here'),
+              onTap: () => Navigator.pop(context, 'bookmark'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.route),
+              title: const Text('Start a new trail here'),
+              onTap: () => Navigator.pop(context, 'trail'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (!mounted || choice == null) return;
+    if (choice == 'bookmark') {
+      await _addBookmark(coords);
+    } else if (choice == 'trail') {
+      await _startTrailHere(coords);
+    }
+  }
+
+  Future<void> _addBookmark(LatLng position) async {
+    final b = await showBookmarkEditSheet(context, position: position);
+    if (b == null) return;
+    await TrailStore.instance.saveBookmark(b);
+    await _loadBookmarks();
+  }
+
+  Future<void> _startTrailHere(LatLng position) async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => AuthorScreen(
+          region: regionForPoint(position),
+          initialCenter: position,
+        ),
+      ),
+    );
+  }
+
+  Future<void> _onBookmarkTapped(Bookmark b) async {
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: Icon(b.category.icon, color: b.category.color),
+              title: Text(b.name),
+              subtitle: Text(
+                  b.note.isEmpty ? b.category.label : '${b.category.label} · ${b.note}'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.route),
+              title: const Text('Start a new trail here'),
+              onTap: () => Navigator.pop(context, 'trail'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.edit),
+              title: const Text('Edit'),
+              onTap: () => Navigator.pop(context, 'edit'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.delete_outline),
+              title: const Text('Delete'),
+              onTap: () => Navigator.pop(context, 'delete'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (!mounted || choice == null) return;
+    switch (choice) {
+      case 'trail':
+        await _startTrailHere(b.position);
+      case 'edit':
+        final updated =
+            await showBookmarkEditSheet(context, position: b.position, existing: b);
+        if (updated != null) {
+          await TrailStore.instance.saveBookmark(updated);
+          await _loadBookmarks();
+        }
+      case 'delete':
+        if (b.id != null) {
+          await TrailStore.instance.deleteBookmark(b.id!);
+          await _loadBookmarks();
+        }
+    }
+  }
+
+  Future<void> _openBookmarksList() async {
+    final picked = await Navigator.push<Bookmark>(
+        context, MaterialPageRoute(builder: (_) => const BookmarksScreen()));
+    // Refresh regardless of pick — the list screen edits/deletes in place.
+    await _loadBookmarks();
+    if (picked != null) _goTo(picked.position);
+  }
 
   /// Jumps to [pos]. If it's on the basemap already loaded (same
   /// `mapAsset` — true for any two bundled regions, since they all share one
@@ -137,6 +277,8 @@ class _BrowseMapScreenState extends State<BrowseMapScreen> {
             region: _region,
             initialCamera: _initialCamera,
             onMapCreated: _onMapCreated,
+            onStyleLoaded: _onStyleLoaded,
+            onMapLongClick: _onMapLongClick,
             myLocationEnabled: true,
           ),
           if (_searchOpen)
@@ -172,6 +314,14 @@ class _BrowseMapScreenState extends State<BrowseMapScreen> {
                     tooltip: 'Search streets and trails',
                     onPressed: () => setState(() => _searchOpen = !_searchOpen),
                     child: const Icon(Icons.search),
+                  ),
+                  const SizedBox(height: 10),
+                  FloatingActionButton(
+                    heroTag: 'browseBookmarks',
+                    mini: true,
+                    tooltip: 'Bookmarks',
+                    onPressed: _openBookmarksList,
+                    child: const Icon(Icons.bookmark),
                   ),
                 ],
               ),
