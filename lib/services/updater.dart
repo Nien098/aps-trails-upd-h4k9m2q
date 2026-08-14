@@ -9,6 +9,11 @@ import 'package:path_provider/path_provider.dart';
 import '../config.dart';
 import 'native_bridge.dart';
 
+/// Minimum gap between download-notification text updates — the raw byte
+/// progress stream fires far more often than a notification needs to
+/// redraw, and each update is its own platform-channel round trip.
+const _kNotifyInterval = Duration(milliseconds: 800);
+
 /// A release fetched from GitHub — its tag must exactly match `pubspec.yaml`'s
 /// `version:` (e.g. `1.5.0+11`) with the built APK attached as an asset.
 class UpdateInfo {
@@ -145,6 +150,14 @@ class Updater {
     status.value = UpdateStatus(UpdatePhase.downloading, info: info, total: info.sizeBytes);
 
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 20);
+    // Keeps this process alive (and the HttpClient stream below running) if
+    // the app is backgrounded or the screen locks mid-download — without
+    // this, Android can suspend the isolate within seconds and the download
+    // silently stalls, which is exactly the "closes the app, download fails"
+    // report this exists to fix. Stopped in `finally` no matter how the
+    // download ends, so it never outlives it.
+    await NativeBridge.startDownloadKeepAlive('Downloading update…');
+    var lastNotify = DateTime.now();
     try {
       final docs = await getApplicationDocumentsDirectory();
       final dir = Directory('${docs.path}/updates');
@@ -170,6 +183,12 @@ class Updater {
         received += chunk.length;
         status.value = UpdateStatus(UpdatePhase.downloading,
             info: info, received: received, total: total);
+        final now = DateTime.now();
+        if (now.difference(lastNotify) >= _kNotifyInterval) {
+          lastNotify = now;
+          final pct = total > 0 ? (received / total * 100).round() : 0;
+          NativeBridge.updateDownloadKeepAlive('Downloading update… $pct%');
+        }
       }
       await sink.close();
       status.value = UpdateStatus(UpdatePhase.downloaded, info: info, filePath: path);
@@ -178,6 +197,7 @@ class Updater {
           info: info, error: 'Download failed: $e');
     } finally {
       client.close(force: true);
+      await NativeBridge.stopDownloadKeepAlive();
     }
   }
 

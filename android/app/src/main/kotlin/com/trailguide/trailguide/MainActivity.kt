@@ -87,6 +87,32 @@ class MainActivity : FlutterActivity() {
                         }
                         result.success(null)
                     }
+                    "startDownloadKeepAlive" -> {
+                        val text = call.argument<String>("text") ?: "Downloading…"
+                        val svc = Intent(this, DownloadKeepAliveService::class.java)
+                            .putExtra(DownloadKeepAliveService.EXTRA_TEXT, text)
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            startForegroundService(svc)
+                        } else {
+                            startService(svc)
+                        }
+                        result.success(null)
+                    }
+                    "updateDownloadKeepAlive" -> {
+                        val text = call.argument<String>("text") ?: "Downloading…"
+                        val svc = Intent(this, DownloadKeepAliveService::class.java)
+                            .putExtra(DownloadKeepAliveService.EXTRA_TEXT, text)
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            startForegroundService(svc)
+                        } else {
+                            startService(svc)
+                        }
+                        result.success(null)
+                    }
+                    "stopDownloadKeepAlive" -> {
+                        stopService(Intent(this, DownloadKeepAliveService::class.java))
+                        result.success(null)
+                    }
                     "sendSms" -> sendSms(
                         call.argument<String>("phone") ?: "",
                         call.argument<String>("message") ?: "",

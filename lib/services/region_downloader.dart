@@ -8,9 +8,15 @@ import 'package:path_provider/path_provider.dart';
 
 import '../config.dart';
 import '../models/region.dart';
+import 'native_bridge.dart';
 import 'pmtiles_writer.dart';
 import 'route_graph_store.dart';
 import 'search_service.dart';
+
+/// Minimum gap between download-notification text updates — the raw
+/// tile/cell progress stream fires far more often than a notification needs
+/// to redraw, and each update is its own platform-channel round trip.
+const _kNotifyInterval = Duration(milliseconds: 800);
 
 /// Progress of a region download. [phase] labels which step is running —
 /// map tiles, then street names, then route-graph data — since all three
@@ -126,6 +132,45 @@ class RegionDownloader {
     final outPath = '${mapDir.path}/$id.pmtiles';
     final tempPath = '${mapDir.path}/$id.tiles.tmp';
 
+    // Keeps this process alive (and the tile-fetch/Overpass loops below
+    // running) if the app is backgrounded or the screen locks mid-download
+    // — without this, Android can suspend the isolate within seconds and
+    // the download silently stalls. Stopped in `finally` below no matter
+    // how the download ends, so it never outlives it.
+    await NativeBridge.startDownloadKeepAlive('Downloading $name…');
+    var lastNotify = DateTime.now();
+    void report(DownloadProgress p) {
+      onProgress?.call(p);
+      final now = DateTime.now();
+      if (now.difference(lastNotify) >= _kNotifyInterval) {
+        lastNotify = now;
+        final pct = p.total > 0 ? (p.done / p.total * 100).round() : 0;
+        NativeBridge.updateDownloadKeepAlive('${p.phase} ($name)… $pct%');
+      }
+    }
+
+    try {
+      return await _downloadInner(
+        id: id, name: name, west: west, south: south, east: east, north: north,
+        tiles: tiles, outPath: outPath, tempPath: tempPath, onProgress: report,
+      );
+    } finally {
+      await NativeBridge.stopDownloadKeepAlive();
+    }
+  }
+
+  Future<Region?> _downloadInner({
+    required String id,
+    required String name,
+    required double west,
+    required double south,
+    required double east,
+    required double north,
+    required List<List<int>> tiles,
+    required String outPath,
+    required String tempPath,
+    void Function(DownloadProgress)? onProgress,
+  }) async {
     final writer = await PmTilesWriter.create(tempPath);
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 20);
     var done = 0;

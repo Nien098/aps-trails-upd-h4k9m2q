@@ -74,6 +74,32 @@ class NativeBridge {
     } catch (_) {}
   }
 
+  /// Starts the foreground service that keeps the app alive with the screen
+  /// off or the app backgrounded during a region/app-update download — see
+  /// DownloadKeepAliveService.kt. Call before starting an
+  /// [HttpClient]-driven download and [stopDownloadKeepAlive] in that
+  /// download's `finally` block; without this the Dart isolate can be
+  /// suspended by Android within seconds of backgrounding, silently
+  /// stalling/aborting a multi-minute download.
+  static Future<void> startDownloadKeepAlive(String text) async {
+    try {
+      await _ch.invokeMethod('startDownloadKeepAlive', {'text': text});
+    } catch (_) {}
+  }
+
+  /// Updates the download notification's text (e.g. progress percentage).
+  static Future<void> updateDownloadKeepAlive(String text) async {
+    try {
+      await _ch.invokeMethod('updateDownloadKeepAlive', {'text': text});
+    } catch (_) {}
+  }
+
+  static Future<void> stopDownloadKeepAlive() async {
+    try {
+      await _ch.invokeMethod('stopDownloadKeepAlive');
+    } catch (_) {}
+  }
+
   /// Sends an SMS and reports whether the carrier actually accepted it (not
   /// just that the call didn't throw) — false on no signal/no SIM/etc.
   static Future<bool> sendSms(String phone, String message) async {

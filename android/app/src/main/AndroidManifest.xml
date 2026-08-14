@@ -7,6 +7,9 @@
     <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION"/>
+    <!-- Keeps a region/app-update download running to completion when the
+         app is backgrounded or the screen locks (see DownloadKeepAliveService). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <!-- Emergency stillness alert (opt-in, Settings). -->
     <uses-permission android:name="android.permission.SEND_SMS"/>
@@ -79,6 +82,12 @@
         <service
             android:name=".TrackingService"
             android:foregroundServiceType="location"
+            android:exported="false"/>
+        <!-- Keeps the process alive for the duration of a region/app-update
+             download — see DownloadKeepAliveService. -->
+        <service
+            android:name=".DownloadKeepAliveService"
+            android:foregroundServiceType="dataSync"
             android:exported="false"/>
         <!-- "I'm OK" action on the stillness-nudge notification — only ever
              invoked via our own PendingIntent, never by another app. -->
