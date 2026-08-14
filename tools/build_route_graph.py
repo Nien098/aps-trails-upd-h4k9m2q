@@ -57,13 +57,17 @@ REGIONS = [
 # enough to prove the point.
 REGIONS.append(("jakarta_metro_test", -6.25, 106.75, -6.10, 106.87))
 
+# Same idea, covering urban Tangerang (city + BSD, not the whole sprawling
+# Tangerang Regency) — where the user's brother has actually been testing.
+REGIONS.append(("tangerang_test", -6.25, 106.58, -6.10, 106.70))
+
 # Per-region cell size override — Jakarta is dense enough that even the
 # default CELL_DEG (0.15, fine for Southwest BC) reliably 504s at the
 # Overpass server itself regardless of client-side patience/retries
 # (confirmed empirically: a cell 1/36th that size still took 17.7s for a
 # small slice of central Jakarta). Smaller cells keep each individual
 # request small enough to actually complete.
-CELL_OVERRIDES = {"jakarta_metro_test": 0.05}
+CELL_OVERRIDES = {"jakarta_metro_test": 0.05, "tangerang_test": 0.05}
 
 # highway=* -> 'road'. Everything else walkable falls through to 'trail'
 # below (path/track/bridleway/steps/cycleway/pedestrian/footway), except
