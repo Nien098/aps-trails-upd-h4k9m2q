@@ -9,6 +9,7 @@ import 'package:path_provider/path_provider.dart';
 import '../config.dart';
 import '../models/region.dart';
 import 'pmtiles_writer.dart';
+import 'route_graph_store.dart';
 import 'search_service.dart';
 
 /// Progress of a region download.
@@ -94,6 +95,13 @@ class RegionDownloader {
   bool get streetsFailed => _streetsFailed;
   bool _streetsFailed = false;
 
+  /// True if fetching this region's route graph (for offline-region-wide
+  /// routing, see [RouteGraphStore]) failed — same soft-fail contract as
+  /// [streetsFailed]: TrailRouter just falls back to whatever's actually
+  /// rendered on screen for this region until a re-download succeeds.
+  bool get routeGraphFailed => _routeGraphFailed;
+  bool _routeGraphFailed = false;
+
   /// Downloads the region into `<docs>/map/<id>.pmtiles` and returns a [Region].
   Future<Region?> download({
     required String id,
@@ -175,6 +183,14 @@ class RegionDownloader {
       // Soft-fail — street search for this region just won't work until a
       // re-download succeeds; the map itself is unaffected.
       _streetsFailed = true;
+    }
+
+    try {
+      final ways = await _fetchWays(west, south, east, north);
+      await RouteGraphStore.instance.addWays(id, ways);
+    } catch (_) {
+      // Soft-fail — same contract as streetsFailed above.
+      _routeGraphFailed = true;
     }
 
     return Region(
@@ -287,5 +303,83 @@ class RegionDownloader {
       for (final entry in bestPoint.entries)
         (name: entry.key, lat: entry.value.$1, lon: entry.value.$2),
     ];
+  }
+
+  /// Every walkable way within the bbox, from the Overpass API — same query
+  /// shape as `tools/build_route_graph.py` uses for the bundled regions
+  /// (full geometry, every `highway=*` value, not just named ones), so a
+  /// downloaded region's routing coverage matches the bundled ones. A single
+  /// request is fine here (unlike the build script's grid-tiled fetch for
+  /// the huge bundled-region bboxes) since a downloaded area is just
+  /// whatever fit in the user's screen when they tapped Download.
+  static Future<List<RouteWay>> _fetchWays(
+      double west, double south, double east, double north) async {
+    const query = '[out:json][timeout:180];'
+        r'way["highway"]({{s}},{{w}},{{n}},{{e}});'
+        'out tags geom;';
+    final body = query
+        .replaceFirst('{{s}}', '$south')
+        .replaceFirst('{{w}}', '$west')
+        .replaceFirst('{{n}}', '$north')
+        .replaceFirst('{{e}}', '$east');
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 20);
+    try {
+      final req = await client
+          .postUrl(Uri.parse('https://overpass-api.de/api/interpreter'));
+      req.headers.contentType = ContentType('application', 'x-www-form-urlencoded');
+      req.write('data=${Uri.encodeQueryComponent(body)}');
+      final resp = await req.close();
+      if (resp.statusCode != 200) {
+        await resp.drain();
+        throw HttpException('Overpass returned ${resp.statusCode}');
+      }
+      final text = await resp.transform(utf8.decoder).join();
+      final elements = (jsonDecode(text)['elements'] as List).cast<Map>();
+      return _classifyWays(elements);
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  // Mirrors tools/build_route_graph.py's classify() exactly, so bundled and
+  // downloaded route-graph data behave identically once merged into
+  // TrailRouter's graph.
+  static const _roadHighway = {
+    'motorway', 'trunk', 'primary', 'secondary', 'tertiary',
+    'motorway_link', 'trunk_link', 'primary_link', 'secondary_link', 'tertiary_link',
+    'unclassified', 'residential', 'service', 'living_street', 'road',
+  };
+  static const _sidewalkFootways = {'sidewalk', 'crossing'};
+  static const _skipHighway = {
+    'proposed', 'construction', 'razed', 'abandoned', 'corridor',
+  };
+
+  static String? _classifyWay(Map<String, dynamic> tags) {
+    final highway = tags['highway'] as String? ?? '';
+    if (highway.isEmpty || _skipHighway.contains(highway)) return null;
+    if (_roadHighway.contains(highway)) return 'road';
+    if (highway == 'footway' && _sidewalkFootways.contains(tags['footway'])) {
+      return 'sidewalk';
+    }
+    return 'trail';
+  }
+
+  static List<RouteWay> _classifyWays(List<Map> elements) {
+    final ways = <RouteWay>[];
+    for (final el in elements) {
+      if (el['type'] != 'way') continue;
+      final tags = (el['tags'] as Map?)?.cast<String, dynamic>() ?? const {};
+      final kind = _classifyWay(tags);
+      final geom = (el['geom'] as List?)?.cast<Map>();
+      if (kind == null || geom == null || geom.length < 2) continue;
+      ways.add((
+        kind: kind,
+        coords: [
+          for (final p in geom)
+            LatLng((p['lat'] as num).toDouble(), (p['lon'] as num).toDouble()),
+        ],
+      ));
+    }
+    return ways;
   }
 }

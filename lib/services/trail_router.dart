@@ -5,6 +5,7 @@ import 'dart:ui' show Rect;
 import 'package:maplibre_gl/maplibre_gl.dart';
 
 import 'geo.dart';
+import 'route_graph_store.dart';
 import 'settings.dart';
 
 /// Which walkable surfaces auto-generation should prefer — see
@@ -114,6 +115,15 @@ class TrailRouter {
         Surface.mixed => (p) => _isRoad(p) || _isTrail(p) || _isSidewalk(p),
       };
 
+  /// Same idea as [_includeFor], for an offline [RouteGraphStore] way's
+  /// `kind` ('road'/'trail'/'sidewalk', see `tools/build_route_graph.py`)
+  /// instead of a live feature's `props` map.
+  static bool _includeOfflineKind(String kind, Surface s) => switch (s) {
+        Surface.trails => kind == 'trail' || kind == 'sidewalk',
+        Surface.roads => kind == 'road' || kind == 'sidewalk',
+        Surface.mixed => true,
+      };
+
   /// Max distance (m) a tap may be from a trail to snap onto it.
   static const _snapMeters = 30.0;
 
@@ -151,7 +161,7 @@ class TrailRouter {
     List<LatLng>? seedPath,
   }) async {
     final r = rect ?? await _rectAround(from, to);
-    final graph = await _buildGraph(r);
+    final graph = await _buildGraph(r, geoBounds: _geoBoundsAround(from, to));
     if (seedPath != null && seedPath.length >= 2) {
       graph.addLatLngChain(seedPath);
       graph._mergeNearbyNodes(_mergeToleranceMeters);
@@ -222,9 +232,12 @@ class TrailRouter {
     final rect = boundaryPolygon != null
         ? await _screenRectForPolygon(boundaryPolygon)
         : viewport;
+    final geoBounds = boundaryPolygon != null
+        ? _geoBoundsAroundAll(boundaryPolygon, padMeters: 0)
+        : await controller.getVisibleRegion();
 
     Future<GeneratedRoute?> attempt(Surface s) async {
-      final graph = await _buildGraph(rect, surface: s);
+      final graph = await _buildGraph(rect, surface: s, geoBounds: geoBounds);
       if (boundaryPolygon != null) graph.restrictToPolygon(boundaryPolygon);
 
       final start = graph.spliceTempNode(center, 'GEN');
@@ -358,7 +371,9 @@ class TrailRouter {
     double toleranceMeters = 8,
     Surface surface = Surface.mixed,
   }) async {
-    final graph = await _buildGraph(rect, surface: surface);
+    final graph = await _buildGraph(rect,
+        surface: surface,
+        geoBounds: path.isEmpty ? null : _geoBoundsAroundAll(path));
     return [
       for (final j in graph.junctionNodes())
         if (distanceToPath(j, path) <= toleranceMeters) j,
@@ -415,6 +430,34 @@ class TrailRouter {
     }
     const pad = 350.0;
     return Rect.fromLTRB(minX - pad, minY - pad, maxX + pad, maxY + pad);
+  }
+
+  /// Geographic (not screen-space) bounds enclosing [a]/[b] with [padMeters]
+  /// of margin — used to query [RouteGraphStore], which is indexed by real
+  /// lat/lng, not screen pixels. Unlike [_rectAround]'s modest pixel pad
+  /// (meaningless in real-world distance — it shrinks as you zoom in), this
+  /// is a fixed real-world margin regardless of zoom, since the offline
+  /// graph's whole purpose is reaching a destination that may be nowhere
+  /// near the current camera position at all.
+  LatLngBounds _geoBoundsAround(LatLng? a, LatLng b, {double padMeters = 300}) =>
+      _geoBoundsAroundAll([b, ?a], padMeters: padMeters);
+
+  LatLngBounds _geoBoundsAroundAll(List<LatLng> points, {double padMeters = 300}) {
+    var minLat = points.first.latitude, maxLat = minLat;
+    var minLon = points.first.longitude, maxLon = minLon;
+    for (final p in points.skip(1)) {
+      minLat = math.min(minLat, p.latitude);
+      maxLat = math.max(maxLat, p.latitude);
+      minLon = math.min(minLon, p.longitude);
+      maxLon = math.max(maxLon, p.longitude);
+    }
+    final latPad = padMeters / 111320;
+    final lonPad = padMeters /
+        (111320 * math.cos((minLat + maxLat) / 2 * math.pi / 180));
+    return LatLngBounds(
+      southwest: LatLng(minLat - latPad, minLon - lonPad),
+      northeast: LatLng(maxLat + latPad, maxLon + lonPad),
+    );
   }
 
   /// Nudges [p] onto the nearest trail/road within [maxMeters] (defaults to
@@ -489,7 +532,8 @@ class TrailRouter {
   /// re-joining the trail after a middle anchor is deleted). Falls back to a
   /// straight segment when there's no connected trail.
   Future<List<LatLng>> between(LatLng from, LatLng to) async {
-    final graph = await _buildGraph(await _rectAround(from, to));
+    final graph = await _buildGraph(await _rectAround(from, to),
+        geoBounds: _geoBoundsAround(from, to));
     final line = graph.route(from, to);
     if (line == null) return [from, to];
     final straight = metersBetween(from, to);
@@ -498,9 +542,14 @@ class TrailRouter {
     return line;
   }
 
-  Future<_Graph> _buildGraph(Rect rect, {Surface surface = Surface.mixed}) async {
+  Future<_Graph> _buildGraph(
+    Rect rect, {
+    Surface surface = Surface.mixed,
+    LatLngBounds? geoBounds,
+  }) async {
     final graph = _Graph();
-    await _addFeaturesToGraph(graph, rect, include: _includeFor(surface));
+    await _addFeaturesToGraph(graph, rect,
+        include: _includeFor(surface), geoBounds: geoBounds, surface: surface);
     // A single real-world trail can arrive as several separate LineString
     // features (e.g. split around a line-label's placement point, or by tile
     // clipping) whose "shared" endpoint differs by a few metres between
@@ -517,9 +566,10 @@ class TrailRouter {
   /// own data (see [_isRoad]) rather than being treated as one
   /// undifferentiated walkable network — used by [nearestRoad], which needs
   /// to tell the two apart.
-  Future<_Graph> _buildTaggedGraph(Rect rect) async {
+  Future<_Graph> _buildTaggedGraph(Rect rect, {LatLngBounds? geoBounds}) async {
     final graph = _Graph();
-    await _addFeaturesToGraph(graph, rect, include: _includeFor(Surface.mixed));
+    await _addFeaturesToGraph(graph, rect,
+        include: _includeFor(Surface.mixed), geoBounds: geoBounds);
     graph._mergeNearbyNodes(_mergeToleranceMeters);
     return graph;
   }
@@ -553,6 +603,8 @@ class TrailRouter {
     _Graph graph,
     Rect rect, {
     bool Function(Map<String, dynamic> props)? include,
+    LatLngBounds? geoBounds,
+    Surface surface = Surface.mixed,
   }) async {
     final raw =
         await controller.queryRenderedFeaturesInRect(rect, _roadSourceLayers, null);
@@ -575,6 +627,20 @@ class TrailRouter {
         }
       }
     }
+
+    // Offline region-wide network, additive to whatever's actually rendered
+    // above — this is what lets routing reach beyond the current viewport
+    // (see connect()'s "route back to a distant trailhead" doc). Purely
+    // additive: the live-render path above is untouched, so existing
+    // correctness (multiple rounds of real-device fixes) isn't at risk —
+    // offline ways just add more candidate edges before Dijkstra runs.
+    if (geoBounds != null) {
+      final ways = await RouteGraphStore.instance.waysInBounds(geoBounds);
+      for (final w in ways) {
+        if (!_includeOfflineKind(w.kind, surface)) continue;
+        graph.addLatLngChain(w.coords, isRoad: w.kind == 'road');
+      }
+    }
   }
 
   /// Finds the shortest path from [from] to the *nearest* point classified
@@ -589,7 +655,8 @@ class TrailRouter {
     required LatLng from,
     required Rect viewport,
   }) async {
-    final graph = await _buildTaggedGraph(viewport);
+    final graph = await _buildTaggedGraph(viewport,
+        geoBounds: await controller.getVisibleRegion());
     final line = graph.routeToNearestRoad(from);
     if (line == null) return null;
     return TrailConnection(line.last, line, true);
@@ -659,9 +726,12 @@ class _Graph {
   }
 
   /// Same idea as [addLine], but for an already-decoded [LatLng] chain
-  /// (e.g. a known trail's `path`) rather than raw GeoJSON coordinates —
-  /// see [TrailRouter.connect]'s `seedPath` parameter.
-  void addLatLngChain(List<LatLng> pts) {
+  /// (e.g. a known trail's `path`, or an offline [RouteGraphStore] way)
+  /// rather than raw GeoJSON coordinates — see [TrailRouter.connect]'s
+  /// `seedPath` parameter and [TrailRouter._addFeaturesToGraph]'s offline
+  /// merge. [isRoad] defaults to false to preserve seedPath's existing
+  /// behaviour (a seed is "the trail's own known path," not a road).
+  void addLatLngChain(List<LatLng> pts, {bool isRoad = false}) {
     LatLng? prev;
     String? prevKey;
     for (final p in pts) {
@@ -671,7 +741,7 @@ class _Graph {
         final w = metersBetween(prev, p);
         (adj[prevKey] ??= []).add(_Edge(k, w));
         (adj[k] ??= []).add(_Edge(prevKey, w));
-        _segments.add(_Seg(prevKey, k, prev, p, false));
+        _segments.add(_Seg(prevKey, k, prev, p, isRoad));
       }
       prev = p;
       prevKey = k;
