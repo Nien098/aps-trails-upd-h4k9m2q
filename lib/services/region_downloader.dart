@@ -232,6 +232,85 @@ class RegionDownloader {
     }
   }
 
+  /// Max cell size (degrees) per Overpass request — mirrors
+  /// `tools/build_route_graph.py`'s `CELL_DEG`. Most downloaded areas are a
+  /// single cell (whatever fit on screen when the user tapped Download),
+  /// but a large/dense metro area (e.g. all of Jakarta) can otherwise blow
+  /// past the public Overpass instance's per-request timeout/size limit in
+  /// one unbounded request — this is the bug that made street/route-graph
+  /// data silently fail to fetch for exactly that kind of area.
+  static const _overpassCellDeg = 0.15;
+
+  /// Fetches [queryFor]'s ways over the whole bbox, tiled into a grid of
+  /// `_overpassCellDeg` cells and deduped by OSM way id (a way spanning a
+  /// cell boundary comes back from more than one cell). Each cell's failure
+  /// is caught and skipped individually rather than aborting the whole
+  /// fetch — a partial street/route index for a huge area is far more
+  /// useful than none at all, matching [RegionDownloader.download]'s own
+  /// "keep whatever tiles succeeded" philosophy for map tiles.
+  static Future<List<Map>> _fetchOverpassTiled(
+    double west,
+    double south,
+    double east,
+    double north,
+    String Function(double s, double w, double n, double e) queryFor,
+  ) async {
+    final byId = <int, Map>{};
+    var lat = south;
+    while (lat < north) {
+      final lat2 = math.min(lat + _overpassCellDeg, north);
+      var lon = west;
+      while (lon < east) {
+        final lon2 = math.min(lon + _overpassCellDeg, east);
+        final elements = await _postOverpass(queryFor(lat, lon, lat2, lon2));
+        if (elements != null) {
+          for (final el in elements) {
+            final id = el['id'];
+            if (el['type'] == 'way' && id != null) byId[id as int] = el;
+          }
+        }
+        lon = lon2;
+        if (lon < east || lat2 < north) {
+          await Future.delayed(const Duration(milliseconds: 400));
+        }
+      }
+      lat = lat2;
+    }
+    return byId.values.toList();
+  }
+
+  /// POSTs one Overpass query, retrying transient failures. Returns null
+  /// (not a thrown exception) on final failure so [_fetchOverpassTiled] can
+  /// skip just this cell and keep going.
+  static Future<List<Map>?> _postOverpass(String query) async {
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 20);
+    try {
+      for (var attempt = 0; attempt <= 2; attempt++) {
+        try {
+          final req = await client
+              .postUrl(Uri.parse('https://overpass-api.de/api/interpreter'));
+          req.headers.contentType =
+              ContentType('application', 'x-www-form-urlencoded');
+          req.write('data=${Uri.encodeQueryComponent(query)}');
+          final resp = await req.close();
+          if (resp.statusCode != 200) {
+            await resp.drain();
+            if (attempt == 2) return null;
+          } else {
+            final text = await resp.transform(utf8.decoder).join();
+            return (jsonDecode(text)['elements'] as List).cast<Map>();
+          }
+        } catch (_) {
+          if (attempt == 2) return null;
+        }
+        await Future.delayed(Duration(seconds: 3 * (attempt + 1)));
+      }
+      return null;
+    } finally {
+      client.close(force: true);
+    }
+  }
+
   /// Named streets within the bbox, from the Overpass API — the same query
   /// shape as `tools/build_streets_db.py` uses for the bundled regions, so a
   /// downloaded region's street search matches the bundled ones in quality.
@@ -240,31 +319,11 @@ class RegionDownloader {
   /// OSM ways) doesn't produce duplicate search results.
   static Future<List<({String name, double lat, double lon})>> _fetchStreets(
       double west, double south, double east, double north) async {
-    const query = '[out:json][timeout:180];'
-        r'way["highway"]["name"]({{s}},{{w}},{{n}},{{e}});'
-        'out tags geom;';
-    final body = query
-        .replaceFirst('{{s}}', '$south')
-        .replaceFirst('{{w}}', '$west')
-        .replaceFirst('{{n}}', '$north')
-        .replaceFirst('{{e}}', '$east');
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 20);
-    try {
-      final req = await client
-          .postUrl(Uri.parse('https://overpass-api.de/api/interpreter'));
-      req.headers.contentType = ContentType('application', 'x-www-form-urlencoded');
-      req.write('data=${Uri.encodeQueryComponent(body)}');
-      final resp = await req.close();
-      if (resp.statusCode != 200) {
-        await resp.drain();
-        throw HttpException('Overpass returned ${resp.statusCode}');
-      }
-      final text = await resp.transform(utf8.decoder).join();
-      final elements = (jsonDecode(text)['elements'] as List).cast<Map>();
-      return _dedupeStreets(elements);
-    } finally {
-      client.close(force: true);
-    }
+    final elements = await _fetchOverpassTiled(west, south, east, north,
+        (s, w, n, e) => '[out:json][timeout:180];'
+            'way["highway"]["name"]($s,$w,$n,$e);'
+            'out tags geom;');
+    return _dedupeStreets(elements);
   }
 
   static const _excludedHighway = {
@@ -314,31 +373,11 @@ class RegionDownloader {
   /// whatever fit in the user's screen when they tapped Download.
   static Future<List<RouteWay>> _fetchWays(
       double west, double south, double east, double north) async {
-    const query = '[out:json][timeout:180];'
-        r'way["highway"]({{s}},{{w}},{{n}},{{e}});'
-        'out tags geom;';
-    final body = query
-        .replaceFirst('{{s}}', '$south')
-        .replaceFirst('{{w}}', '$west')
-        .replaceFirst('{{n}}', '$north')
-        .replaceFirst('{{e}}', '$east');
-    final client = HttpClient()..connectionTimeout = const Duration(seconds: 20);
-    try {
-      final req = await client
-          .postUrl(Uri.parse('https://overpass-api.de/api/interpreter'));
-      req.headers.contentType = ContentType('application', 'x-www-form-urlencoded');
-      req.write('data=${Uri.encodeQueryComponent(body)}');
-      final resp = await req.close();
-      if (resp.statusCode != 200) {
-        await resp.drain();
-        throw HttpException('Overpass returned ${resp.statusCode}');
-      }
-      final text = await resp.transform(utf8.decoder).join();
-      final elements = (jsonDecode(text)['elements'] as List).cast<Map>();
-      return _classifyWays(elements);
-    } finally {
-      client.close(force: true);
-    }
+    final elements = await _fetchOverpassTiled(west, south, east, north,
+        (s, w, n, e) => '[out:json][timeout:180];'
+            'way["highway"]($s,$w,$n,$e);'
+            'out tags geom;');
+    return _classifyWays(elements);
   }
 
   // Mirrors tools/build_route_graph.py's classify() exactly, so bundled and

@@ -719,6 +719,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         ? 'Updated "${r.name}" — $missing tile${missing == 1 ? '' : 's'} '
             'still failed to download'
         : 'Updated "${r.name}"');
+    // download() also (soft-)fetches street/route-graph data for the area —
+    // download_region_screen.dart's brand-new-download flow already toasts
+    // these; the update flow didn't, so a failure here went completely
+    // unnoticed (the bug that motivated this).
+    if (downloader.streetsFailed) {
+      _toast('Street search isn\'t available for this area — '
+          're-update it later if you want to search streets here.');
+    }
+    if (downloader.routeGraphFailed) {
+      _toast('Route planning outside what\'s on screen won\'t work for '
+          'this area yet — re-update it later to fix that.');
+    }
     if (mounted) setState(() {});
   }
 

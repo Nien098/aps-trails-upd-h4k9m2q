@@ -461,14 +461,17 @@ class TrailRouter {
   }
 
   /// Nudges [p] onto the nearest trail/road within [maxMeters] (defaults to
-  /// [_snapMeters]), if any — a pure local lookup with no pathfinding/routing
-  /// between points. Used by record-mode cleanup so a single unmapped or
-  /// gappy spot can't drag an entire segment into a router-guessed detour the
-  /// way [connect]'s shortest-path search could (see
-  /// [record_trail_screen._cleanPath]).
+  /// [_snapMeters]), if any — a pure local nearest-edge lookup, no
+  /// pathfinding/routing between points, so it can safely draw on the same
+  /// merged live+offline candidate pool [_buildGraph] gives [connect]
+  /// without inheriting Dijkstra's "wrong-leg detour" risk (nearest-edge
+  /// search has no path-cost accumulation to go wrong). Used by record-mode
+  /// cleanup so a single unmapped or gappy spot can't drag an entire segment
+  /// into a router-guessed detour the way [connect]'s shortest-path search
+  /// could (see [record_trail_screen._cleanPath]).
   Future<LatLng> snapPoint(LatLng p, {Rect? rect, double? maxMeters}) async {
     final r = rect ?? await _rectAround(null, p);
-    final graph = await _buildGraph(r);
+    final graph = await _buildGraph(r, geoBounds: _geoBoundsAround(null, p));
     final snap = graph.nearestOnEdge(p);
     final limit = maxMeters ?? _snapMeters;
     return (snap != null && snap.meters <= limit) ? snap.point : p;
@@ -492,7 +495,8 @@ class TrailRouter {
   /// tiny query box independently including or excluding nearby fragments.
   Future<List<LatLng>> snapStroke(List<LatLng> points, {double maxMeters = 50}) async {
     if (points.isEmpty) return points;
-    final graph = await _buildGraph(await _rectAroundAll(points));
+    final graph = await _buildGraph(await _rectAroundAll(points),
+        geoBounds: _geoBoundsAroundAll(points));
     final out = <LatLng>[];
     _Seg? currentSeg;
     for (final p in points) {
