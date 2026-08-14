@@ -47,7 +47,7 @@ class _BrowseMapScreenState extends State<BrowseMapScreen> {
   void _goTo(LatLng pos) {
     final target = regionForPoint(pos);
     if (target.mapAsset == _region.mapAsset) {
-      _c?.animateCamera(CameraUpdate.newLatLngZoom(pos, 16));
+      jumpCamera(_c, pos);
     } else {
       setState(() {
         _pendingCamera = CameraPosition(target: pos, zoom: 16);
@@ -61,7 +61,7 @@ class _BrowseMapScreenState extends State<BrowseMapScreen> {
   void _selectRegion(Region r) {
     if (r.mapAsset == _region.mapAsset) {
       setState(() => _region = r);
-      _c?.animateCamera(CameraUpdate.newLatLngZoom(r.center, 13));
+      jumpCamera(_c, r.center, zoom: 13);
     } else {
       setState(() {
         _pendingCamera = null;

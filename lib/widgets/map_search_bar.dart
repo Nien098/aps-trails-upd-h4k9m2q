@@ -1,7 +1,28 @@
 import 'package:flutter/material.dart';
+import 'package:maplibre_gl/maplibre_gl.dart';
 
 import '../models/region.dart';
 import '../services/search_service.dart';
+
+/// Jumps [controller]'s camera to [pos] at [zoom] for a search result —
+/// avoiding MapLibre's Android/Web `animateCamera` "flyTo" behavior, which
+/// dramatically zooms OUT mid-transition for long-distance jumps (Mapbox's
+/// documented flyTo algorithm, inherited by MapLibre Native — confirmed via
+/// `flutter-mapbox-gl/maps#1373`). A search result can be anywhere in a
+/// large offline region, so that arc routinely dips below this app's
+/// offline-data floor (`BaseMap`'s `minMaxZoomPreference` starts at zoom 10;
+/// there's no tile data below it), producing real black frames — never seen
+/// on GPS recenter, which only ever pans a short distance at a fixed zoom.
+/// Splitting the jump into an instant reposition (no flight, no arc) plus a
+/// short local zoom-only ease sidesteps it entirely: by the time the
+/// animated step starts, there's no ground distance left to arc over.
+Future<void> jumpCamera(MapLibreMapController? controller, LatLng pos,
+    {double zoom = 16}) async {
+  if (controller == null) return;
+  await controller.moveCamera(CameraUpdate.newLatLng(pos));
+  await controller.animateCamera(CameraUpdate.newLatLngZoom(pos, zoom),
+      duration: const Duration(milliseconds: 400));
+}
 
 /// Inline, map-stays-visible search box — a floating [Card] the caller
 /// positions over its own map (see [GuideScreen], [AuthorScreen],

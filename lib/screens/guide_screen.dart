@@ -981,7 +981,7 @@ class _GuideScreenState extends State<GuideScreen> {
       _searchOpen = false;
       _follow = false;
     });
-    await _c?.animateCamera(CameraUpdate.newLatLngZoom(result.position, 16));
+    await jumpCamera(_c, result.position);
   }
 
   /// Switches between the flat "birds-eye" view and tilted "drive mode" —

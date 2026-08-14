@@ -1516,7 +1516,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
   /// can't swap to mid-edit (see [SearchService.search]'s confineTo doc).
   Future<void> _onSearchResult(SearchResult result) async {
     setState(() => _searchOpen = false);
-    await _c?.animateCamera(CameraUpdate.newLatLngZoom(result.position, 16));
+    await jumpCamera(_c, result.position);
   }
 
 
@@ -1902,6 +1902,13 @@ class _AuthorScreenState extends State<AuthorScreen> {
         if (await _confirmDiscard() && mounted) Navigator.pop(context);
       },
       child: Scaffold(
+        // The map fills the whole body via Stack/Positioned (not a normal
+        // scrolling layout), and _ModeBar/MapSearchBar position themselves
+        // relative to the physical screen edges — the default `true` here
+        // would shrink the body when the keyboard opens (typing in the
+        // search box), pulling _ModeBar's bottom-anchored Positioned up on
+        // top of the keyboard/search area instead of staying pinned below it.
+        resizeToAvoidBottomInset: false,
         appBar: AppBar(
           title: GestureDetector(
             onTap: _rename,
