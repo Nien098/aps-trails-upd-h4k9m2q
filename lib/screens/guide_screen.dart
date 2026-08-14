@@ -20,6 +20,7 @@ import '../services/native_bridge.dart';
 import '../services/route_layer.dart';
 import '../services/search_service.dart';
 import '../services/settings.dart';
+import '../widgets/location_search.dart';
 import '../services/stillness_watchdog.dart';
 import '../services/trail_router.dart';
 import '../services/trail_store.dart';
@@ -978,7 +979,7 @@ class _GuideScreenState extends State<GuideScreen> {
   Future<void> _openSearch() async {
     final result = await showSearch<SearchResult?>(
       context: context,
-      delegate: _LocationSearchDelegate(),
+      delegate: LocationSearchDelegate(confineTo: _region),
     );
     if (result == null) return;
     setState(() => _follow = false);
@@ -1519,72 +1520,6 @@ class _NextCueStrip extends StatelessWidget {
                   ),
               ],
             ),
-    );
-  }
-}
-
-/// Offline search over street names (bundled/downloaded regions) and the
-/// user's own trail names — see [SearchService]. Built-in [SearchDelegate]
-/// gives the field/list/back-button chrome for free; results query on every
-/// keystroke since FTS5 lookups at this scale (tens of thousands of rows)
-/// are sub-millisecond, so a debounce isn't worth the added complexity.
-class _LocationSearchDelegate extends SearchDelegate<SearchResult?> {
-  @override
-  List<Widget> buildActions(BuildContext context) => [
-        if (query.isNotEmpty)
-          IconButton(
-            icon: const Icon(Icons.clear),
-            onPressed: () => query = '',
-          ),
-      ];
-
-  @override
-  Widget buildLeading(BuildContext context) => IconButton(
-        icon: const Icon(Icons.arrow_back),
-        onPressed: () => close(context, null),
-      );
-
-  @override
-  Widget buildResults(BuildContext context) => _ResultsList(query: query, onPick: (r) => close(context, r));
-
-  @override
-  Widget buildSuggestions(BuildContext context) => _ResultsList(query: query, onPick: (r) => close(context, r));
-}
-
-class _ResultsList extends StatelessWidget {
-  const _ResultsList({required this.query, required this.onPick});
-  final String query;
-  final ValueChanged<SearchResult> onPick;
-
-  @override
-  Widget build(BuildContext context) {
-    if (query.trim().isEmpty) {
-      return const Center(child: Text('Search for a street or trail name'));
-    }
-    return FutureBuilder<List<SearchResult>>(
-      future: SearchService.instance.search(query),
-      builder: (context, snap) {
-        if (!snap.hasData) {
-          return const Center(child: CircularProgressIndicator());
-        }
-        final results = snap.data!;
-        if (results.isEmpty) {
-          return const Center(child: Text('No matches'));
-        }
-        return ListView.builder(
-          itemCount: results.length,
-          itemBuilder: (context, i) {
-            final r = results[i];
-            return ListTile(
-              leading: Icon(
-                  r.type == SearchResultType.trail ? Icons.route : Icons.signpost),
-              title: Text(r.name),
-              subtitle: Text(r.type == SearchResultType.trail ? 'Trail' : 'Street'),
-              onTap: () => onPick(r),
-            );
-          },
-        );
-      },
     );
   }
 }

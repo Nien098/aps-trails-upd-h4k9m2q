@@ -5,6 +5,7 @@ import 'package:maplibre_gl/maplibre_gl.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart' as sqflite;
 
+import '../models/region.dart';
 import 'trail_store.dart';
 
 enum SearchResultType { trail, street }
@@ -79,14 +80,24 @@ class SearchService {
     return '${cleaned.split(RegExp(r'\s+')).join(' ')}*';
   }
 
-  Future<List<SearchResult>> search(String query) async {
+  /// [confineTo], when set, drops any result that isn't reachable by a plain
+  /// camera pan on that region's already-loaded basemap — a result sitting
+  /// in a different (separately downloaded) region's own pmtiles file would
+  /// otherwise jump the camera to nothing rendered. Screens that can't swap
+  /// their basemap mid-session (GuideScreen, AuthorScreen — both tied to one
+  /// trail's region) pass their current region; BrowseMapScreen, which can
+  /// swap basemaps on demand, passes null.
+  Future<List<SearchResult>> search(String query, {Region? confineTo}) async {
     final q = query.trim();
     if (q.isEmpty) return [];
+
+    bool reachable(LatLng pos) =>
+        confineTo == null || regionForPoint(pos).mapAsset == confineTo.mapAsset;
 
     final trailRows = await TrailStore.instance.searchByName(q);
     final trails = [
       for (final r in trailRows)
-        if (r.position != null)
+        if (r.position != null && reachable(r.position!))
           SearchResult(
               name: r.name, position: r.position!, type: SearchResultType.trail),
     ];
@@ -111,7 +122,7 @@ class SearchService {
             position: LatLng((r['lat'] as num).toDouble(), (r['lon'] as num).toDouble()),
             type: SearchResultType.street,
           ),
-      ];
+      ].where((r) => reachable(r.position)).toList();
     }
 
     // Trails first — the user's own curated content is more likely what

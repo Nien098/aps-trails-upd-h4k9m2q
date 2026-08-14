@@ -14,11 +14,13 @@ import '../services/boundary_layer.dart';
 import '../services/cue_gen.dart';
 import '../services/geo.dart';
 import '../services/route_layer.dart';
+import '../services/search_service.dart';
 import '../services/settings.dart';
 import '../services/trail_router.dart';
 import '../services/trail_store.dart';
 import '../widgets/base_map.dart';
 import '../widgets/cue_editor_sheet.dart';
+import '../widgets/location_search.dart';
 import 'cue_list_screen.dart';
 
 /// Trail editor. Tap the map to lay the path (Path mode) or drop a labelled
@@ -1504,6 +1506,19 @@ class _AuthorScreenState extends State<AuthorScreen> {
     await _c?.animateCamera(CameraUpdate.newLatLngZoom(here, 16));
   }
 
+  /// Jumps to a searched street/trail so the author doesn't have to scroll
+  /// around to find where they want to draw. Confined to [_region] — a
+  /// result outside it would sit on a different basemap file this screen
+  /// can't swap to mid-edit (see [SearchService.search]'s confineTo doc).
+  Future<void> _openSearch() async {
+    final result = await showSearch<SearchResult?>(
+      context: context,
+      delegate: LocationSearchDelegate(confineTo: _region),
+    );
+    if (result == null || !mounted) return;
+    await _c?.animateCamera(CameraUpdate.newLatLngZoom(result.position, 16));
+  }
+
 
   /// Suggests turn cues along the currently drawn path. Adds them alongside any
   /// existing cues (after confirming a replace when cues are already present).
@@ -2264,6 +2279,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
                       onToggleAdjustLine: _toggleAdjustLine,
                       onResetView: _resetView,
                       onCenterMe: _centerOnMe,
+                      onSearch: _openSearch,
                     ),
                 ],
               ),
@@ -2369,6 +2385,7 @@ class _ModeBar extends StatelessWidget {
     required this.onToggleAdjustLine,
     required this.onResetView,
     required this.onCenterMe,
+    required this.onSearch,
   });
 
   final bool cueMode;
@@ -2406,6 +2423,7 @@ class _ModeBar extends StatelessWidget {
   /// editor's controls instead of overlapping the map.
   final VoidCallback onResetView;
   final VoidCallback onCenterMe;
+  final VoidCallback onSearch;
 
   /// Explicit high-contrast "on" style for the three drawing-tool toggles
   /// above — the default Material 3 `isSelected` tonal fill is derived from
@@ -2537,6 +2555,16 @@ class _ModeBar extends StatelessWidget {
                     tooltip: 'Center on my location',
                     icon: const Icon(Icons.gps_fixed),
                     onPressed: onCenterMe,
+                  ),
+                  const SizedBox(width: 4),
+                  IconButton(
+                    visualDensity: VisualDensity.compact,
+                    constraints: const BoxConstraints(),
+                    padding: const EdgeInsets.all(4),
+                    iconSize: 20,
+                    tooltip: 'Search streets and trails',
+                    icon: const Icon(Icons.search),
+                    onPressed: onSearch,
                   ),
                   const Spacer(),
                 ],

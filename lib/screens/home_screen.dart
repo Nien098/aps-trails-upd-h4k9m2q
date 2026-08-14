@@ -16,6 +16,7 @@ import '../services/trail_share.dart';
 import '../services/trail_store.dart';
 import '../services/updater.dart';
 import 'author_screen.dart';
+import 'browse_map_screen.dart';
 import 'download_region_screen.dart';
 import 'guide_screen.dart';
 import 'history_screen.dart';
@@ -877,6 +878,15 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           ),
         ),
         actions: [
+          IconButton(
+            tooltip: 'Browse map',
+            icon: const Icon(Icons.explore),
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                  builder: (_) => BrowseMapScreen(region: _activeRegion)),
+            ),
+          ),
           IconButton(
             tooltip: 'Map areas',
             icon: const Icon(Icons.download_for_offline),
