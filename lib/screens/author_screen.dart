@@ -243,6 +243,14 @@ class _AuthorScreenState extends State<AuthorScreen> {
   final Map<String, List<Cue>> _circleToCueGroup = {};
   final Map<String, List<Cue>> _symbolToCueGroup = {};
   final Map<String, int> _circleToAnchor = {};
+  // Reverse of _circleToAnchor, for live-moving an anchor's marker(s) during
+  // a drag ([_moveAnchorCircle]) without a full _redraw() every frame.
+  final Map<int, List<Circle>> _anchorCircles = {};
+
+  /// Index into [Trail.anchors] currently being free-dragged during
+  /// [_adjustLineMode] — see [_onAdjustPanStart]. Null means the tool's
+  /// normal mid-line grab-and-bend applies instead (unchanged).
+  int? _draggingAnchorIndex;
 
   @override
   void initState() {
@@ -822,8 +830,40 @@ class _AuthorScreenState extends State<AuthorScreen> {
     if (c == null) return;
     final gen = ++_previewGeneration;
     final dpr = MediaQuery.of(context).devicePixelRatio;
-    final latlng = await c.toLatLng(Point(p.dx * dpr, p.dy * dpr));
+    final screenX = p.dx * dpr, screenY = p.dy * dpr;
+    final latlng = await c.toLatLng(Point(screenX, screenY));
     if (!mounted || !_adjustLineMode || gen != _previewGeneration) return;
+
+    // Anchors are freely draggable during adjust mode too — checked first,
+    // same device-pixel touch tolerance as the long-press move/delete flow
+    // (_onMapLongClick) so it's the same-sized target either way. A hit
+    // here takes priority over the mid-line grab-and-bend search below,
+    // which is unchanged otherwise.
+    final anchors = _trail.anchors;
+    var bestAnchor = -1;
+    var bestAnchorPx = 34.0;
+    for (var i = 0; i < anchors.length; i++) {
+      final sp = await c.toScreenLocation(anchors[i]);
+      final dx = sp.x.toDouble() - screenX;
+      final dy = sp.y.toDouble() - screenY;
+      final px = sqrt(dx * dx + dy * dy);
+      if (px < bestAnchorPx) {
+        bestAnchorPx = px;
+        bestAnchor = i;
+      }
+    }
+    if (!mounted || !_adjustLineMode || gen != _previewGeneration) return;
+    if (bestAnchor >= 0) {
+      _pushUndo();
+      setState(() {
+        _grabSegIdx = null;
+        _grabLocalIdx = null;
+        _grabOriginalSeg = null;
+        _grabOriginalPoint = null;
+        _draggingAnchorIndex = bestAnchor;
+      });
+      return;
+    }
 
     int? bestSeg, bestEdge;
     LatLng? bestPoint;
@@ -878,7 +918,57 @@ class _AuthorScreenState extends State<AuthorScreen> {
 
   void _onAdjustPanUpdate(Offset p) {
     _lastAdjustOffset = p;
-    _pushAdjustPreview(p);
+    if (_draggingAnchorIndex != null) {
+      _pushAnchorDragPreview(p);
+    } else {
+      _pushAdjustPreview(p);
+    }
+  }
+
+  /// Live preview for a free-dragged anchor (see [_draggingAnchorIndex]):
+  /// a cheap straight-line stretch to its immediate neighbours, not a live
+  /// re-route — matches how the existing tap-to-place flow
+  /// ([_placeMovingAnchor]) also only re-routes once, on commit. The
+  /// anchor's own marker(s) move live too ([_moveAnchorCircle]) so it
+  /// visibly follows the finger.
+  Future<void> _pushAnchorDragPreview(Offset p) async {
+    final c = _c;
+    final idx = _draggingAnchorIndex;
+    if (c == null || idx == null || _convertingAdjustPoint || !mounted) return;
+    final gen = _previewGeneration;
+    _convertingAdjustPoint = true;
+    try {
+      final dpr = MediaQuery.of(context).devicePixelRatio;
+      final latlng = await c.toLatLng(Point(p.dx * dpr, p.dy * dpr));
+      if (!mounted ||
+          !_adjustLineMode ||
+          _draggingAnchorIndex != idx ||
+          gen != _previewGeneration) {
+        return;
+      }
+      final anchors = _trail.anchors;
+      final preview = [
+        if (idx > 0) anchors[idx - 1],
+        latlng,
+        if (idx < anchors.length - 1) anchors[idx + 1],
+      ];
+      await _strokeLayer?.setRoute(preview, _strokePreviewColor);
+      await _moveAnchorCircle(idx, latlng);
+    } finally {
+      _convertingAdjustPoint = false;
+    }
+  }
+
+  /// Moves anchor [idx]'s marker circle(s) to [pos] directly, without a full
+  /// [_redraw] — used for the live drag preview, where redrawing every
+  /// marker/cue on the map each frame would be far too slow.
+  Future<void> _moveAnchorCircle(int idx, LatLng pos) async {
+    final c = _c;
+    final circles = _anchorCircles[idx];
+    if (c == null || circles == null) return;
+    for (final circle in circles) {
+      await c.updateCircle(circle, CircleOptions(geometry: pos));
+    }
   }
 
   /// Live preview of the wire-bend: deforms fresh from [_grabOriginalSeg]
@@ -925,6 +1015,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
   /// geometry.
   Future<void> _onAdjustPanEnd() async {
     final c = _c;
+    final draggingAnchor = _draggingAnchorIndex;
     final segIdx = _grabSegIdx,
         original = _grabOriginalSeg,
         grabIdx = _grabLocalIdx,
@@ -936,21 +1027,27 @@ class _AuthorScreenState extends State<AuthorScreen> {
       _grabLocalIdx = null;
       _grabOriginalSeg = null;
       _grabOriginalPoint = null;
+      _draggingAnchorIndex = null;
       _lastAdjustOffset = null;
     });
     unawaited(_strokeLayer?.setRoute(const [], _strokePreviewColor));
-    if (c == null ||
-        segIdx == null ||
-        original == null ||
-        grabIdx == null ||
-        grabOriginal == null ||
-        offset == null) {
-      return;
-    }
+    if (c == null || offset == null) return;
 
     final dpr = MediaQuery.of(context).devicePixelRatio;
     final newPos = await c.toLatLng(Point(offset.dx * dpr, offset.dy * dpr));
     if (!mounted) return;
+
+    if (draggingAnchor != null) {
+      // Same re-route/densify commit the tap-to-place flow uses — the
+      // free-drag preview above was just a cheap straight-line stretch.
+      await _commitAnchorPosition(draggingAnchor, newPos);
+      await _redraw();
+      return;
+    }
+
+    if (segIdx == null || original == null || grabIdx == null || grabOriginal == null) {
+      return;
+    }
     final deformed = _deformSegment(original, grabIdx, grabOriginal, newPos);
     setState(() {
       _segments[segIdx] = deformed;
@@ -1228,33 +1325,46 @@ class _AuthorScreenState extends State<AuthorScreen> {
   Future<void> _placeMovingAnchor(LatLng tapped) async {
     final idx = _movingAnchor;
     if (idx == null) return;
-    final c = _c;
     _pushUndo();
+    try {
+      await _commitAnchorPosition(idx, tapped);
+    } finally {
+      _movingAnchor = null;
+    }
+    await _redraw();
+  }
+
+  /// Re-routes the segment(s) touching anchor [idx] to [pos] and commits it
+  /// as the anchor's new position — shared by the tap-to-place flow
+  /// ([_placeMovingAnchor]) and free-drag-during-adjust-mode
+  /// ([_onAdjustPanEnd]). Caller is responsible for [_pushUndo] beforehand
+  /// (timing differs between the two: tap-to-place pushes on commit, the
+  /// free-drag pushes at grab-start like the mid-line bend tool does).
+  Future<void> _commitAnchorPosition(int idx, LatLng pos) async {
+    final c = _c;
     setState(() => _busy = true);
     try {
       final anchors = _trail.anchors;
-      anchors[idx] = tapped;
+      anchors[idx] = pos;
       if (idx > 0) {
         final prev = anchors[idx - 1];
         _segments[idx] = _densify((_follow && c != null)
-            ? await TrailRouter(c).between(prev, tapped)
-            : [prev, tapped]);
+            ? await TrailRouter(c).between(prev, pos)
+            : [prev, pos]);
       } else if (_segments.isNotEmpty) {
-        _segments[0] = [tapped];
+        _segments[0] = [pos];
       }
       if (idx < anchors.length - 1) {
         final next = anchors[idx + 1];
         _segments[idx + 1] = _densify((_follow && c != null)
-            ? await TrailRouter(c).between(tapped, next)
-            : [tapped, next]);
+            ? await TrailRouter(c).between(pos, next)
+            : [pos, next]);
       }
       _trail.path = _composePath();
       _dirty = true;
     } finally {
-      _movingAnchor = null;
       if (mounted) setState(() => _busy = false);
     }
-    await _redraw();
   }
 
   /// Inserts a new anchor between whichever existing hop [tapped] lands
@@ -1362,6 +1472,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
     _circleToCueGroup.clear();
     _symbolToCueGroup.clear();
     _circleToAnchor.clear();
+    _anchorCircles.clear();
 
     // The route line + directional arrows (GeoJSON layer, taps pass through).
     await _routeLayer?.setRoute(_trail.path, _trail.color);
@@ -1383,6 +1494,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
         circleStrokeWidth: isMovingAnchor ? 5 : (isLast ? 5 : 2),
       ));
       _circleToAnchor[circle.id] = i;
+      _anchorCircles[i] = [circle];
       if (isLast && anchors.length > 1) {
         // Inner dot so the highlighted "from here" anchor reads as a target.
         final inner = await c.addCircle(CircleOptions(
@@ -1391,6 +1503,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
           circleColor: '#1565C0',
         ));
         _circleToAnchor[inner.id] = i;
+        _anchorCircles[i] = [circle, inner];
       }
     }
 
