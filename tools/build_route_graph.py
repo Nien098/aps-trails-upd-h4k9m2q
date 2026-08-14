@@ -40,6 +40,31 @@ REGIONS = [
     ("victoria", 48.35, -123.50, 48.55, -123.25),
 ]
 
+# Not a real "region" in lib/models/region.dart (no basemap ships for it) —
+# a diagnostic bundle to prove/disprove whether the on-device download's
+# 60-cell/45s caps (region_downloader.dart), not Jakarta's density itself,
+# are why a *downloaded* Jakarta region's route graph came out empty.
+# RouteGraphStore.waysInBounds() queries purely by geographic bbox overlap,
+# not by region_id/mapAsset — so this data becomes usable for routing
+# anywhere its bbox overlaps the user's own already-downloaded Jakarta
+# basemap, with no new Region/pmtiles/kRegions entry needed at all.
+#
+# Deliberately just central/downtown Jakarta, not the full Jabodetabek
+# metro the user originally asked for — a full-metro test of this density
+# extrapolated to hundreds of MB (a 0.1x0.1deg sample alone produced 42k
+# elements), which isn't a reasonable one-off bundle size. This smaller
+# core (~Central/South Jakarta, inside the main ring road) is still dense
+# enough to prove the point.
+REGIONS.append(("jakarta_metro_test", -6.25, 106.75, -6.10, 106.87))
+
+# Per-region cell size override — Jakarta is dense enough that even the
+# default CELL_DEG (0.15, fine for Southwest BC) reliably 504s at the
+# Overpass server itself regardless of client-side patience/retries
+# (confirmed empirically: a cell 1/36th that size still took 17.7s for a
+# small slice of central Jakarta). Smaller cells keep each individual
+# request small enough to actually complete.
+CELL_OVERRIDES = {"jakarta_metro_test": 0.05}
+
 # highway=* -> 'road'. Everything else walkable falls through to 'trail'
 # below (path/track/bridleway/steps/cycleway/pedestrian/footway), except
 # footways explicitly tagged as a sidewalk/crossing -> 'sidewalk'. Mirrors
@@ -78,13 +103,13 @@ def classify(tags: dict) -> str | None:
 CELL_DEG = 0.15
 
 
-def _cells(south: float, west: float, north: float, east: float):
+def _cells(south: float, west: float, north: float, east: float, cell_deg: float):
     lat = south
     while lat < north:
-        lat2 = min(lat + CELL_DEG, north)
+        lat2 = min(lat + cell_deg, north)
         lon = west
         while lon < east:
-            lon2 = min(lon + CELL_DEG, east)
+            lon2 = min(lon + cell_deg, east)
             yield (lat, lon, lat2, lon2)
             lon = lon2
         lat = lat2
@@ -101,27 +126,42 @@ def _fetch_cell(south: float, west: float, north: float, east: float) -> list[di
         OVERPASS_URL, data=data,
         headers={"User-Agent": "TrailGuide-route-graph-build/1.0"},
     )
-    for attempt in range(3):
+    for attempt in range(4):
         try:
             with urllib.request.urlopen(req, timeout=200) as resp:
                 return json.loads(resp.read())["elements"]
         except (urllib.error.URLError, TimeoutError) as e:
-            if attempt == 2:
-                raise
+            if attempt == 3:
+                # Give up on just this one cell, not the whole region — a
+                # cell that's permanently too dense/large for Overpass to
+                # answer (confirmed happens even at small sizes for central
+                # Jakarta) shouldn't lose every other cell's already-fetched
+                # data by crashing the script.
+                print(f"    giving up on this cell after 4 attempts: {e}",
+                      file=sys.stderr)
+                return []
             print(f"    retrying after error: {e}", file=sys.stderr)
             time.sleep(5 * (attempt + 1))
     return []
 
 
-def fetch_region(south: float, west: float, north: float, east: float) -> list[dict]:
-    cells = list(_cells(south, west, north, east))
+def fetch_region(south: float, west: float, north: float, east: float,
+                  cell_deg: float = CELL_DEG) -> list[dict]:
+    cells = list(_cells(south, west, north, east, cell_deg))
     by_id: dict[int, dict] = {}
+    failed_cells = 0
     for i, (s, w, n, e) in enumerate(cells):
-        print(f"  cell {i + 1}/{len(cells)} ({s:.2f},{w:.2f},{n:.2f},{e:.2f})...")
-        for el in _fetch_cell(s, w, n, e):
+        print(f"  cell {i + 1}/{len(cells)} ({s:.3f},{w:.3f},{n:.3f},{e:.3f})...")
+        elements = _fetch_cell(s, w, n, e)
+        if not elements:
+            failed_cells += 1
+        for el in elements:
             if el.get("type") == "way":
                 by_id[el["id"]] = el  # dedupe ways spanning a cell boundary
-        time.sleep(1)  # be polite to the shared public Overpass instance
+        time.sleep(2)  # be polite to the shared public Overpass instance
+    if failed_cells:
+        print(f"  {failed_cells}/{len(cells)} cells returned nothing "
+              f"(permanently failed or genuinely empty)", file=sys.stderr)
     return list(by_id.values())
 
 
@@ -154,8 +194,10 @@ def main() -> None:
     build_schema(conn)
 
     for region_id, south, west, north, east in regions:
-        print(f"Fetching {region_id} ({south},{west},{north},{east})...")
-        elements = fetch_region(south, west, north, east)
+        cell_deg = CELL_OVERRIDES.get(region_id, CELL_DEG)
+        print(f"Fetching {region_id} ({south},{west},{north},{east}), "
+              f"cell size {cell_deg}deg...")
+        elements = fetch_region(south, west, north, east, cell_deg)
 
         # Delete old rows (and their rtree entries) for this region first,
         # so a re-run is idempotent.
