@@ -104,6 +104,13 @@ class _BrowseMapScreenState extends State<BrowseMapScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      // Without this, the default `true` shrinks/resizes the body (and the
+      // native MapLibreMap view filling it) every time the keyboard opens to
+      // type a search query — resizing a live GL surface mid-frame is what
+      // was causing the flicker/black-frame/distortion the user saw, not
+      // (only) the camera-animation fix below. See the same reasoning
+      // already applied to AuthorScreen's Scaffold.
+      resizeToAvoidBottomInset: false,
       appBar: AppBar(
         title: InkWell(
           borderRadius: BorderRadius.circular(8),

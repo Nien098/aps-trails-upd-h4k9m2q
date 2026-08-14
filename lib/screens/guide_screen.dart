@@ -1079,6 +1079,13 @@ class _GuideScreenState extends State<GuideScreen> {
     final reservedBottom = cardVisible ? 118.0 : 112.0;
 
     return Scaffold(
+      // Without this, the default `true` shrinks/resizes the body (and the
+      // native MapLibreMap view filling it) every time the keyboard opens to
+      // type a search query — resizing a live GL surface mid-frame causes
+      // visible flicker/black-frame/distortion, separate from (and on top
+      // of) the camera-flight fix in jumpCamera. Same reasoning as
+      // AuthorScreen's and BrowseMapScreen's Scaffolds.
+      resizeToAvoidBottomInset: false,
       // Order matters: the map is at the back, then the bottom banner, then the
       // side buttons, and finally the top bar — drawn last so its Stop button
       // (the way back to the trail list) can never be covered by anything.
