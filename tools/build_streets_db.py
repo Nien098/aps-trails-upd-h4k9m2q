@@ -50,6 +50,18 @@ REGIONS = [
     ("victoria", 48.35, -123.50, 48.55, -123.25),
 ]
 
+# Diagnostic-only bundles (see tools/build_route_graph.py's matching
+# entries) — same bboxes, so a downloaded map covering these areas gets
+# both routing AND street-name search working, not just one.
+REGIONS.append(("jakarta_metro_test", -6.25, 106.75, -6.10, 106.87))
+REGIONS.append(("tangerang_test", -6.25, 106.58, -6.10, 106.70))
+
+# Overpass 504s on even small requests over these areas at the default
+# single-request-per-region approach (confirmed empirically for the route
+# graph build) — tile like build_route_graph.py does.
+CELL_OVERRIDES = {"jakarta_metro_test": 0.05, "tangerang_test": 0.05}
+DEFAULT_CELL_DEG = 0.20  # generous — the 13 original small regions never needed tiling
+
 # highway=* values that overlap with the app's own trail data or aren't
 # meaningful for street search — kept as a tunable denylist.
 EXCLUDED_HIGHWAY = {
@@ -58,7 +70,19 @@ EXCLUDED_HIGHWAY = {
 }
 
 
-def fetch_region(south: float, west: float, north: float, east: float) -> list[dict]:
+def _cells(south: float, west: float, north: float, east: float, cell_deg: float):
+    lat = south
+    while lat < north:
+        lat2 = min(lat + cell_deg, north)
+        lon = west
+        while lon < east:
+            lon2 = min(lon + cell_deg, east)
+            yield (lat, lon, lat2, lon2)
+            lon = lon2
+        lat = lat2
+
+
+def _fetch_cell(south: float, west: float, north: float, east: float) -> list[dict]:
     query = (
         "[out:json][timeout:180];"
         f'way["highway"]["name"]({south},{west},{north},{east});'
@@ -69,16 +93,32 @@ def fetch_region(south: float, west: float, north: float, east: float) -> list[d
         OVERPASS_URL, data=data,
         headers={"User-Agent": "TrailGuide-streets-build/1.0"},
     )
-    for attempt in range(3):
+    for attempt in range(4):
         try:
             with urllib.request.urlopen(req, timeout=200) as resp:
                 return json.loads(resp.read())["elements"]
         except (urllib.error.URLError, TimeoutError) as e:
-            if attempt == 2:
-                raise
-            print(f"  retrying after error: {e}", file=sys.stderr)
+            if attempt == 3:
+                print(f"    giving up on this cell after 4 attempts: {e}",
+                      file=sys.stderr)
+                return []
+            print(f"    retrying after error: {e}", file=sys.stderr)
             time.sleep(5 * (attempt + 1))
     return []
+
+
+def fetch_region(south: float, west: float, north: float, east: float,
+                  cell_deg: float = DEFAULT_CELL_DEG) -> list[dict]:
+    cells = list(_cells(south, west, north, east, cell_deg))
+    by_id: dict[int, dict] = {}
+    for i, (s, w, n, e) in enumerate(cells):
+        if len(cells) > 1:
+            print(f"  cell {i + 1}/{len(cells)} ({s:.3f},{w:.3f},{n:.3f},{e:.3f})...")
+        for el in _fetch_cell(s, w, n, e):
+            if el.get("type") == "way" and el.get("id") is not None:
+                by_id[el["id"]] = el  # dedupe ways spanning a cell boundary
+        time.sleep(2 if len(cells) > 1 else 0)
+    return list(by_id.values())
 
 
 def way_length_m(geom: list[dict]) -> float:
@@ -154,8 +194,10 @@ def main() -> None:
     build_schema(conn)
 
     for region_id, south, west, north, east in regions:
-        print(f"Fetching {region_id} ({south},{west},{north},{east})...")
-        elements = fetch_region(south, west, north, east)
+        cell_deg = CELL_OVERRIDES.get(region_id, DEFAULT_CELL_DEG)
+        print(f"Fetching {region_id} ({south},{west},{north},{east}), "
+              f"cell size {cell_deg}deg...")
+        elements = fetch_region(south, west, north, east, cell_deg)
         streets = dedupe_streets(elements)
         print(f"  {len(streets)} uniquely-named streets")
         conn.execute("DELETE FROM streets WHERE region_id = ?", (region_id,))
