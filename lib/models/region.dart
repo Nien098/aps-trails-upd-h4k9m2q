@@ -110,80 +110,24 @@ Future<void> removeUserRegion(String id) async {
   } catch (_) {}
 }
 
-/// Bookmarked areas within the bundled map. Ordered roughly by likelihood of
-/// use for the parents (their home trails first). All share one basemap.
+/// Bookmarked areas within the bundled map. The bundled pmtiles covers a
+/// ~100km span (Victoria → Whistler → Hope → the US border) as one file, so
+/// these two bookmarks aren't separate maps — just a starting camera
+/// position + a bounding box used to label/route a point to a name (see
+/// [regionForPoint]). Previously this list had 12 separate Lower-Mainland
+/// entries (Coquitlam, Port Coquitlam, Maple Ridge, Lynn Valley, Capilano,
+/// West Van, Vancouver, Tsawwassen, Abbotsford, Chilliwack, Squamish,
+/// Whistler) — merged into one "Vancouver - Mainland" bookmark since picking
+/// between them was more choice than the underlying data actually warranted
+/// (they're all the same map). Victoria stays separate: it's across the
+/// water on Vancouver Island, not really "mainland," and its bbox doesn't
+/// overlap the merged one.
 const List<Region> kRegions = [
   Region(
-    id: 'coquitlam',
-    name: 'Coquitlam River',
+    id: 'vancouver_mainland',
+    name: 'Vancouver - Mainland',
     center: LatLng(49.265, -122.825),
-    south: 49.22, west: -122.90, north: 49.31, east: -122.75,
-  ),
-  Region(
-    id: 'port_coquitlam',
-    name: 'Port Coquitlam',
-    center: LatLng(49.265, -122.750),
-    south: 49.22, west: -122.82, north: 49.31, east: -122.68,
-  ),
-  Region(
-    id: 'maple_ridge',
-    name: 'Maple Ridge / Pitt Meadows',
-    center: LatLng(49.220, -122.600),
-    south: 49.18, west: -122.72, north: 49.30, east: -122.48,
-  ),
-  Region(
-    id: 'lynn_valley',
-    name: 'Lynn Valley (North Van)',
-    center: LatLng(49.375, -123.020),
-    south: 49.32, west: -123.06, north: 49.43, east: -122.98,
-  ),
-  Region(
-    id: 'capilano',
-    name: 'Capilano (North Van)',
-    center: LatLng(49.365, -123.120),
-    south: 49.32, west: -123.16, north: 49.41, east: -123.08,
-  ),
-  Region(
-    id: 'west_van',
-    name: 'West Vancouver',
-    center: LatLng(49.370, -123.230),
-    south: 49.33, west: -123.31, north: 49.43, east: -123.16,
-  ),
-  Region(
-    id: 'vancouver',
-    name: 'Vancouver',
-    center: LatLng(49.280, -123.120),
-    south: 49.20, west: -123.22, north: 49.32, east: -123.02,
-  ),
-  Region(
-    id: 'tsawwassen',
-    name: 'Tsawwassen / Delta',
-    center: LatLng(49.010, -123.080),
-    south: 48.96, west: -123.17, north: 49.10, east: -122.95,
-  ),
-  Region(
-    id: 'abbotsford',
-    name: 'Abbotsford',
-    center: LatLng(49.050, -122.300),
-    south: 49.00, west: -122.42, north: 49.12, east: -122.18,
-  ),
-  Region(
-    id: 'chilliwack',
-    name: 'Chilliwack',
-    center: LatLng(49.160, -121.950),
-    south: 49.08, west: -122.10, north: 49.24, east: -121.80,
-  ),
-  Region(
-    id: 'squamish',
-    name: 'Squamish / The Chief',
-    center: LatLng(49.700, -123.150),
-    south: 49.60, west: -123.28, north: 49.80, east: -123.05,
-  ),
-  Region(
-    id: 'whistler',
-    name: 'Whistler',
-    center: LatLng(50.115, -122.955),
-    south: 50.05, west: -123.05, north: 50.20, east: -122.85,
+    south: 48.96, west: -123.31, north: 50.20, east: -121.80,
   ),
   Region(
     id: 'victoria',

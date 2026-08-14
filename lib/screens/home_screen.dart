@@ -18,6 +18,7 @@ import '../services/updater.dart';
 import 'author_screen.dart';
 import 'browse_map_screen.dart';
 import 'download_region_screen.dart';
+import 'region_picker_screen.dart';
 import 'guide_screen.dart';
 import 'history_screen.dart';
 import 'record_trail_screen.dart';
@@ -469,6 +470,15 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   /// Bottom sheet to download a new offline area or remove a downloaded one.
+  Future<void> _pickRegion() async {
+    final r = await Navigator.push<Region>(
+      context,
+      MaterialPageRoute(
+          builder: (_) => RegionPickerScreen(current: _activeRegion)),
+    );
+    if (r != null && mounted) setState(() => _activeRegion = r);
+  }
+
   void _openMapAreas() {
     showModalBottomSheet(
       context: context,
@@ -847,33 +857,20 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         leadingWidth: 40,
         leading: const Icon(Icons.hiking, size: 26),
         // The area picker is the primary control, so it gets the title slot.
-        title: DropdownButtonHideUnderline(
-          child: DropdownButton<Region>(
-            isExpanded: true,
-            value: _activeRegion,
-            icon: const Icon(Icons.arrow_drop_down),
-            borderRadius: BorderRadius.circular(12),
-            onChanged: (r) {
-              if (r != null) setState(() => _activeRegion = r);
-            },
-            selectedItemBuilder: (context) => [
-              for (final r in allRegions())
-                Row(
-                  children: [
-                    const Icon(Icons.place, size: 20),
-                    const SizedBox(width: 6),
-                    Flexible(
-                      child: Text(r.name,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                              fontSize: 20, fontWeight: FontWeight.w600)),
-                    ),
-                  ],
-                ),
-            ],
-            items: [
-              for (final r in allRegions())
-                DropdownMenuItem(value: r, child: Text(r.name)),
+        title: InkWell(
+          borderRadius: BorderRadius.circular(8),
+          onTap: _pickRegion,
+          child: Row(
+            children: [
+              const Icon(Icons.place, size: 20),
+              const SizedBox(width: 6),
+              Flexible(
+                child: Text(_activeRegion.name,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                        fontSize: 20, fontWeight: FontWeight.w600)),
+              ),
+              const Icon(Icons.arrow_drop_down),
             ],
           ),
         ),

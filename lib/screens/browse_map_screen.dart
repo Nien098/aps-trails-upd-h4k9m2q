@@ -6,6 +6,7 @@ import '../models/region.dart';
 import '../services/search_service.dart';
 import '../widgets/base_map.dart';
 import '../widgets/location_search.dart';
+import 'region_picker_screen.dart';
 
 /// View-only offline map — pan/zoom/search freely, no trail or edit context,
 /// the way an offline Google Maps might work. Unlike [GuideScreen] and
@@ -68,6 +69,14 @@ class _BrowseMapScreenState extends State<BrowseMapScreen> {
     }
   }
 
+  Future<void> _pickRegion() async {
+    final r = await Navigator.push<Region>(
+      context,
+      MaterialPageRoute(builder: (_) => RegionPickerScreen(current: _region)),
+    );
+    if (r != null) _selectRegion(r);
+  }
+
   Future<void> _openSearch() async {
     final result = await showSearch<SearchResult?>(
       context: context,
@@ -98,33 +107,20 @@ class _BrowseMapScreenState extends State<BrowseMapScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: DropdownButtonHideUnderline(
-          child: DropdownButton<Region>(
-            isExpanded: true,
-            value: _region,
-            icon: const Icon(Icons.arrow_drop_down),
-            borderRadius: BorderRadius.circular(12),
-            onChanged: (r) {
-              if (r != null) _selectRegion(r);
-            },
-            selectedItemBuilder: (context) => [
-              for (final r in allRegions())
-                Row(
-                  children: [
-                    const Icon(Icons.place, size: 20),
-                    const SizedBox(width: 6),
-                    Flexible(
-                      child: Text(r.name,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                              fontSize: 20, fontWeight: FontWeight.w600)),
-                    ),
-                  ],
-                ),
-            ],
-            items: [
-              for (final r in allRegions())
-                DropdownMenuItem(value: r, child: Text(r.name)),
+        title: InkWell(
+          borderRadius: BorderRadius.circular(8),
+          onTap: _pickRegion,
+          child: Row(
+            children: [
+              const Icon(Icons.place, size: 20),
+              const SizedBox(width: 6),
+              Flexible(
+                child: Text(_region.name,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                        fontSize: 20, fontWeight: FontWeight.w600)),
+              ),
+              const Icon(Icons.arrow_drop_down),
             ],
           ),
         ),
