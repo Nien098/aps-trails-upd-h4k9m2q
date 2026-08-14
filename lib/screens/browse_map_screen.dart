@@ -171,6 +171,20 @@ class _BrowseMapScreenState extends State<BrowseMapScreen> {
     }
   }
 
+  /// Opens Directions on wherever this screen's camera is currently looking
+  /// (e.g. right after "my location") rather than the region's generic
+  /// bookmarked center — [NavigateScreen] owns a separate map/camera, so it
+  /// has no way to know that on its own without being told.
+  Future<void> _openDirections() async {
+    final camera = await _c?.queryCameraPosition();
+    if (!mounted) return;
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+          builder: (_) => NavigateScreen(region: _region, initialCamera: camera)),
+    );
+  }
+
   Future<void> _openBookmarksList() async {
     final picked = await Navigator.push<Bookmark>(
         context, MaterialPageRoute(builder: (_) => const BookmarksScreen()));
@@ -329,8 +343,7 @@ class _BrowseMapScreenState extends State<BrowseMapScreen> {
                     heroTag: 'browseDirections',
                     mini: true,
                     tooltip: 'Directions',
-                    onPressed: () => Navigator.push(context,
-                        MaterialPageRoute(builder: (_) => NavigateScreen(region: _region))),
+                    onPressed: _openDirections,
                     child: const Icon(Icons.directions),
                   ),
                 ],

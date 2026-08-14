@@ -32,9 +32,15 @@ enum _Endpoint { start, end }
 /// [_stickToRoads]'s doc) — this app has no vehicle-routing data (no
 /// one-way/turn-restriction/speed tags) and is scoped to hiking/walking.
 class NavigateScreen extends StatefulWidget {
-  const NavigateScreen({super.key, required this.region});
+  const NavigateScreen({super.key, required this.region, this.initialCamera});
 
   final Region region;
+
+  /// Camera to open on — pass the caller's current position (see
+  /// [BrowseMapScreen]'s Directions button) so this screen opens wherever
+  /// the map was already looking, not the region's generic bookmarked
+  /// center. Falls back to that center when not given.
+  final CameraPosition? initialCamera;
 
   @override
   State<NavigateScreen> createState() => _NavigateScreenState();
@@ -319,7 +325,8 @@ class _NavigateScreenState extends State<NavigateScreen> {
         children: [
           BaseMap(
             region: widget.region,
-            initialCamera: CameraPosition(target: widget.region.center, zoom: 13),
+            initialCamera: widget.initialCamera ??
+                CameraPosition(target: widget.region.center, zoom: 13),
             onMapCreated: _onMapCreated,
             onStyleLoaded: _onStyleLoaded,
             onMapClick: _onMapClick,
