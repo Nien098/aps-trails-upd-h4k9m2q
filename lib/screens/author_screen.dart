@@ -175,7 +175,8 @@ class _AuthorScreenState extends State<AuthorScreen> {
   int? _movingAnchor;
 
   /// Route segments parallel to [_trail.anchors]: segment i connects anchor
-  /// i-1 → i (segment 0 is just [anchor0]). Undo drops the last of each.
+  /// i-1 → i (segment 0 is just [anchor0]). See [_pushUndo]/[_undo] for how
+  /// edits to this (and [_trail.anchors]/[_trail.cues]) get undone.
   final List<List<LatLng>> _segments = [];
 
   /// Snapshots of (anchors, segments, cues) taken right before every

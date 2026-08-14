@@ -107,11 +107,20 @@ wrong-versionCode release has bitten this project before.
 - `lib/screens/author_screen.dart` — the trail editor. Owns `_trail.anchors`
   (sparse, user-facing waypoints) and `_segments` (dense per-anchor-hop
   coordinate arrays — this is the actual editable geometry). Three drawing
-  modes: tap-to-tap (`_addAnchor`), drag-trace (`_dragDrawMode`), and
-  grab-and-bend (`_adjustLineMode`, pure geometric Gaussian-falloff
-  deformation, no trail lookups — see `_deformSegment`). `_densify()` keeps
-  every segment's vertices ≤8m apart so edits stay local. `_composePath()`
-  flattens `_segments` back into `_trail.path` for rendering/saving.
+  modes, mutually exclusive (activating one force-clears the other two's
+  mode flags — don't add a fourth without doing the same, or its icon can
+  get stuck showing "active"): tap-to-tap (`_addAnchor`), drag-trace
+  (`_dragDrawMode`), and grab-and-bend (`_adjustLineMode`, pure geometric
+  Gaussian-falloff deformation, no trail lookups — see `_deformSegment`).
+  `_densify()` keeps every segment's vertices ≤8m apart so edits stay local.
+  `_composePath()` flattens `_segments` back into `_trail.path` for
+  rendering/saving. Undo (`_pushUndo`/`_undo`) is a snapshot stack of
+  `_EditSnapshot` (anchors + segments + cues), pushed immediately before
+  every geometry-mutating action — not just the tap-to-tap draw path, so a
+  cue edit, a drag-draw commit, or a line-nudge is just as undoable as a
+  drawn point. `_DrawGestureSurface` is the shared widget behind the
+  boundary/drag-draw/line-adjust tools' full-screen drag overlay — see the
+  gotchas below for why it exists instead of a plain `GestureDetector`.
 - `lib/services/geo.dart` — shared geometry math (`metersBetween`,
   `nearestPointOnPath`/`nearestPointOnPolyline`, `distanceToPath`,
   `simplifyPath` Douglas-Peucker, `_projectOntoSegment` private per-file).
@@ -184,6 +193,39 @@ wrong-versionCode release has bitten this project before.
   APK**, even for a trivial change — same versionCode + same signature means
   some installers silently show "Open" instead of "Install" and the update
   never actually lands on the device.
+- **A full-screen `HitTestBehavior.opaque` overlay stops a sibling
+  `Listener` *underneath* it from ever seeing pointer events at all** —
+  not just gesture-arena events, but raw signals like mouse-wheel scroll
+  too. This is why each drawing tool's screen-covering drag-catcher (used
+  to claim single-finger drag input for itself) silently broke
+  `BaseMap`'s own wheel-zoom handling the moment any tool was turned on:
+  the overlay wasn't competing for the gesture, it was hiding the map's
+  `Listener` from hit-testing entirely. Fixed by giving the tool's own
+  overlay (`_DrawGestureSurface`) an `onPointerSignal` handler that
+  forwards scroll straight to `controller.animateCamera`, rather than
+  relying on anything beneath it to see the event.
+- **`BaseMap.gesturesEnabled = false` (used while a drawing tool is active,
+  so a single-finger touch can't also drag/rotate the camera underneath the
+  draw) disables *all* of MapLibre's native gestures, including two-finger
+  pan/pinch** — there's no partial mode that keeps multi-touch camera
+  control while blocking single-finger. Two-finger panning during
+  drag-draw/line-adjust/boundary-draw is therefore hand-rolled in
+  `_DrawGestureSurface`: it tracks active pointer count itself via
+  `Listener.onPointerDown/Move/Up`, treats 1 pointer as the draw gesture and
+  ≥2 as camera-pan (calling `CameraUpdate.scrollBy` directly), and abandons
+  an in-progress single-finger draw the moment a second finger lands (no
+  partial commit).
+- **`CameraUpdate.scrollBy(dx, dy)`'s doc ("positive dx moves the camera
+  target east") describes the opposite of what it does to the *visible
+  content* on this map/platform combo in practice.** Confirmed on-device:
+  to make the map content follow the fingers during a manual two-finger pan
+  (natural touch-drag panning), pass the raw per-finger delta straight
+  through — do **not** negate it, despite what the "moves the camera
+  target" framing in the SDK doc would suggest. Also: `scrollBy`'s dx/dy
+  are logical (dp) pixels, not native device pixels — unlike
+  `toLatLng`/`toScreenLocation` elsewhere in this file, the Android side
+  multiplies by density itself, so don't multiply by `devicePixelRatio`
+  before passing it in.
 
 ## Code style actually used here (not generic Dart style guide filler)
 
