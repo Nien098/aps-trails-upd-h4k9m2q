@@ -64,6 +64,9 @@ class _NavigateScreenState extends State<NavigateScreen> {
   bool _routing = false;
   String? _routeError;
 
+  Circle? _startMarker;
+  Circle? _endMarker;
+
   void _onMapCreated(MapLibreMapController c) {
     _c = c;
     _router = TrailRouter(c);
@@ -92,6 +95,15 @@ class _NavigateScreenState extends State<NavigateScreen> {
       }
       final pos = await Geolocator.getCurrentPosition(
           locationSettings: const LocationSettings(timeLimit: Duration(seconds: 10)));
+      // The silent auto-default (see _onStyleLoaded) can take several
+      // seconds on a real device (cold GPS fix) — long enough for the
+      // author to have since picked their own start point another way
+      // (tap-on-map, search, a bookmark). Re-checked here, right before
+      // committing, so a slow GPS fix can't silently overwrite a manual
+      // pick made while it was still in flight. A non-silent (explicit
+      // "My location" menu tap) call always applies — the user asked for
+      // GPS specifically, there's nothing to preserve.
+      if (silent && (which == _Endpoint.start ? _start : _end) != null) return;
       _setEndpoint(which, LatLng(pos.latitude, pos.longitude), 'My location');
     } catch (_) {
       if (!silent) _toast("Couldn't get your location");
@@ -108,6 +120,7 @@ class _NavigateScreenState extends State<NavigateScreen> {
         _endLabel = label;
       }
     });
+    _updateMarkers();
     _maybeRoute();
   }
 
@@ -119,7 +132,42 @@ class _NavigateScreenState extends State<NavigateScreen> {
       _end = s;
       _endLabel = sl;
     });
+    _updateMarkers();
     _maybeRoute();
+  }
+
+  /// Redraws the start (green) / end (red) pins — plain circle annotations,
+  /// same idea as [AuthorScreen]'s anchor markers, torn down and re-added on
+  /// every change since there are only ever at most two of them.
+  Future<void> _updateMarkers() async {
+    final c = _c;
+    if (c == null) return;
+    if (_startMarker != null) {
+      await c.removeCircle(_startMarker!);
+      _startMarker = null;
+    }
+    if (_endMarker != null) {
+      await c.removeCircle(_endMarker!);
+      _endMarker = null;
+    }
+    if (_start != null) {
+      _startMarker = await c.addCircle(CircleOptions(
+        geometry: _start,
+        circleRadius: 10,
+        circleColor: '#2E7D32',
+        circleStrokeColor: '#ffffff',
+        circleStrokeWidth: 3,
+      ));
+    }
+    if (_end != null) {
+      _endMarker = await c.addCircle(CircleOptions(
+        geometry: _end,
+        circleRadius: 10,
+        circleColor: '#C62828',
+        circleStrokeColor: '#ffffff',
+        circleStrokeWidth: 3,
+      ));
+    }
   }
 
   Future<void> _choosePoint(_Endpoint which) async {
