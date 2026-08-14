@@ -12,12 +12,18 @@ import 'pmtiles_writer.dart';
 import 'route_graph_store.dart';
 import 'search_service.dart';
 
-/// Progress of a region download.
+/// Progress of a region download. [phase] labels which step is running —
+/// map tiles, then street names, then route-graph data — since all three
+/// report through the same callback but at very different scales (tile
+/// count vs. Overpass cell count), so the UI can explain why the bar/number
+/// jumps between phases instead of looking stuck.
 class DownloadProgress {
-  DownloadProgress(this.done, this.total, this.bytes);
+  DownloadProgress(this.done, this.total, this.bytes,
+      {this.phase = 'Downloading map'});
   final int done;
   final int total;
   final int bytes;
+  final String phase;
 }
 
 /// Downloads a bounding box of Protomaps vector tiles and assembles them into a
@@ -177,16 +183,24 @@ class RegionDownloader {
         minZoom: kRegionMinZoom, maxZoom: kRegionMaxZoom);
 
     try {
-      final streets = await _fetchStreets(west, south, east, north);
+      final streets = await _fetchStreets(west, south, east, north,
+          onCellProgress: (d, t) => onProgress?.call(DownloadProgress(
+              d, t, writer.byteCount, phase: 'Fetching street names')));
       await SearchService.instance.addStreets(id, streets);
     } catch (_) {
       // Soft-fail — street search for this region just won't work until a
-      // re-download succeeds; the map itself is unaffected.
+      // re-download succeeds; the map itself is unaffected. Also the escape
+      // hatch for an area too large to even attempt (_fetchOverpassTiled
+      // throws outright rather than queuing hundreds of sequential
+      // requests) — a slow-but-still-bounded area instead just returns
+      // whatever cells finished inside its time budget, no exception.
       _streetsFailed = true;
     }
 
     try {
-      final ways = await _fetchWays(west, south, east, north);
+      final ways = await _fetchWays(west, south, east, north,
+          onCellProgress: (d, t) => onProgress?.call(DownloadProgress(
+              d, t, writer.byteCount, phase: 'Fetching trail & road data')));
       await RouteGraphStore.instance.addWays(id, ways);
     } catch (_) {
       // Soft-fail — same contract as streetsFailed above.
@@ -235,11 +249,35 @@ class RegionDownloader {
   /// Max cell size (degrees) per Overpass request — mirrors
   /// `tools/build_route_graph.py`'s `CELL_DEG`. Most downloaded areas are a
   /// single cell (whatever fit on screen when the user tapped Download),
-  /// but a large/dense metro area (e.g. all of Jakarta) can otherwise blow
-  /// past the public Overpass instance's per-request timeout/size limit in
-  /// one unbounded request — this is the bug that made street/route-graph
-  /// data silently fail to fetch for exactly that kind of area.
+  /// but a large/dense metro area (e.g. all of Jakarta, or zooming out to
+  /// capture a whole province) can otherwise blow past the public Overpass
+  /// instance's per-request timeout/size limit in one unbounded request —
+  /// this is the bug that made street/route-graph data silently fail to
+  /// fetch for exactly that kind of area.
   static const _overpassCellDeg = 0.15;
+
+  /// Hard cap on how many cells a single download will attempt. Beyond
+  /// this, the area needs so many sequential Overpass requests (each with
+  /// its own retry/backoff) that it can run for many minutes with no
+  /// visible progress once the map-tile bar already reads 100% — which is
+  /// exactly what read as the app "stuck forever" (users had to force-quit
+  /// out of it). Skipping outright and telling the user, instead of
+  /// silently grinding for a very long time, is the better failure mode.
+  static const _overpassMaxCells = 60;
+
+  /// Wall-clock budget for the *whole* tiled fetch, independent of the cell
+  /// cap above — a safety net for the case where even a modest-sized area
+  /// turns out to be unexpectedly slow (an overloaded public instance,
+  /// dense city data). Stops issuing new cell requests once exceeded and
+  /// returns whatever succeeded so far, rather than the cap alone (which
+  /// only guards against *area*, not per-cell slowness).
+  static const _overpassTimeBudget = Duration(seconds: 45);
+
+  static int _cellCount(double west, double south, double east, double north) {
+    final rows = math.max(1, ((north - south) / _overpassCellDeg).ceil());
+    final cols = math.max(1, ((east - west) / _overpassCellDeg).ceil());
+    return rows * cols;
+  }
 
   /// Fetches [queryFor]'s ways over the whole bbox, tiled into a grid of
   /// `_overpassCellDeg` cells and deduped by OSM way id (a way spanning a
@@ -247,20 +285,32 @@ class RegionDownloader {
   /// is caught and skipped individually rather than aborting the whole
   /// fetch — a partial street/route index for a huge area is far more
   /// useful than none at all, matching [RegionDownloader.download]'s own
-  /// "keep whatever tiles succeeded" philosophy for map tiles.
+  /// "keep whatever tiles succeeded" philosophy for map tiles. Throws (a
+  /// deliberate, immediate soft-fail via the caller's try/catch) if the
+  /// area is too large to even attempt — see [_overpassMaxCells].
   static Future<List<Map>> _fetchOverpassTiled(
     double west,
     double south,
     double east,
     double north,
-    String Function(double s, double w, double n, double e) queryFor,
-  ) async {
+    String Function(double s, double w, double n, double e) queryFor, {
+    void Function(int done, int total)? onCellProgress,
+  }) async {
+    final totalCells = _cellCount(west, south, east, north);
+    if (totalCells > _overpassMaxCells) {
+      throw StateError(
+          'Area needs $totalCells Overpass requests, over the $_overpassMaxCells cap');
+    }
+    final deadline = DateTime.now().add(_overpassTimeBudget);
     final byId = <int, Map>{};
+    var cellsDone = 0;
     var lat = south;
+    outer:
     while (lat < north) {
       final lat2 = math.min(lat + _overpassCellDeg, north);
       var lon = west;
       while (lon < east) {
+        if (DateTime.now().isAfter(deadline)) break outer;
         final lon2 = math.min(lon + _overpassCellDeg, east);
         final elements = await _postOverpass(queryFor(lat, lon, lat2, lon2));
         if (elements != null) {
@@ -269,6 +319,8 @@ class RegionDownloader {
             if (el['type'] == 'way' && id != null) byId[id as int] = el;
           }
         }
+        cellsDone++;
+        onCellProgress?.call(cellsDone, totalCells);
         lon = lon2;
         if (lon < east || lat2 < north) {
           await Future.delayed(const Duration(milliseconds: 400));
@@ -318,11 +370,13 @@ class RegionDownloader {
   /// way), so a repeated street name (common for long roads split into many
   /// OSM ways) doesn't produce duplicate search results.
   static Future<List<({String name, double lat, double lon})>> _fetchStreets(
-      double west, double south, double east, double north) async {
+      double west, double south, double east, double north,
+      {void Function(int done, int total)? onCellProgress}) async {
     final elements = await _fetchOverpassTiled(west, south, east, north,
         (s, w, n, e) => '[out:json][timeout:180];'
             'way["highway"]["name"]($s,$w,$n,$e);'
-            'out tags geom;');
+            'out tags geom;',
+        onCellProgress: onCellProgress);
     return _dedupeStreets(elements);
   }
 
@@ -372,11 +426,13 @@ class RegionDownloader {
   /// the huge bundled-region bboxes) since a downloaded area is just
   /// whatever fit in the user's screen when they tapped Download.
   static Future<List<RouteWay>> _fetchWays(
-      double west, double south, double east, double north) async {
+      double west, double south, double east, double north,
+      {void Function(int done, int total)? onCellProgress}) async {
     final elements = await _fetchOverpassTiled(west, south, east, north,
         (s, w, n, e) => '[out:json][timeout:180];'
             'way["highway"]($s,$w,$n,$e);'
-            'out tags geom;');
+            'out tags geom;',
+        onCellProgress: onCellProgress);
     return _classifyWays(elements);
   }
 

@@ -204,6 +204,8 @@ class _DownloadRegionScreenState extends State<DownloadRegionScreen> {
             return Column(
               mainAxisSize: MainAxisSize.min,
               children: [
+                Text(p.phase, style: const TextStyle(fontWeight: FontWeight.w600)),
+                const SizedBox(height: 8),
                 LinearProgressIndicator(value: pct),
                 const SizedBox(height: 12),
                 Text('${(pct * 100).round()}%  ·  '
