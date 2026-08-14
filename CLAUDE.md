@@ -1,9 +1,31 @@
 # CLAUDE.md — TrailGuide ("APS Trails")
 
-Offline hiking-trail app for the user's parents (Lower Mainland BC). Flutter +
-MapLibre GL + Protomaps `.pmtiles` vector tiles, fully offline-capable
-(bundled/downloaded region tiles, no network needed on a walk). Android is the
-only shipped target; Windows desktop build exists but is secondary.
+Offline hiking-trail app for the user's parents (Lower Mainland BC), now also
+being tested by the user's brother in the Jakarta/Tangerang area of Indonesia.
+Flutter + MapLibre GL + Protomaps `.pmtiles` vector tiles, fully
+offline-capable (bundled/downloaded region tiles, no network needed on a
+walk). Android is the only shipped target; Windows desktop build exists but
+is secondary.
+
+## Current state (as of v1.5.0+113)
+
+Beyond the original trail-drawing/walking app, this project now also has:
+offline street/trail search (`SearchService`), a view-only "Browse Map" mode,
+and — the big one — a bundled, offline, region-wide **routing graph**
+(`RouteGraphStore`) that upgrades trail-drawing/generation/bail-out routing
+from "only sees what's currently rendered on screen" to "sees the whole
+downloaded/bundled area." See **Search & routing infrastructure** and
+**Known limitations / next steps** below for the full picture — read those
+before touching any of `search_service.dart`, `route_graph_store.dart`,
+`trail_router.dart`'s offline-merge code, or `region_downloader.dart`'s
+Overpass fetch, all of which have real, hard-won lessons baked in already.
+
+App size has grown substantially from these additions: bundled assets alone
+are now ~337MB total (basemap + streets.sqlite + route_graph.sqlite, the last
+of which is Git-LFS-tracked since it exceeds GitHub's 100MB per-file limit).
+This is expected and was confirmed with the user at each size jump — don't
+be alarmed by it, but do keep flagging *further* size jumps before bundling
+more diagnostic/regional data (see below).
 
 ## Environment & tool paths (Windows)
 
@@ -23,6 +45,18 @@ Do not guess these — verified paths for this machine:
   `main`.
 - Shell: this session runs the Bash tool (Git Bash), not PowerShell — use
   POSIX syntax (`$VAR`, forward slashes) even though the OS is Windows.
+- **Git LFS is installed and configured** (`git lfs install` already run,
+  `.gitattributes` tracks `assets/data/route_graph.sqlite`). That file is
+  >100MB, over GitHub's hard per-file limit for normal git objects — if it
+  (or any other bundled data asset) grows past ~100MB, `git lfs track` it
+  *before* committing, or the push will be rejected outright (`GH001: Large
+  files detected`). If a commit with an untracked huge file is made and
+  rejected, the commit is still only local (never pushed) — safe to
+  `git reset --soft HEAD~1`, `git lfs track` the path, re-add, and recommit
+  clean rather than trying to rewrite history after the fact.
+- Python (for `tools/build_streets_db.py`/`build_route_graph.py`): plain
+  `python` on PATH, stdlib `sqlite3` module — already confirmed to have both
+  FTS5 and R-tree compiled in on this machine, no extra install needed.
 
 ## Core commands
 
@@ -111,15 +145,21 @@ wrong-versionCode release has bitten this project before.
 ## Architecture map (where things live)
 
 - `lib/services/trail_router.dart` — the routing/snapping engine. Builds an
-  in-memory graph (`_Graph`/`_Seg`) from whatever trail/road vector features
-  are currently rendered on screen (`queryRenderedFeaturesInRect` — **only
-  sees what's actually rendered in the current viewport**, a recurring
-  source of bugs when a caller queries too small/wrong an area). Exposes:
-  `connect()`/`between()` (tap-to-tap routing, real pathfinding, can produce
-  detours — used by "Follow trails" draw mode), `snapPoint()`/`snapStroke()`
-  (pure local nudge, no pathfinding — used by record-mode cleanup and
-  drag-draw tracing), `generate()` (auto-generate a route from the visible
-  network, with boundary-polygon and coverage-walk padding support).
+  in-memory graph (`_Graph`/`_Seg`, keyed by ~1m-rounded coordinate strings,
+  not real OSM node IDs — connectivity is purely "shared/near-shared
+  coordinates," see `_Graph._key`/`_mergeNearbyNodes`) from two merged
+  sources: whatever trail/road vector features are currently rendered on
+  screen (`queryRenderedFeaturesInRect`) **plus** the bundled/downloaded
+  offline route graph (`RouteGraphStore.waysInBounds`, merged in via
+  `_addFeaturesToGraph`'s `geoBounds` param — see **Search & routing
+  infrastructure** below). Exposes: `connect()`/`between()` (tap-to-tap
+  routing, real pathfinding, can produce detours — used by "Follow trails"
+  draw mode), `snapPoint()`/`snapStroke()` (pure local nearest-edge nudge, no
+  pathfinding — used by record-mode cleanup and drag-draw tracing; also
+  merges offline data now, safe to do since there's no path-cost
+  accumulation to go wrong the way Dijkstra can), `generate()` (auto-generate
+  a route from the network, with boundary-polygon and coverage-walk padding
+  support), `nearestRoad()`/`junctionsNear()`.
 - `lib/screens/author_screen.dart` — the trail editor. Owns `_trail.anchors`
   (sparse, user-facing waypoints) and `_segments` (dense per-anchor-hop
   coordinate arrays — this is the actual editable geometry). Three drawing
@@ -128,15 +168,19 @@ wrong-versionCode release has bitten this project before.
   get stuck showing "active"): tap-to-tap (`_addAnchor`), drag-trace
   (`_dragDrawMode`), and grab-and-bend (`_adjustLineMode`, pure geometric
   Gaussian-falloff deformation, no trail lookups — see `_deformSegment`).
-  `_densify()` keeps every segment's vertices ≤8m apart so edits stay local.
-  `_composePath()` flattens `_segments` back into `_trail.path` for
-  rendering/saving. Undo (`_pushUndo`/`_undo`) is a snapshot stack of
-  `_EditSnapshot` (anchors + segments + cues), pushed immediately before
-  every geometry-mutating action — not just the tap-to-tap draw path, so a
-  cue edit, a drag-draw commit, or a line-nudge is just as undoable as a
-  drawn point. `_DrawGestureSurface` is the shared widget behind the
+  Anchors are also freely draggable *during* line-adjust mode (checked first
+  in `_onAdjustPanStart`, before the mid-line search — see
+  `_draggingAnchorIndex`/`_commitAnchorPosition`), not just via the older
+  long-press → action-sheet → tap-to-place flow (`_placeMovingAnchor`, which
+  now shares the same commit helper). `_densify()` keeps every segment's
+  vertices ≤8m apart so edits stay local. `_composePath()` flattens
+  `_segments` back into `_trail.path` for rendering/saving. Undo
+  (`_pushUndo`/`_undo`) is a snapshot stack of `_EditSnapshot` (anchors +
+  segments + cues), pushed immediately before every geometry-mutating
+  action. `_DrawGestureSurface` is the shared widget behind the
   boundary/drag-draw/line-adjust tools' full-screen drag overlay — see the
   gotchas below for why it exists instead of a plain `GestureDetector`.
+  `Scaffold(resizeToAvoidBottomInset: false)` — see gotchas.
 - `lib/services/geo.dart` — shared geometry math (`metersBetween`,
   `nearestPointOnPath`/`nearestPointOnPolyline`, `distanceToPath`,
   `simplifyPath` Douglas-Peucker, `_projectOntoSegment` private per-file).
@@ -151,13 +195,28 @@ wrong-versionCode release has bitten this project before.
   `connect()`-style routing because routing between distant recorded points
   could jump onto a wrong/unrelated nearby trail.
 - `lib/screens/guide_screen.dart` — turn-by-turn walking mode (TTS + cues),
-  crash/pause-resume via `WalkCheckpoint`.
+  crash/pause-resume via `WalkCheckpoint`. Also has the search FAB (see
+  below) and `resizeToAvoidBottomInset: false`.
+- `lib/screens/browse_map_screen.dart` — new, view-only "Browse Map" mode
+  (pan/zoom/search freely, no trail/edit context). Owns its own `Region`
+  state and can swap basemaps on demand (unlike Guide/Author, which are tied
+  to one trail's region) — the only screen where search is unconfined
+  (`confineTo: null`).
+- `lib/screens/region_picker_screen.dart` — full-screen area picker
+  (replaced an app-bar dropdown that got cramped once downloaded regions
+  piled up alongside the bundled ones).
 - `lib/services/offline_map.dart`, `pmtiles_writer.dart`,
   `region_downloader.dart` — offline `.pmtiles` handling: bundled regions,
   downloading new ones, and writing on-device PMTiles v3 from an online
-  download.
-- `lib/services/trail_store.dart` — SQLite persistence (sqflite), versioned
-  schema migrations.
+  download. `RegionDownloader.download()` also fetches street-name
+  (`SearchService.addStreets`) and route-graph (`RouteGraphStore.addWays`)
+  data for the downloaded bbox via tiled Overpass requests — see **Search &
+  routing infrastructure** and **Known limitations** below, this has real
+  caps/gotchas.
+- `lib/services/trail_store.dart` — SQLite persistence (`sqflite`),
+  versioned schema migrations. Trail data only — no FTS5/R-tree needed here,
+  unlike the newer search/route-graph stores (see below), so `sqflite`
+  (OS-provided SQLite) is fine for this one.
 - `lib/services/native_bridge.dart` + `android/.../TrackingService.kt` —
   platform channel to a foreground Android service for background GPS
   tracking, stillness-nudge SMS, notification actions.
@@ -167,6 +226,60 @@ wrong-versionCode release has bitten this project before.
 - `assets/style/style.json` — Protomaps' official light theme, adapted for
   offline fonts/pmtiles URL. Don't hand-roll style changes without checking
   this is still based on the upstream theme.
+- `lib/models/region.dart` — `kRegions` is now just **2** bundled bookmarks
+  (`vancouver_mainland`, `victoria`), merged down from an original 12
+  separate Lower Mainland entries that all pointed at the same shared
+  basemap file anyway (picking between them was more choice than the data
+  supported). All bundled regions share one pmtiles (`kMapAsset`); only a
+  user-*downloaded* region has its own separate `mapAsset`/pmtiles file —
+  this distinction matters a lot for `BrowseMapScreen`'s basemap-swap logic
+  and `SearchService`'s `confineTo` filtering (both keyed on `mapAsset`, not
+  on region *name* — merging/renaming bundled regions doesn't invalidate
+  anything already using `mapAsset` comparisons).
+
+## Search & routing infrastructure (added this project cycle)
+
+Three bundled SQLite files under `assets/data/`, each with a matching
+dev-time Python build script under `tools/` (Overpass-API-based, run
+manually, never at app runtime):
+
+- **`streets.sqlite`** (`tools/build_streets_db.py`) — street *names* only,
+  one representative point per unique name, FTS5-indexed. Powers
+  `SearchService`'s street search. Small (a few MB).
+- **`route_graph.sqlite`** (`tools/build_route_graph.py`) — full road/trail/
+  sidewalk *geometry* (every way, not deduped by name), R-tree-indexed for
+  fast bbox lookups. Powers `RouteGraphStore`, merged into `TrailRouter`'s
+  graph. Much bigger than the name index (full geometry, not one point) —
+  this is the dominant driver of the app's ~337MB size.
+- Both are opened via **`package:sqlite3`** (FFI, bundles its own native
+  SQLite with FTS5 *and* R-tree compiled in), **not** `sqflite` — `sqflite`
+  on Android talks to the OS-provided SQLite via platform channel, which
+  frequently lacks these extensions (confirmed root cause of a real shipped
+  bug: search silently spun forever on real devices because the FTS5 query
+  threw and the UI never checked `snap.hasError`). Verify any *new* SQLite
+  extension need the same way — don't assume by analogy, prove it (a quick
+  `dart run` script against `package:sqlite3` directly is enough, no need
+  for a full device build).
+- Runtime services (`lib/services/search_service.dart`,
+  `lib/services/route_graph_store.dart`) both follow the same
+  copy-on-first-run pattern as `OfflineMap` — bundled asset → app documents
+  dir, re-copied only if the file size changed (so an app update with a
+  bigger bundled asset does trigger a re-copy automatically).
+- `lib/widgets/map_search_bar.dart` — the actual search UI. **Not**
+  `showSearch()`/`SearchDelegate`: that does a hard `Navigator.push` of an
+  opaque route, which unmounts the map's native platform view entirely
+  (confirmed — there's no way to keep the map visible underneath a
+  `SearchDelegate`). Hand-rolled floating `Card` overlay instead, matching
+  this app's existing floating-widget idiom (`_ModeBar`, `_Hint`). Also
+  exports `jumpCamera()` — see gotchas for why the naive
+  `animateCamera(newLatLngZoom(...))` isn't safe for a long-distance jump.
+- Downloaded (non-bundled) regions get their own streets/route-graph data
+  fetched live via `RegionDownloader.download()` at download/update time —
+  tiled into a grid of Overpass requests (mirrors the dev-scripts' tiling),
+  soft-fails per-cell rather than aborting the whole fetch, and is itself
+  capped (60 cells / 45s wall-clock budget) specifically to prevent the
+  download UI hanging forever on a huge/dense area. **This cap is a known,
+  real limitation for very dense areas — see Known limitations below.**
 
 ## Hard-won gotchas (don't re-discover these)
 
@@ -231,6 +344,27 @@ wrong-versionCode release has bitten this project before.
   ≥2 as camera-pan (calling `CameraUpdate.scrollBy` directly), and abandons
   an in-progress single-finger draw the moment a second finger lands (no
   partial commit).
+- **MapLibre's `animateCamera` does a Mapbox-style "flyTo" on Android for any
+  long-distance + zoom-changing jump — it zooms OUT mid-transition** (an arc
+  effect, inherited from Mapbox GL's algorithm). If the flight dips below
+  wherever the offline data floor is (`BaseMap`'s `minMaxZoomPreference`
+  starts at zoom 10; no tiles below it), you get real black frames — this
+  bit the search "jump to result" feature (fine on GPS recenter, which never
+  changes zoom/never moves far). Fix: `jumpCamera()` in
+  `map_search_bar.dart` splits it into an instant `moveCamera` reposition
+  (no flight) + a short local zoom-only `animateCamera` — by the time the
+  animated step starts there's no ground distance left to arc over. Use this
+  helper for any future long-distance camera jump; don't call
+  `animateCamera(newLatLngZoom(...))` directly for one.
+- **A `Scaffold`'s default `resizeToAvoidBottomInset: true` shrinks the body
+  — and any live `MapLibreMap` filling it — every time the keyboard opens.**
+  Resizing a native GL surface mid-frame causes visible
+  flicker/black-frame/distortion, and separately, any `bottom:`-anchored
+  `Positioned` widget (e.g. `author_screen.dart`'s `_ModeBar`) gets pushed up
+  on top of whatever's near the keyboard instead of staying pinned under it.
+  Every screen with a live map (`GuideScreen`, `AuthorScreen`,
+  `BrowseMapScreen`) sets `resizeToAvoidBottomInset: false` — do the same on
+  any new map screen with a text field that can summon the keyboard.
 - **`CameraUpdate.scrollBy(dx, dy)`'s doc ("positive dx moves the camera
   target east") describes the opposite of what it does to the *visible
   content* on this map/platform combo in practice.** Confirmed on-device:
@@ -257,6 +391,55 @@ wrong-versionCode release has bitten this project before.
 - `const` constructors, sound null safety, camelCase/PascalCase — standard
   Dart conventions, already consistently followed; no need to sweep-fix
   these unless touching that code anyway.
+
+## Known limitations / next steps
+
+- **The on-device Overpass fetch's caps (60 cells / 45s, in
+  `region_downloader.dart`) are tuned for normal-density suburban/regional
+  areas and are genuinely too coarse for a hyper-dense megacity.** Confirmed
+  directly against the live Overpass service: even a cell 1/36th the size of
+  the app's real per-request cell (0.15°) reliably 504-timed-out over
+  central Jakarta. A downloaded region there will very likely complete with
+  little-to-no street/route data even after the hang-fix — that's expected,
+  not a regression, until adaptive cell sizing is built (see next point).
+- **The real fix — not yet built**: adaptive/recursive Overpass cell
+  sizing (subdivide a cell into smaller pieces on timeout/failure, instead
+  of one fixed cell size for every region on Earth). This was identified as
+  the correct long-term solution during the Jakarta investigation but
+  deliberately deferred in favor of the diagnostic bundles below, which
+  answered the more urgent question first ("is this a caps/design problem or
+  is Jakarta just too dense, period" — answer: it's the caps, unbounded
+  fetching does work, it's just slow/needs smaller cells there).
+- **`jakarta_metro_test` and `tangerang_test`** (in both
+  `route_graph.sqlite` and `streets.sqlite`) are **diagnostic-only bundled
+  data**, not real app regions — no `Region`/`kRegions` entry, no bundled
+  basemap/pmtiles for them. They exist purely because `RouteGraphStore`/
+  `SearchService` query by raw geographic bbox overlap, not by region
+  name/id, so bundling extra data for an area works regardless of which
+  *map* (the visual pmtiles) a user has separately downloaded there. Built
+  with unbounded dev-time patience via `tools/build_route_graph.py`/
+  `build_streets_db.py`'s `CELL_OVERRIDES` (0.05° cells for these two,
+  vs. the default 0.15°/0.20°) — confirmed this is necessary, not
+  optional, for this density. If asked to add more Indonesian coverage
+  (Bogor, Bekasi, or the full Jabodetabek metro), **check real size first**:
+  a small 0.10°×0.10° sample over central Jakarta alone produced 42k
+  elements — the full Jabodetabek metro the user originally wanted would
+  extrapolate to hundreds of MB, which is why the bundled area was
+  deliberately shrunk to just the dense core instead. Always measure a
+  small sample before committing to a large fetch+bundle, same as every
+  other data-size decision in this project.
+- **`tools/build_route_graph.py`/`build_streets_db.py` already tolerate
+  permanently-failing cells** (soft-fail per cell, keep whatever succeeded —
+  don't let one bad cell crash/lose an entire region's progress). If writing
+  a *new* one-off data-fetch script for this project, copy that pattern
+  rather than letting a single `raise` propagate up through the whole loop.
+- App size trajectory this cycle, for reference if asked "why is the app so
+  big now": ~281MB baseline (basemap + engine + native libs, already present
+  before this cycle) → +1MB (streets.sqlite) → +131MB (route_graph.sqlite,
+  bundled regions) → +17MB/+10MB (Jakarta/Tangerang route diagnostic data)
+  → +1MB (Jakarta/Tangerang street diagnostic data) → **~337MB current**.
+  Route graph geometry (not street names, not the basemap) is by far the
+  biggest line item — keep that in mind before bundling more of it.
 
 ## Efficiency / working-agreement notes (the user has explicitly asked to minimize token spend)
 
