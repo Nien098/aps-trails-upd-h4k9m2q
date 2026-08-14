@@ -90,8 +90,7 @@ class _BookmarksScreenState extends State<BookmarksScreen> {
                     return ListTile(
                       leading: CircleAvatar(
                         backgroundColor: b.category.color,
-                        child: Icon(b.category.icon,
-                            color: Colors.white, size: 18),
+                        child: Icon(b.icon, color: Colors.white, size: 18),
                       ),
                       title: Text(b.name),
                       subtitle: Text(

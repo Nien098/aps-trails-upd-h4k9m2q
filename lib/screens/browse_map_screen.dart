@@ -127,7 +127,7 @@ class _BrowseMapScreenState extends State<BrowseMapScreen> {
           mainAxisSize: MainAxisSize.min,
           children: [
             ListTile(
-              leading: Icon(b.category.icon, color: b.category.color),
+              leading: Icon(b.icon, color: b.category.color),
               title: Text(b.name),
               subtitle: Text(
                   b.note.isEmpty ? b.category.label : '${b.category.label} · ${b.note}'),

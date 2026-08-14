@@ -19,7 +19,7 @@ class TrailStore {
     final dir = await getDatabasesPath();
     _db = await openDatabase(
       p.join(dir, 'trailguide.db'),
-      version: 10,
+      version: 11,
       onCreate: (db, version) async {
         await db.execute('''
           CREATE TABLE trails (
@@ -74,7 +74,16 @@ class TrailStore {
           await _createRecordingProgress(db);
         }
         if (oldVersion < 10) {
+          // Creates the table fresh, already including icon_code_point (see
+          // below) — so the >= 10 guard on that migration is what stops this
+          // path from then trying to add the same column a second time.
           await _createBookmarks(db);
+        }
+        if (oldVersion >= 10 && oldVersion < 11) {
+          // Only a v10 install (bookmarks shipped without icon_code_point)
+          // needs this — anything older got the column for free above.
+          await db.execute(
+              'ALTER TABLE bookmarks ADD COLUMN icon_code_point INTEGER');
         }
       },
     );
@@ -90,7 +99,8 @@ class TrailStore {
         lat REAL NOT NULL,
         lng REAL NOT NULL,
         note TEXT NOT NULL DEFAULT '',
-        created_at INTEGER NOT NULL
+        created_at INTEGER NOT NULL,
+        icon_code_point INTEGER
       )
     ''');
   }
@@ -313,6 +323,7 @@ class TrailStore {
       'lng': b.position.longitude,
       'note': b.note,
       'created_at': b.createdAt.millisecondsSinceEpoch,
+      'icon_code_point': b.icon.codePoint,
     };
     if (b.id == null) {
       b.id = await db.insert('bookmarks', values);
@@ -327,17 +338,21 @@ class TrailStore {
     await db.delete('bookmarks', where: 'id = ?', whereArgs: [id]);
   }
 
-  Bookmark _bookmarkFromRow(Map<String, Object?> r) => Bookmark(
-        id: r['id'] as int,
-        name: r['name'] as String,
-        category: BookmarkCategory.values.firstWhere(
-          (c) => c.name == r['category'] as String,
-          orElse: () => BookmarkCategory.other,
-        ),
-        position: LatLng((r['lat'] as num).toDouble(), (r['lng'] as num).toDouble()),
-        note: (r['note'] as String?) ?? '',
-        createdAt: DateTime.fromMillisecondsSinceEpoch(r['created_at'] as int),
-      );
+  Bookmark _bookmarkFromRow(Map<String, Object?> r) {
+    final category = BookmarkCategory.values.firstWhere(
+      (c) => c.name == r['category'] as String,
+      orElse: () => BookmarkCategory.other,
+    );
+    return Bookmark(
+      id: r['id'] as int,
+      name: r['name'] as String,
+      category: category,
+      position: LatLng((r['lat'] as num).toDouble(), (r['lng'] as num).toDouble()),
+      icon: iconForCodePoint(r['icon_code_point'] as int?, category.icon),
+      note: (r['note'] as String?) ?? '',
+      createdAt: DateTime.fromMillisecondsSinceEpoch(r['created_at'] as int),
+    );
+  }
 
   Trail _fromRow(Map<String, Object?> r) {
     final path = Trail.pathFromJson(r['path'] as String);
