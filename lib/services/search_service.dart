@@ -11,11 +11,53 @@ import 'trail_store.dart';
 enum SearchResultType { trail, street }
 
 class SearchResult {
-  SearchResult({required this.name, required this.position, required this.type});
+  SearchResult({required this.name, required this.position, required this.type, this.locality});
   final String name;
   final LatLng position;
   final SearchResultType type;
+
+  /// Human-readable place name to disambiguate same-named streets (e.g. two
+  /// "Lincoln Avenue"s in different cities) — null for trails, which are the
+  /// user's own content and don't need it.
+  final String? locality;
 }
+
+/// Maps a street row's `region_id` (the *original* per-city id the bundled
+/// street/route-graph data was built against — see `tools/build_streets_db.py`'s
+/// REGIONS list) to a human-readable name. These ids stopped having their own
+/// [Region] bookmark once `kRegions` was merged down to just 2 broad entries
+/// (see region.dart), but the underlying per-city tagging in streets.sqlite
+/// was never changed — this is what lets search still say *which* city a
+/// result is in, even though the map itself no longer distinguishes them.
+const Map<String, String> _bundledCityNames = {
+  'coquitlam': 'Coquitlam',
+  'port_coquitlam': 'Port Coquitlam',
+  'maple_ridge': 'Maple Ridge',
+  'lynn_valley': 'Lynn Valley (North Van)',
+  'capilano': 'Capilano (North Van)',
+  'west_van': 'West Vancouver',
+  'vancouver': 'Vancouver',
+  'tsawwassen': 'Tsawwassen',
+  'abbotsford': 'Abbotsford',
+  'chilliwack': 'Chilliwack',
+  'squamish': 'Squamish',
+  'whistler': 'Whistler',
+  'victoria': 'Victoria',
+  'jakarta_metro_test': 'Jakarta',
+  'tangerang_test': 'Tangerang',
+};
+
+/// Resolves a street row's `region_id` to a display name — the bundled
+/// per-city map above, falling back to a downloaded region's own [Region.name]
+/// (a downloaded region's `region_id` is just its own id), and finally the
+/// raw id itself if neither matches (never blocks showing a result over a
+/// missing label).
+String _localityFor(String regionId) =>
+    _bundledCityNames[regionId] ??
+    allRegions().firstWhere((r) => r.id == regionId, orElse: () => Region(
+      id: regionId, name: regionId, center: const LatLng(0, 0),
+      south: 0, west: 0, north: 0, east: 0,
+    )).name;
 
 /// Offline search across the user's own trails and a bundled street-name
 /// index, so the search FAB can jump the map camera to either — the same way
@@ -129,7 +171,7 @@ class SearchService {
       final db = await _database;
       final rows = db.select(
         '''
-        SELECT s.name, s.lat, s.lon FROM streets s
+        SELECT s.name, s.lat, s.lon, s.region_id FROM streets s
         JOIN streets_fts f ON f.rowid = s.id
         WHERE streets_fts MATCH ?
         LIMIT 20
@@ -142,6 +184,7 @@ class SearchService {
             name: r['name'] as String,
             position: LatLng((r['lat'] as num).toDouble(), (r['lon'] as num).toDouble()),
             type: SearchResultType.street,
+            locality: _localityFor(r['region_id'] as String),
           ),
       ].where((r) => reachable(r.position)).toList();
     }

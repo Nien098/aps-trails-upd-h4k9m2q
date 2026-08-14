@@ -145,7 +145,11 @@ class _ResultsList extends StatelessWidget {
               leading: Icon(
                   r.type == SearchResultType.trail ? Icons.route : Icons.signpost),
               title: Text(r.name),
-              subtitle: Text(r.type == SearchResultType.trail ? 'Trail' : 'Street'),
+              subtitle: Text(r.type == SearchResultType.trail
+                  ? 'Trail'
+                  : r.locality != null
+                      ? 'Street · ${r.locality}'
+                      : 'Street'),
               onTap: () => onPick(r),
             );
           },
