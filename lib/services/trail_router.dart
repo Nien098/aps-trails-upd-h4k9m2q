@@ -159,9 +159,11 @@ class TrailRouter {
     required LatLng to,
     Rect? rect,
     List<LatLng>? seedPath,
+    Surface surface = Surface.mixed,
   }) async {
     final r = rect ?? await _rectAround(from, to);
-    final graph = await _buildGraph(r, geoBounds: _geoBoundsAround(from, to));
+    final graph = await _buildGraph(r,
+        surface: surface, geoBounds: _geoBoundsAround(from, to));
     if (seedPath != null && seedPath.length >= 2) {
       graph.addLatLngChain(seedPath);
       graph._mergeNearbyNodes(_mergeToleranceMeters);

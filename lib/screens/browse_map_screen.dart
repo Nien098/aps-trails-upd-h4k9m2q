@@ -14,6 +14,7 @@ import '../widgets/bookmark_edit_sheet.dart';
 import '../widgets/map_search_bar.dart';
 import 'author_screen.dart';
 import 'bookmarks_screen.dart';
+import 'navigate_screen.dart';
 import 'region_picker_screen.dart';
 
 /// View-only offline map — pan/zoom/search freely, no trail or edit context,
@@ -322,6 +323,15 @@ class _BrowseMapScreenState extends State<BrowseMapScreen> {
                     tooltip: 'Bookmarks',
                     onPressed: _openBookmarksList,
                     child: const Icon(Icons.bookmark),
+                  ),
+                  const SizedBox(height: 10),
+                  FloatingActionButton(
+                    heroTag: 'browseDirections',
+                    mini: true,
+                    tooltip: 'Directions',
+                    onPressed: () => Navigator.push(context,
+                        MaterialPageRoute(builder: (_) => NavigateScreen(region: _region))),
+                    child: const Icon(Icons.directions),
                   ),
                 ],
               ),
