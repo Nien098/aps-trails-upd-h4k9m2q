@@ -5,7 +5,7 @@ import 'package:maplibre_gl/maplibre_gl.dart';
 import '../models/region.dart';
 import '../services/search_service.dart';
 import '../widgets/base_map.dart';
-import '../widgets/location_search.dart';
+import '../widgets/map_search_bar.dart';
 import 'region_picker_screen.dart';
 
 /// View-only offline map — pan/zoom/search freely, no trail or edit context,
@@ -26,6 +26,7 @@ class BrowseMapScreen extends StatefulWidget {
 class _BrowseMapScreenState extends State<BrowseMapScreen> {
   late Region _region = widget.region;
   MapLibreMapController? _c;
+  bool _searchOpen = false;
 
   /// Set just before a basemap-swapping jump (see [_goTo]) so the freshly
   /// remounted [BaseMap] opens on the searched spot instead of the new
@@ -77,12 +78,9 @@ class _BrowseMapScreenState extends State<BrowseMapScreen> {
     if (r != null) _selectRegion(r);
   }
 
-  Future<void> _openSearch() async {
-    final result = await showSearch<SearchResult?>(
-      context: context,
-      delegate: LocationSearchDelegate(),
-    );
-    if (result != null) _goTo(result.position);
+  void _onSearchResult(SearchResult result) {
+    setState(() => _searchOpen = false);
+    _goTo(result.position);
   }
 
   Future<void> _goToMyLocation() async {
@@ -134,6 +132,19 @@ class _BrowseMapScreenState extends State<BrowseMapScreen> {
             onMapCreated: _onMapCreated,
             myLocationEnabled: true,
           ),
+          if (_searchOpen)
+            Positioned(
+              top: 12,
+              left: 12,
+              right: 12,
+              child: SafeArea(
+                bottom: false,
+                child: MapSearchBar(
+                  onSelected: _onSearchResult,
+                  onClose: () => setState(() => _searchOpen = false),
+                ),
+              ),
+            ),
           Positioned(
             right: 16,
             bottom: 16,
@@ -152,7 +163,7 @@ class _BrowseMapScreenState extends State<BrowseMapScreen> {
                     heroTag: 'browseSearch',
                     mini: true,
                     tooltip: 'Search streets and trails',
-                    onPressed: _openSearch,
+                    onPressed: () => setState(() => _searchOpen = !_searchOpen),
                     child: const Icon(Icons.search),
                   ),
                 ],

@@ -20,7 +20,7 @@ import '../services/trail_router.dart';
 import '../services/trail_store.dart';
 import '../widgets/base_map.dart';
 import '../widgets/cue_editor_sheet.dart';
-import '../widgets/location_search.dart';
+import '../widgets/map_search_bar.dart';
 import 'cue_list_screen.dart';
 
 /// Trail editor. Tap the map to lay the path (Path mode) or drop a labelled
@@ -55,6 +55,10 @@ class _AuthorScreenState extends State<AuthorScreen> {
   /// instead of panning the camera or placing an anchor/cue — see
   /// [_onBoundaryPanStart]/[_onBoundaryPanEnd] and [BaseMap.gesturesEnabled].
   bool _drawBoundaryMode = false;
+
+  /// Whether the [MapSearchBar] overlay is showing (toggled from the view
+  /// controls row in [_ModeBar]) — see [_onSearchResult].
+  bool _searchOpen = false;
 
   /// Screen-space drag-in-progress trace (only non-empty while actively
   /// dragging) — the source of truth converted into the final [_genBoundary]
@@ -1510,12 +1514,8 @@ class _AuthorScreenState extends State<AuthorScreen> {
   /// around to find where they want to draw. Confined to [_region] — a
   /// result outside it would sit on a different basemap file this screen
   /// can't swap to mid-edit (see [SearchService.search]'s confineTo doc).
-  Future<void> _openSearch() async {
-    final result = await showSearch<SearchResult?>(
-      context: context,
-      delegate: LocationSearchDelegate(confineTo: _region),
-    );
-    if (result == null || !mounted) return;
+  Future<void> _onSearchResult(SearchResult result) async {
+    setState(() => _searchOpen = false);
     await _c?.animateCamera(CameraUpdate.newLatLngZoom(result.position, 16));
   }
 
@@ -1990,6 +1990,20 @@ class _AuthorScreenState extends State<AuthorScreen> {
               gesturesEnabled:
                   !_drawBoundaryMode && !_dragDrawMode && !_adjustLineMode,
             ),
+            if (_searchOpen)
+              Positioned(
+                top: 12,
+                left: 12,
+                right: 12,
+                child: SafeArea(
+                  bottom: false,
+                  child: MapSearchBar(
+                    confineTo: _region,
+                    onSelected: _onSearchResult,
+                    onClose: () => setState(() => _searchOpen = false),
+                  ),
+                ),
+              ),
             // Absorbs drag input while drawing a generation-boundary outline
             // — only present in that mode, so it never steals ordinary taps
             // (path/cue placement) the rest of the time. Invisible itself —
@@ -2279,7 +2293,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
                       onToggleAdjustLine: _toggleAdjustLine,
                       onResetView: _resetView,
                       onCenterMe: _centerOnMe,
-                      onSearch: _openSearch,
+                      onSearch: () => setState(() => _searchOpen = !_searchOpen),
                     ),
                 ],
               ),

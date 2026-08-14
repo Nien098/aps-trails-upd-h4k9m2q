@@ -3,7 +3,7 @@ import 'dart:io';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:maplibre_gl/maplibre_gl.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:sqflite/sqflite.dart' as sqflite;
+import 'package:sqlite3/sqlite3.dart' as sqlite3;
 
 import '../models/region.dart';
 import 'trail_store.dart';
@@ -22,16 +22,24 @@ class SearchResult {
 /// [GuideScreen._recenter] jumps to GPS position.
 ///
 /// The street index (`assets/data/streets.sqlite`, built by
-/// `tools/build_streets_db.py` from OSM/Overpass data) ships read-only, but
-/// becomes writable on-device once a downloaded region adds its own streets
-/// (see [RegionDownloader]) — so it's copied out of the asset bundle exactly
-/// like the bundled basemap in [OfflineMap], not opened read-only.
+/// `tools/build_streets_db.py` from OSM/Overpass data) uses an FTS5 virtual
+/// table. FTS5 needs a real SQLite build compiled with it — Android's
+/// OS-provided SQLite (what the `sqflite` plugin talks to via platform
+/// channel) often doesn't have it, which is why this used to fail silently
+/// on real devices. `package:sqlite3` bundles its own native SQLite (FTS5
+/// included) and talks to it directly via FFI, sidestepping the OS build
+/// entirely — that's why this uses `sqlite3.open()`, not `sqflite`, even
+/// though [TrailStore] (no FTS5 needed there) still uses `sqflite` fine.
+/// The DB ships read-only in the asset bundle, but becomes writable on-device
+/// once a downloaded region adds its own streets (see [RegionDownloader]) —
+/// so it's copied out of the asset bundle exactly like the bundled basemap in
+/// [OfflineMap], not opened read-only.
 class SearchService {
   SearchService._();
   static final SearchService instance = SearchService._();
 
   static Future<String>? _dbPathReady;
-  sqflite.Database? _db;
+  sqlite3.Database? _db;
 
   static Future<String> _ensureCopied() => _dbPathReady ??= _copy();
 
@@ -46,10 +54,13 @@ class SearchService {
     return dest.path;
   }
 
-  Future<sqflite.Database> get _database async {
+  /// `sqlite3` is synchronous (direct FFI call, no platform channel) — kept
+  /// as an `async` method anyway so call sites don't care that opening is a
+  /// one-time file-copy-then-sync-open rather than a true async DB open.
+  Future<sqlite3.Database> get _database async {
     if (_db != null) return _db!;
     final path = await _ensureCopied();
-    _db = await sqflite.openDatabase(path);
+    _db = sqlite3.sqlite3.open(path);
     return _db!;
   }
 
@@ -61,13 +72,23 @@ class SearchService {
   Future<void> addStreets(
       String regionId, List<({String name, double lat, double lon})> rows) async {
     final db = await _database;
-    await db.transaction((txn) async {
-      await txn.delete('streets', where: 'region_id = ?', whereArgs: [regionId]);
-      for (final r in rows) {
-        await txn.insert('streets',
-            {'name': r.name, 'region_id': regionId, 'lat': r.lat, 'lon': r.lon});
+    db.execute('BEGIN');
+    try {
+      db.execute('DELETE FROM streets WHERE region_id = ?', [regionId]);
+      final stmt = db.prepare(
+          'INSERT INTO streets(name, region_id, lat, lon) VALUES (?, ?, ?, ?)');
+      try {
+        for (final r in rows) {
+          stmt.execute([r.name, regionId, r.lat, r.lon]);
+        }
+      } finally {
+        stmt.close();
       }
-    });
+      db.execute('COMMIT');
+    } catch (_) {
+      db.execute('ROLLBACK');
+      rethrow;
+    }
   }
 
   /// Sanitizes free text for FTS5 MATCH syntax (strips characters that would
@@ -106,7 +127,7 @@ class SearchService {
     var streets = <SearchResult>[];
     if (ftsQuery != null) {
       final db = await _database;
-      final rows = await db.rawQuery(
+      final rows = db.select(
         '''
         SELECT s.name, s.lat, s.lon FROM streets s
         JOIN streets_fts f ON f.rowid = s.id

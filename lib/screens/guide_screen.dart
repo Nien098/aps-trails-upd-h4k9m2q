@@ -20,7 +20,7 @@ import '../services/native_bridge.dart';
 import '../services/route_layer.dart';
 import '../services/search_service.dart';
 import '../services/settings.dart';
-import '../widgets/location_search.dart';
+import '../widgets/map_search_bar.dart';
 import '../services/stillness_watchdog.dart';
 import '../services/trail_router.dart';
 import '../services/trail_store.dart';
@@ -68,6 +68,7 @@ class _GuideScreenState extends State<GuideScreen> {
   bool _offRouteCardShown = false;
   double? _distToNext; // metres to the next cue
   bool _follow = true;
+  bool _searchOpen = false;
 
   /// "Drive mode" — tilted, rotated to face the direction of travel (like a
   /// car nav app) instead of the default flat, north-up "birds-eye" view.
@@ -972,17 +973,14 @@ class _GuideScreenState extends State<GuideScreen> {
     }
   }
 
-  /// Opens the street/trail search delegate and, if the walker picks a
-  /// result, jumps the camera there the same way [_recenter] jumps to GPS —
-  /// including turning off auto-follow, since a searched location has
-  /// nothing to do with where the walker actually is.
-  Future<void> _openSearch() async {
-    final result = await showSearch<SearchResult?>(
-      context: context,
-      delegate: LocationSearchDelegate(confineTo: _region),
-    );
-    if (result == null) return;
-    setState(() => _follow = false);
+  /// Jumps the camera to a picked search result the same way [_recenter]
+  /// jumps to GPS — including turning off auto-follow, since a searched
+  /// location has nothing to do with where the walker actually is.
+  Future<void> _onSearchResult(SearchResult result) async {
+    setState(() {
+      _searchOpen = false;
+      _follow = false;
+    });
     await _c?.animateCamera(CameraUpdate.newLatLngZoom(result.position, 16));
   }
 
@@ -1152,7 +1150,7 @@ class _GuideScreenState extends State<GuideScreen> {
                       heroTag: 'search',
                       mini: true,
                       tooltip: 'Search streets and trails',
-                      onPressed: _openSearch,
+                      onPressed: () => setState(() => _searchOpen = !_searchOpen),
                       child: const Icon(Icons.search),
                     ),
                   ],
@@ -1215,18 +1213,35 @@ class _GuideScreenState extends State<GuideScreen> {
             right: 0,
             child: SafeArea(
               bottom: false,
-              child: _TopBar(
-                title: widget.trail.name,
-                walking: _status == 'Walking',
-                paused: _paused,
-                statusText: _status,
-                elapsedSec: _elapsedSec,
-                meters: _walkMeters,
-                elevGain: _elevGain,
-                onStop: _stop,
-                onPauseResume: _paused ? _resumeWalk : _pauseWalk,
-                onTurnBack: _openBailOutMenu,
-                debugText: _debugText(),
+              child: Column(
+                children: [
+                  _TopBar(
+                    title: widget.trail.name,
+                    walking: _status == 'Walking',
+                    paused: _paused,
+                    statusText: _status,
+                    elapsedSec: _elapsedSec,
+                    meters: _walkMeters,
+                    elevGain: _elevGain,
+                    onStop: _stop,
+                    onPauseResume: _paused ? _resumeWalk : _pauseWalk,
+                    onTurnBack: _openBailOutMenu,
+                    debugText: _debugText(),
+                  ),
+                  // Sits in a Column right below the top bar (not a fixed
+                  // pixel offset) so it never overlaps regardless of the top
+                  // bar's actual rendered height, which varies with its
+                  // content (debug text, walking stats, etc).
+                  if (_searchOpen)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+                      child: MapSearchBar(
+                        confineTo: _region,
+                        onSelected: _onSearchResult,
+                        onClose: () => setState(() => _searchOpen = false),
+                      ),
+                    ),
+                ],
               ),
             ),
           ),
