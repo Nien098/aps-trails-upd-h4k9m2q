@@ -133,6 +133,10 @@ class _DownloadRegionScreenState extends State<DownloadRegionScreen> {
             : '$missing map tiles failed to download — some spots may look '
                 'a bit off. Re-download this area if it matters.');
       }
+      if (downloader.streetsFailed) {
+        _toast('Street search isn\'t available for this area — '
+            're-download it later if you want to search streets here.');
+      }
       if (mounted) Navigator.pop(context, region.id);
     } finally {
       if (mounted) setState(() => _busy = false);

@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
@@ -8,6 +9,7 @@ import 'package:path_provider/path_provider.dart';
 import '../config.dart';
 import '../models/region.dart';
 import 'pmtiles_writer.dart';
+import 'search_service.dart';
 
 /// Progress of a region download.
 class DownloadProgress {
@@ -85,6 +87,13 @@ class RegionDownloader {
   int get failedTileCount => _failedTileCount;
   int _failedTileCount = 0;
 
+  /// True if fetching this region's street names (for offline search) failed
+  /// — checked by the caller after [download] to show a soft-fail message.
+  /// Never blocks the download itself: map tiles are the essential data,
+  /// street search is a bonus that degrades gracefully.
+  bool get streetsFailed => _streetsFailed;
+  bool _streetsFailed = false;
+
   /// Downloads the region into `<docs>/map/<id>.pmtiles` and returns a [Region].
   Future<Region?> download({
     required String id,
@@ -159,6 +168,15 @@ class RegionDownloader {
         west: west, south: south, east: east, north: north,
         minZoom: kRegionMinZoom, maxZoom: kRegionMaxZoom);
 
+    try {
+      final streets = await _fetchStreets(west, south, east, north);
+      await SearchService.instance.addStreets(id, streets);
+    } catch (_) {
+      // Soft-fail — street search for this region just won't work until a
+      // re-download succeeds; the map itself is unaffected.
+      _streetsFailed = true;
+    }
+
     return Region(
       id: id,
       name: name,
@@ -196,5 +214,78 @@ class RegionDownloader {
       }
       await Future.delayed(Duration(milliseconds: 300 * (attempt + 1)));
     }
+  }
+
+  /// Named streets within the bbox, from the Overpass API — the same query
+  /// shape as `tools/build_streets_db.py` uses for the bundled regions, so a
+  /// downloaded region's street search matches the bundled ones in quality.
+  /// One representative point per name (midpoint of the longest matching
+  /// way), so a repeated street name (common for long roads split into many
+  /// OSM ways) doesn't produce duplicate search results.
+  static Future<List<({String name, double lat, double lon})>> _fetchStreets(
+      double west, double south, double east, double north) async {
+    const query = '[out:json][timeout:180];'
+        r'way["highway"]["name"]({{s}},{{w}},{{n}},{{e}});'
+        'out tags geom;';
+    final body = query
+        .replaceFirst('{{s}}', '$south')
+        .replaceFirst('{{w}}', '$west')
+        .replaceFirst('{{n}}', '$north')
+        .replaceFirst('{{e}}', '$east');
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 20);
+    try {
+      final req = await client
+          .postUrl(Uri.parse('https://overpass-api.de/api/interpreter'));
+      req.headers.contentType = ContentType('application', 'x-www-form-urlencoded');
+      req.write('data=${Uri.encodeQueryComponent(body)}');
+      final resp = await req.close();
+      if (resp.statusCode != 200) {
+        await resp.drain();
+        throw HttpException('Overpass returned ${resp.statusCode}');
+      }
+      final text = await resp.transform(utf8.decoder).join();
+      final elements = (jsonDecode(text)['elements'] as List).cast<Map>();
+      return _dedupeStreets(elements);
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  static const _excludedHighway = {
+    'footway', 'path', 'steps', 'cycleway', 'bridleway', 'corridor',
+    'proposed', 'construction', 'razed', 'abandoned',
+  };
+
+  static List<({String name, double lat, double lon})> _dedupeStreets(
+      List<Map> elements) {
+    final bestLen = <String, double>{};
+    final bestPoint = <String, (double, double)>{};
+    for (final el in elements) {
+      if (el['type'] != 'way') continue;
+      final tags = (el['tags'] as Map?)?.cast<String, dynamic>() ?? const {};
+      final name = (tags['name'] as String?)?.trim();
+      final highway = tags['highway'] as String?;
+      final geom = (el['geom'] as List?)?.cast<Map>();
+      if (name == null || name.isEmpty || geom == null || geom.isEmpty) continue;
+      if (_excludedHighway.contains(highway)) continue;
+      var length = 0.0;
+      for (var i = 0; i < geom.length - 1; i++) {
+        final a = geom[i], b = geom[i + 1];
+        final dlat = ((b['lat'] as num) - (a['lat'] as num)) * 111320;
+        final dlon = ((b['lon'] as num) - (a['lon'] as num)) *
+            111320 *
+            math.cos((a['lat'] as num) * math.pi / 180);
+        length += math.sqrt(dlat * dlat + dlon * dlon);
+      }
+      if (length > (bestLen[name] ?? -1)) {
+        bestLen[name] = length;
+        final mid = geom[geom.length ~/ 2];
+        bestPoint[name] = ((mid['lat'] as num).toDouble(), (mid['lon'] as num).toDouble());
+      }
+    }
+    return [
+      for (final entry in bestPoint.entries)
+        (name: entry.key, lat: entry.value.$1, lon: entry.value.$2),
+    ];
   }
 }

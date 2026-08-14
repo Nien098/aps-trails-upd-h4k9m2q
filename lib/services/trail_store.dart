@@ -1,3 +1,4 @@
+import 'package:maplibre_gl/maplibre_gl.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart' as p;
 
@@ -134,6 +135,37 @@ class TrailStore {
       await db.update('trails', values, where: 'id = ?', whereArgs: [t.id]);
     }
     return t;
+  }
+
+  /// Name search for the map search feature. Skips [_fromRow]'s cue parsing
+  /// (irrelevant for a results list) and derives each hit's jump-to point —
+  /// the first anchor (trailhead the author placed), falling back to the
+  /// first path point for legacy trails saved before anchors existed.
+  Future<List<({int id, String name, LatLng? position})>> searchByName(
+      String query) async {
+    final db = await _database;
+    final rows = await db.query(
+      'trails',
+      columns: ['id', 'name', 'path', 'anchors'],
+      where: 'name LIKE ?',
+      whereArgs: ['%$query%'],
+      limit: 20,
+    );
+    return [
+      for (final r in rows)
+        (
+          id: r['id'] as int,
+          name: r['name'] as String,
+          position: _jumpPoint(r),
+        ),
+    ];
+  }
+
+  LatLng? _jumpPoint(Map<String, Object?> r) {
+    final anchors = Trail.pathFromJson((r['anchors'] as String?) ?? '[]');
+    if (anchors.isNotEmpty) return anchors.first;
+    final path = Trail.pathFromJson(r['path'] as String);
+    return path.isNotEmpty ? path.first : null;
   }
 
   Future<void> delete(int id) async {

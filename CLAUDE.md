@@ -59,6 +59,22 @@ unrelated to app code.
 **After any edit, only investigate NEW issues beyond this exact set of 4/5.**
 Don't re-verify or explain away the baseline every time — it's expected.
 
+## Ship every app change by default — don't stop at local verification
+
+Once a code/asset change in `lib/`, `assets/`, or `android/` is implemented
+and locally verified (`flutter analyze` + a successful build), run the full
+release workflow below through to completion (bump → build → verify
+versionCode → commit/tag/push → GitHub release → upload) in the same
+session — this is not a separate follow-up step that waits for the user to
+say "ship it" or "release this." Local verification is step 2/3 of shipping,
+not a stopping point. There is no Play Store; the in-app updater is the only
+way the user's parents ever receive a build, so an unshipped change never
+reaches them no matter how well it was verified locally.
+
+Only skip shipping when the user explicitly says to hold off (e.g. "don't
+ship yet," "just show me the diff first," mid-task exploratory changes not
+meant to be real yet).
+
 ## Release workflow (version bump → build → ship)
 
 This is the established, repeatable pattern — follow it exactly, don't
