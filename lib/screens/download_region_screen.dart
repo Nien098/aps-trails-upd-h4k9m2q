@@ -202,7 +202,13 @@ class _DownloadRegionScreenState extends State<DownloadRegionScreen> {
             return Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text(p.phase, style: const TextStyle(fontWeight: FontWeight.w600)),
+                // "Step X of Y" makes a new phase starting from a fresh 0%
+                // unmistakable from actual progress going backward — each
+                // phase (tiles, street names, route data, ...) has its own
+                // done/total scale, so the percentage alone restarting is
+                // otherwise easy to misread as a real regression.
+                Text('Step ${p.step} of ${p.totalSteps} · ${p.phase}',
+                    style: const TextStyle(fontWeight: FontWeight.w600)),
                 const SizedBox(height: 8),
                 LinearProgressIndicator(value: pct),
                 const SizedBox(height: 12),

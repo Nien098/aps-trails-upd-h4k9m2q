@@ -18,18 +18,25 @@ import 'search_service.dart';
 /// to redraw, and each update is its own platform-channel round trip.
 const _kNotifyInterval = Duration(milliseconds: 800);
 
-/// Progress of a region download. [phase] labels which step is running —
-/// map tiles, then street names, then route-graph data — since all three
-/// report through the same callback but at very different scales (tile
-/// count vs. Overpass cell count), so the UI can explain why the bar/number
-/// jumps between phases instead of looking stuck.
+/// Progress of a region download. [phase] labels which step is running, and
+/// [step]/[totalSteps] say which one of how many — tiles, an optional
+/// missed-tile retry, finalizing the map file, street names, then
+/// route-graph data. Each phase's [done]/[total] restarts from a fresh 0 (a
+/// tile count and an Overpass cell count aren't comparable, so there's no
+/// honest single percentage spanning all of them) — without [step]/
+/// [totalSteps] that restart reads exactly like progress going backwards
+/// (a real, reported point of confusion: "it reached 65% then reset to
+/// 17%"), when it's actually a new phase starting. The UI shows "Step X of
+/// Y" alongside the phase name specifically to make that unmistakable.
 class DownloadProgress {
   DownloadProgress(this.done, this.total, this.bytes,
-      {this.phase = 'Downloading map'});
+      {this.phase = 'Downloading map', this.step = 1, this.totalSteps = 1});
   final int done;
   final int total;
   final int bytes;
   final String phase;
+  final int step;
+  final int totalSteps;
 }
 
 /// Downloads a bounding box of Protomaps vector tiles and assembles them into a
@@ -202,6 +209,14 @@ class RegionDownloader {
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 20);
     var done = 0;
     final failed = <List<int>>[];
+    // Retrying missed tiles only happens (and only counts as its own step)
+    // when the batch loop below actually leaves failures — known only once
+    // that loop finishes, so this starts as a guess and is corrected right
+    // after. Every step number downstream is derived from it, so "Step 2 of
+    // 4" vs "Step 2 of 5" is the only thing that can shift mid-download —
+    // the step *number* itself never goes backward, which is the actual
+    // point (see [DownloadProgress]'s doc).
+    var totalSteps = 4;
     try {
       // Fetch in small concurrent batches to keep memory + sockets bounded.
       const batch = 6;
@@ -219,14 +234,15 @@ class RegionDownloader {
           }
           done++;
         }
-        onProgress
-            ?.call(DownloadProgress(done, tiles.length, writer.byteCount));
+        onProgress?.call(DownloadProgress(done, tiles.length, writer.byteCount,
+            step: 1, totalSteps: totalSteps));
       }
       // A tile that failed even after _fetch's own retries is usually a
       // transient blip rather than a permanently bad tile (a dropped
       // connection in a batch of hundreds, a momentary rate limit) — worth
       // one more slower, sequential pass before accepting the gap.
       if (!_cancelled && failed.isNotEmpty) {
+        totalSteps = 5;
         final stillFailed = <List<int>>[];
         for (var i = 0; i < failed.length; i++) {
           final t = failed[i];
@@ -237,7 +253,8 @@ class RegionDownloader {
             stillFailed.add(t);
           }
           onProgress?.call(DownloadProgress(i + 1, failed.length,
-              writer.byteCount, phase: 'Retrying missed tiles'));
+              writer.byteCount,
+              phase: 'Retrying missed tiles', step: 2, totalSteps: totalSteps));
         }
         _failedTileCount = stillFailed.length;
       }
@@ -253,16 +270,20 @@ class RegionDownloader {
       return null;
     }
 
+    final finalizeStep = totalSteps - 2; // 2 or 3, depending on the retry step above
     await writer.finish(outPath,
         west: west, south: south, east: east, north: north,
         minZoom: kRegionMinZoom, maxZoom: kRegionMaxZoom,
-        onCopyProgress: (copied, total) => onProgress?.call(
-            DownloadProgress(copied, total, copied, phase: 'Finalizing map file')));
+        onCopyProgress: (copied, total) => onProgress?.call(DownloadProgress(
+            copied, total, copied,
+            phase: 'Finalizing map file', step: finalizeStep, totalSteps: totalSteps)));
 
     try {
       final result = await _fetchStreets(west, south, east, north,
           onCellProgress: (d, t) => onProgress?.call(DownloadProgress(
-              d, t, writer.byteCount, phase: 'Fetching street names')));
+              d, t, writer.byteCount,
+              phase: 'Fetching street names',
+              step: finalizeStep + 1, totalSteps: totalSteps)));
       await SearchService.instance.addStreets(id, result.items);
       _streetsCoverage = result.coverage;
     } catch (_) {
@@ -274,7 +295,9 @@ class RegionDownloader {
     try {
       final result = await _fetchWays(west, south, east, north,
           onCellProgress: (d, t) => onProgress?.call(DownloadProgress(
-              d, t, writer.byteCount, phase: 'Fetching trail & road data')));
+              d, t, writer.byteCount,
+              phase: 'Fetching trail & road data',
+              step: finalizeStep + 2, totalSteps: totalSteps)));
       await RouteGraphStore.instance.addWays(id, result.items);
       _routeGraphCoverage = result.coverage;
     } catch (_) {

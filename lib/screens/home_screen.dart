@@ -770,7 +770,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             return Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text(p.phase, style: const TextStyle(fontWeight: FontWeight.w600)),
+                // See download_region_screen.dart's matching dialog for why
+                // this shows "Step X of Y" rather than just the phase name.
+                Text('Step ${p.step} of ${p.totalSteps} · ${p.phase}',
+                    style: const TextStyle(fontWeight: FontWeight.w600)),
                 const SizedBox(height: 8),
                 LinearProgressIndicator(value: pct),
                 const SizedBox(height: 12),
