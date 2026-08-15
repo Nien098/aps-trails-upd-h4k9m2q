@@ -1,3 +1,5 @@
+import 'dart:async' show unawaited;
+import 'dart:convert' show jsonDecode;
 import 'dart:math' show Point;
 
 import 'package:flutter/material.dart';
@@ -8,6 +10,7 @@ import '../models/bookmark.dart';
 import '../models/region.dart';
 import '../services/bookmark_layer.dart';
 import '../services/boundary_layer.dart';
+import '../services/region_downloader.dart';
 import '../services/search_service.dart';
 import '../services/trail_store.dart';
 import '../widgets/base_map.dart';
@@ -39,6 +42,13 @@ class _BrowseMapScreenState extends State<BrowseMapScreen> {
   bool _searchOpen = false;
   BookmarkLayer? _bookmarkLayer;
   BoundaryLayer? _regionOutline;
+  BoundaryLayer? _otherRegionsOutline;
+
+  /// Region ids the cross-region switch prompt has already been shown for
+  /// at the current camera position — cleared on any real move, so the
+  /// prompt fires once per approach rather than re-popping every idle tick
+  /// while the user lingers near the edge of another downloaded region.
+  Set<String> _promptedRegionIds = {};
 
   /// Set just before a basemap-swapping jump (see [_goTo]) so the freshly
   /// remounted [BaseMap] opens on the searched spot instead of the new
@@ -64,6 +74,18 @@ class _BrowseMapScreenState extends State<BrowseMapScreen> {
       lineWidth: 1.5,
       lineDasharray: const [4, 3],
     );
+    // Same faint styling as the active region's own outline above, but for
+    // every *other* downloaded region — lets a zoomed-out, panning user see
+    // where their other downloaded areas are instead of just grey. See
+    // BoundaryLayer.setPolygons.
+    _otherRegionsOutline = BoundaryLayer(
+      c,
+      id: 'other-regions-outline',
+      lineColor: '#757575',
+      fillOpacity: 0,
+      lineWidth: 1.5,
+      lineDasharray: const [4, 3],
+    );
   }
 
   /// Bookmark markers use the circle/symbol annotation API (see
@@ -72,6 +94,7 @@ class _BrowseMapScreenState extends State<BrowseMapScreen> {
   Future<void> _onStyleLoaded() async {
     await _loadBookmarks();
     await _drawRegionOutline();
+    await _drawOtherRegionOutlines();
   }
 
   /// Outlines the active region's real download bbox — only meaningful for
@@ -96,6 +119,119 @@ class _BrowseMapScreenState extends State<BrowseMapScreen> {
       LatLng(r.south, r.east),
       LatLng(r.south, r.west),
     ]);
+  }
+
+  /// Outlines every *other* downloaded region (not the bundled basemap —
+  /// same reasoning as [_drawRegionOutline], it covers too much area for an
+  /// outline to mean anything) so panning/zooming out from the active
+  /// region reveals where the rest of the user's downloaded areas are,
+  /// instead of just grey. Tappable via [_onMapClick].
+  Future<void> _drawOtherRegionOutlines() async {
+    final others = allRegions()
+        .where((r) => r.isDownloaded && r.mapAsset != _region.mapAsset)
+        .toList();
+    await _otherRegionsOutline?.setPolygons(
+      [
+        for (final r in others)
+          [
+            LatLng(r.north, r.west),
+            LatLng(r.north, r.east),
+            LatLng(r.south, r.east),
+            LatLng(r.south, r.west),
+          ],
+      ],
+      ids: [for (final r in others) r.id],
+    );
+  }
+
+  /// Tapping inside another downloaded region's outline switches straight to
+  /// it — the explicit, no-guessing counterpart to the automatic camera-idle
+  /// prompt below (see [_checkCrossRegionProximity]).
+  Future<void> _onMapClick(Point<double> point, LatLng coords) async {
+    final c = _c;
+    if (c == null) return;
+    const pad = 20.0;
+    final rect = Rect.fromLTWH(point.x - pad, point.y - pad, pad * 2, pad * 2);
+    final raw = await c.queryRenderedFeaturesInRect(rect, ['other-regions-outline-fill'], null);
+    for (final f in raw) {
+      final feature = f is String ? jsonDecode(f) : f;
+      if (feature is! Map) continue;
+      final props = (feature['properties'] as Map?)?.cast<String, dynamic>();
+      final regionId = props?['regionId'] as String?;
+      if (regionId == null) continue;
+      final target = allRegions().where((r) => r.id == regionId);
+      if (target.isNotEmpty) {
+        _selectRegion(target.first);
+        return;
+      }
+    }
+  }
+
+  /// Called on every camera-idle. If the visible viewport has drifted out of
+  /// the active region's own bbox and into another downloaded region's bbox,
+  /// offers to switch — the automatic counterpart to tapping an outline.
+  /// Multiple overlapping candidates are all listed rather than guessed at,
+  /// per the user's own stated preference for "ask, don't guess."
+  Future<void> _checkCrossRegionProximity() async {
+    final c = _c;
+    if (c == null) return;
+    final b = await c.getVisibleRegion();
+    final w = b.southwest.longitude,
+        s = b.southwest.latitude,
+        e = b.northeast.longitude,
+        n = b.northeast.latitude;
+
+    // Still mostly within the active region — nothing to prompt.
+    if (RegionDownloader.bboxesOverlap(w, s, e, n, _region.west, _region.south,
+        _region.east, _region.north)) {
+      return;
+    }
+
+    final candidates = allRegions()
+        .where((r) =>
+            r.mapAsset != _region.mapAsset &&
+            !_promptedRegionIds.contains(r.id) &&
+            RegionDownloader.bboxesOverlap(w, s, e, n, r.west, r.south, r.east, r.north))
+        .toList();
+    if (candidates.isEmpty || !mounted) return;
+    _promptedRegionIds.addAll(candidates.map((r) => r.id));
+
+    if (candidates.length == 1) {
+      final target = candidates.first;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text("You've panned toward ${target.name}"),
+        action: SnackBarAction(label: 'Switch', onPressed: () => _selectRegion(target)),
+      ));
+    } else {
+      final picked = await showModalBottomSheet<Region>(
+        context: context,
+        builder: (context) => SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Padding(
+                padding: EdgeInsets.all(16),
+                child: Text("You've panned toward more than one downloaded area — switch to:"),
+              ),
+              for (final r in candidates)
+                ListTile(
+                  leading: const Icon(Icons.map_outlined),
+                  title: Text(r.name),
+                  onTap: () => Navigator.pop(context, r),
+                ),
+            ],
+          ),
+        ),
+      );
+      if (picked != null) _selectRegion(picked);
+    }
+  }
+
+  void _onCameraIdle() {
+    // Fire-and-forget: no result to await into the widget tree, and a
+    // duplicate concurrent check is harmless (idempotent bbox math, and
+    // _promptedRegionIds guards re-showing the same prompt).
+    unawaited(_checkCrossRegionProximity());
   }
 
   /// (Re)loads bookmarks onto the map, filtered to whatever's reachable on
@@ -242,6 +378,7 @@ class _BrowseMapScreenState extends State<BrowseMapScreen> {
   /// region's bookmarked center.
   void _goTo(LatLng pos) {
     final target = regionForPoint(pos);
+    _promptedRegionIds = {};
     if (target.mapAsset == _region.mapAsset) {
       jumpCamera(_c, pos);
     } else {
@@ -255,6 +392,7 @@ class _BrowseMapScreenState extends State<BrowseMapScreen> {
   /// Manual region-dropdown pick — same basemap-swap logic as [_goTo], but
   /// opens on the region's own bookmarked center rather than a searched point.
   void _selectRegion(Region r) {
+    _promptedRegionIds = {};
     if (r.mapAsset == _region.mapAsset) {
       setState(() => _region = r);
       jumpCamera(_c, r.center, zoom: 13);
@@ -334,8 +472,11 @@ class _BrowseMapScreenState extends State<BrowseMapScreen> {
             initialCamera: _initialCamera,
             onMapCreated: _onMapCreated,
             onStyleLoaded: _onStyleLoaded,
+            onMapClick: _onMapClick,
             onMapLongClick: _onMapLongClick,
+            onCameraIdle: _onCameraIdle,
             myLocationEnabled: true,
+            minZoom: 2,
           ),
           if (_searchOpen)
             Positioned(

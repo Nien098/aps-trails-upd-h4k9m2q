@@ -81,26 +81,40 @@ class BoundaryLayer {
   /// necessarily a rectangle; closed automatically if not already (first
   /// point repeated at the end). Clears when null or too short to form an
   /// area.
-  Future<void> setPolygon(List<LatLng>? points) async {
+  Future<void> setPolygon(List<LatLng>? points) =>
+      setPolygons(points == null ? const [] : [points]);
+
+  /// Same as [setPolygon] but draws every ring in [polygons] as its own
+  /// feature under one source/layer pair — used by [BrowseMapScreen] to show
+  /// every *other* downloaded region's outline at once (not just the active
+  /// one) so panning/zooming out reveals where they are, without needing a
+  /// separate [BoundaryLayer] instance (and pair of map layers) per region.
+  /// Rings shorter than 3 points are skipped rather than clearing the whole
+  /// set. `properties.regionId` on each feature lets a tap handler
+  /// (`queryRenderedFeaturesInRect`) identify which region was hit.
+  Future<void> setPolygons(List<List<LatLng>> polygons,
+      {List<String?>? ids}) async {
     if (!_ready) return;
-    if (points == null || points.length < 3) {
-      await controller.setGeoJsonSource(_sourceId, Map.of(_empty));
-      return;
+    final features = <Map<String, dynamic>>[];
+    for (var i = 0; i < polygons.length; i++) {
+      final points = polygons[i];
+      if (points.length < 3) continue;
+      final closed = points.first == points.last ? points : [...points, points.first];
+      final ring = [for (final p in closed) [p.longitude, p.latitude]];
+      features.add({
+        'type': 'Feature',
+        'geometry': {
+          'type': 'Polygon',
+          'coordinates': [ring],
+        },
+        'properties': {
+          if (ids != null && i < ids.length && ids[i] != null) 'regionId': ids[i],
+        },
+      });
     }
-    final closed = points.first == points.last ? points : [...points, points.first];
-    final ring = [for (final p in closed) [p.longitude, p.latitude]];
     await controller.setGeoJsonSource(_sourceId, {
       'type': 'FeatureCollection',
-      'features': [
-        {
-          'type': 'Feature',
-          'geometry': {
-            'type': 'Polygon',
-            'coordinates': [ring],
-          },
-          'properties': {},
-        },
-      ],
+      'features': features,
     });
   }
 }

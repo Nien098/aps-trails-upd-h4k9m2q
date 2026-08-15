@@ -2145,6 +2145,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
               myLocationEnabled: true, // show the author's position dot
               gesturesEnabled:
                   !_drawBoundaryMode && !_dragDrawMode && !_adjustLineMode,
+              minZoom: 2,
             ),
             if (_searchOpen)
               Positioned(

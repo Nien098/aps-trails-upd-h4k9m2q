@@ -31,9 +31,11 @@ class BaseMap extends StatefulWidget {
     this.onStyleLoaded,
     this.onMapClick,
     this.onMapLongClick,
+    this.onCameraIdle,
     this.myLocationEnabled = false,
     this.trackCameraPosition = false,
     this.gesturesEnabled = true,
+    this.minZoom = 10,
   });
 
   final Region region;
@@ -42,8 +44,18 @@ class BaseMap extends StatefulWidget {
   final VoidCallback? onStyleLoaded;
   final OnMapClickCallback? onMapClick;
   final OnMapClickCallback? onMapLongClick;
+  final VoidCallback? onCameraIdle;
   final bool myLocationEnabled;
   final bool trackCameraPosition;
+
+  /// Lower bound for `minMaxZoomPreference`. Defaults to 10 (the floor
+  /// below which downloaded regions have no tile data — see
+  /// `kRegionMinZoom` in config.dart). Screens meant for panning long
+  /// distances (BrowseMapScreen, AuthorScreen) pass a lower value so the
+  /// user can zoom out further; below a region's real data floor the
+  /// style's flat background fill shows instead of tiles, which is
+  /// expected there, not a bug.
+  final double minZoom;
 
   /// False disables the native one-finger pan/rotate camera gestures —
   /// used while a screen-space overlay gesture (e.g. dragging out a
@@ -218,7 +230,7 @@ class _BaseMapState extends State<BaseMap> {
             child: MapLibreMap(
               styleString: snap.data!,
               initialCameraPosition: widget.initialCamera,
-              minMaxZoomPreference: const MinMaxZoomPreference(10, 18),
+              minMaxZoomPreference: MinMaxZoomPreference(widget.minZoom, 18),
               myLocationEnabled: widget.myLocationEnabled,
               trackCameraPosition: widget.trackCameraPosition,
               compassEnabled: true,
@@ -228,6 +240,7 @@ class _BaseMapState extends State<BaseMap> {
               onStyleLoadedCallback: _onStyleLoaded,
               onMapClick: widget.onMapClick,
               onMapLongClick: widget.onMapLongClick,
+              onCameraIdle: widget.onCameraIdle,
               scrollGesturesEnabled: widget.gesturesEnabled,
               rotateGesturesEnabled: widget.gesturesEnabled,
             ),
