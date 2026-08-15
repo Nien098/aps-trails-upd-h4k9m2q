@@ -14,6 +14,7 @@ import '../trail_colors.dart';
 import '../services/boundary_layer.dart';
 import '../services/cue_gen.dart';
 import '../services/geo.dart';
+import '../services/region_downloader.dart';
 import '../services/route_layer.dart';
 import '../services/search_service.dart';
 import '../services/settings.dart';
@@ -23,6 +24,7 @@ import '../widgets/base_map.dart';
 import '../widgets/cue_editor_sheet.dart';
 import '../widgets/map_search_bar.dart';
 import 'bookmarks_screen.dart';
+import 'browse_map_screen.dart';
 import 'cue_list_screen.dart';
 
 /// Trail editor. Tap the map to lay the path (Path mode) or drop a labelled
@@ -54,6 +56,20 @@ class _AuthorScreenState extends State<AuthorScreen> {
   MapLibreMapController? _c;
   RouteLayer? _routeLayer;
   BoundaryLayer? _boundaryLayer;
+
+  /// Faint outline for every *other* downloaded region — same purpose as
+  /// [BrowseMapScreen]'s outline of the same name: this screen can't swap
+  /// its own basemap mid-edit (see [_onSearchResult]/[_openBookmarks]'s doc
+  /// on why), so panning toward another downloaded region only ever shows
+  /// grey/the world basemap there. The outline at least lets the author see
+  /// it's there, and [_checkNearbyDownloadedRegions] offers to open it in
+  /// Browse Map (a separate screen/session, not a swap of this one).
+  BoundaryLayer? _otherRegionsOutline;
+
+  /// Mirrors BrowseMapScreen's own field of the same name — regions already
+  /// prompted-for at the current camera position, so the prompt doesn't
+  /// re-fire every idle tick while the author lingers near the edge.
+  final Set<String> _promptedRegionIds = {};
 
   /// Separate layer just for the raw in-progress drag trace in
   /// [_dragDrawMode] — kept apart from [_routeLayer] (which always shows the
@@ -477,7 +493,111 @@ class _AuthorScreenState extends State<AuthorScreen> {
     await _boundaryLayer!.ensure();
     _strokeLayer = RouteLayer(_c!, id: 'strokePreview');
     await _strokeLayer!.ensure();
+    _otherRegionsOutline = BoundaryLayer(
+      _c!,
+      id: 'other-regions-outline',
+      lineColor: '#757575',
+      fillOpacity: 0,
+      lineWidth: 1.5,
+      lineDasharray: const [4, 3],
+    );
+    await _otherRegionsOutline!.ensure();
+    await _drawOtherRegionOutlines();
     await _redraw();
+  }
+
+  /// Outlines every downloaded region other than this trail's own — see
+  /// [_otherRegionsOutline]'s doc for why this screen only shows where they
+  /// are rather than swapping to them. Mirrors
+  /// BrowseMapScreen._drawOtherRegionOutlines exactly.
+  Future<void> _drawOtherRegionOutlines() async {
+    final others = allRegions()
+        .where((r) => r.isDownloaded && r.mapAsset != _region.mapAsset)
+        .toList();
+    await _otherRegionsOutline?.setPolygons([
+      for (final r in others)
+        [
+          LatLng(r.north, r.west),
+          LatLng(r.north, r.east),
+          LatLng(r.south, r.east),
+          LatLng(r.south, r.west),
+        ],
+    ]);
+  }
+
+  /// Camera-idle check — if the visible viewport has drifted out of this
+  /// trail's own region and into another downloaded region's bounds, offers
+  /// to open it in Browse Map (a separate screen, pushed on top — backing
+  /// out returns here with the edit session untouched). Mirrors
+  /// BrowseMapScreen._checkCrossRegionProximity, but never swaps this
+  /// screen's own basemap (see [_otherRegionsOutline]'s doc).
+  Future<void> _checkNearbyDownloadedRegions() async {
+    final c = _c;
+    if (c == null) return;
+    final b = await c.getVisibleRegion();
+    final w = b.southwest.longitude,
+        s = b.southwest.latitude,
+        e = b.northeast.longitude,
+        n = b.northeast.latitude;
+
+    if (RegionDownloader.bboxesOverlap(
+        w, s, e, n, _region.west, _region.south, _region.east, _region.north)) {
+      return;
+    }
+
+    final candidates = allRegions()
+        .where((r) =>
+            r.mapAsset != _region.mapAsset &&
+            !_promptedRegionIds.contains(r.id) &&
+            RegionDownloader.bboxesOverlap(w, s, e, n, r.west, r.south, r.east, r.north))
+        .toList();
+    if (candidates.isEmpty || !mounted) return;
+    _promptedRegionIds.addAll(candidates.map((r) => r.id));
+
+    if (candidates.length == 1) {
+      final target = candidates.first;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text("You've panned toward ${target.name}"),
+        action: SnackBarAction(
+          label: 'Open in Browse Map',
+          onPressed: () => _openInBrowseMap(target),
+        ),
+      ));
+    } else {
+      final picked = await showModalBottomSheet<Region>(
+        context: context,
+        builder: (context) => SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Padding(
+                padding: EdgeInsets.all(16),
+                child: Text(
+                    "You've panned toward more than one downloaded area — open in Browse Map:"),
+              ),
+              for (final r in candidates)
+                ListTile(
+                  leading: const Icon(Icons.map_outlined),
+                  title: Text(r.name),
+                  onTap: () => Navigator.pop(context, r),
+                ),
+            ],
+          ),
+        ),
+      );
+      if (picked != null) _openInBrowseMap(picked);
+    }
+  }
+
+  void _openInBrowseMap(Region r) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => BrowseMapScreen(region: r)),
+    );
+  }
+
+  void _onCameraIdle() {
+    unawaited(_checkNearbyDownloadedRegions());
   }
 
   /// Minimum spacing (logical px) between recorded drag points — keeps a
@@ -2146,6 +2266,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
               gesturesEnabled:
                   !_drawBoundaryMode && !_dragDrawMode && !_adjustLineMode,
               minZoom: 2,
+              onCameraIdle: _onCameraIdle,
             ),
             if (_searchOpen)
               Positioned(
