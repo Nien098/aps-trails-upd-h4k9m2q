@@ -75,13 +75,24 @@ class RegionDownloader {
 
   /// Plain axis-aligned rectangle overlap test — used to decide which
   /// already-downloaded archives are worth checking for reusable tiles
-  /// before fetching a new area, and (later) to detect merge-worthy
-  /// downloaded regions.
-  static bool _bboxesOverlap(
+  /// before fetching a new area, and (via [tolerance]) to detect
+  /// merge-worthy downloaded regions in `download_region_screen.dart`.
+  /// [tolerance] (degrees) pads box [a] on every side before testing, so a
+  /// small gap between two independently-drawn rectangles still counts as
+  /// "worth merging" without requiring them to share an exact edge — two
+  /// merely-nearby regions with real daylight between them still correctly
+  /// don't count. Public (not `_`-prefixed) specifically so the download
+  /// screen's merge-detection can reuse this exact test rather than
+  /// re-implementing it.
+  static bool bboxesOverlap(
     double aWest, double aSouth, double aEast, double aNorth,
-    double bWest, double bSouth, double bEast, double bNorth,
-  ) =>
-      aWest < bEast && bWest < aEast && aSouth < bNorth && bSouth < aNorth;
+    double bWest, double bSouth, double bEast, double bNorth, {
+    double tolerance = 0,
+  }) =>
+      aWest - tolerance < bEast &&
+      bWest < aEast + tolerance &&
+      aSouth - tolerance < bNorth &&
+      bSouth < aNorth + tolerance;
 
   /// Estimates the download size (bytes) by sampling a spread of tiles.
   Future<int> estimateBytes(
@@ -234,7 +245,7 @@ class RegionDownloader {
 
     for (final r in userRegions) {
       if (r.id == selfId) continue;
-      if (!_bboxesOverlap(west, south, east, north, r.west, r.south, r.east, r.north)) {
+      if (!bboxesOverlap(west, south, east, north, r.west, r.south, r.east, r.north)) {
         continue;
       }
       final path = '${docs.path}/map/${r.id}.pmtiles';
@@ -248,7 +259,7 @@ class RegionDownloader {
     if (File(bundledPath).existsSync()) {
       try {
         final reader = await PmTilesReader.open(bundledPath);
-        if (_bboxesOverlap(
+        if (bboxesOverlap(
             west, south, east, north, reader.west, reader.south, reader.east, reader.north)) {
           candidates.add(reader);
         } else {
