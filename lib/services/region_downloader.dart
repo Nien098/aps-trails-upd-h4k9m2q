@@ -433,8 +433,14 @@ class RegionDownloader {
       final result = await _fetchCellAdaptive(
           cell.$1, cell.$2, cell.$3, cell.$4, queryFor, deadline, 0);
       for (final el in result.elements) {
-        final id = el['id'];
-        if (el['type'] == 'way' && id != null) byId[id as int] = el;
+        // One malformed element must never cost the whole in-progress
+        // fetch — see _postOverpass's doc for the real bug this class of
+        // guard fixed; kept here too as cheap insurance against any future
+        // edge case reaching this far.
+        try {
+          final id = el['id'];
+          if (el['type'] == 'way' && id != null) byId[id as int] = el;
+        } catch (_) {}
       }
       attempted += result.attempted;
       succeeded += result.succeeded;
@@ -502,6 +508,20 @@ class RegionDownloader {
   /// POSTs one Overpass query, retrying transient failures. Returns null
   /// (not a thrown exception) on final failure so [_fetchOverpassTiled] can
   /// skip just this cell and keep going.
+  ///
+  /// The returned list is eagerly filtered to genuine `Map` elements —
+  /// deliberately *not* `.cast<Map>()`, which is a lazy cast: it wouldn't
+  /// actually check any element's type until some later, unrelated caller
+  /// iterated the list, so a single malformed entry (Overpass can include a
+  /// bare non-Map/null element in `elements` under load — confirmed real,
+  /// not hypothetical: this was the actual cause of a whole in-progress
+  /// route-graph fetch getting discarded partway through, reported directly
+  /// as "reached 67% then failed") would throw an *uncaught* exception deep
+  /// inside `_fetchOverpassTiled`'s per-cell aggregation loop, not here
+  /// where it's actually expected and handled. Filtering eagerly, inside
+  /// this method's own retry logic, turns "one malformed element" into
+  /// "this attempt found one fewer usable element" instead of a crash three
+  /// call frames away.
   static Future<List<Map>?> _postOverpass(String query) async {
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 20);
     try {
@@ -518,7 +538,13 @@ class RegionDownloader {
             if (attempt == 2) return null;
           } else {
             final text = await resp.transform(utf8.decoder).join();
-            return (jsonDecode(text)['elements'] as List).cast<Map>();
+            final decoded = jsonDecode(text);
+            final raw = decoded is Map ? decoded['elements'] : null;
+            if (raw is! List) {
+              if (attempt == 2) return null;
+            } else {
+              return [for (final e in raw) if (e is Map) e];
+            }
           }
         } catch (_) {
           if (attempt == 2) return null;
