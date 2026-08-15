@@ -100,19 +100,46 @@ class RegionDownloader {
   int get failedTileCount => _failedTileCount;
   int _failedTileCount = 0;
 
-  /// True if fetching this region's street names (for offline search) failed
-  /// — checked by the caller after [download] to show a soft-fail message.
-  /// Never blocks the download itself: map tiles are the essential data,
-  /// street search is a bonus that degrades gracefully.
-  bool get streetsFailed => _streetsFailed;
-  bool _streetsFailed = false;
+  /// Fraction (0.0-1.0) of this region's street-name Overpass cells that
+  /// actually succeeded — checked by the caller after [download] to report
+  /// how complete street search is for this area. 1.0 unless a fetch was
+  /// attempted; never blocks the download itself: map tiles are the
+  /// essential data, street search is a bonus that degrades gracefully.
+  double get streetsCoverage => _streetsCoverage;
+  double _streetsCoverage = 1.0;
 
-  /// True if fetching this region's route graph (for offline-region-wide
-  /// routing, see [RouteGraphStore]) failed — same soft-fail contract as
-  /// [streetsFailed]: TrailRouter just falls back to whatever's actually
-  /// rendered on screen for this region until a re-download succeeds.
-  bool get routeGraphFailed => _routeGraphFailed;
-  bool _routeGraphFailed = false;
+  /// True if street coverage came back meaningfully incomplete (not just a
+  /// handful of edge cells) — kept as a simple boolean for callers that only
+  /// care about "should I mention this at all", alongside [streetsCoverage]
+  /// for callers that want the actual percentage.
+  bool get streetsFailed => _streetsCoverage < 0.999;
+
+  /// Same idea as [streetsCoverage]/[streetsFailed], for the route graph
+  /// (offline-region-wide routing, see [RouteGraphStore]) — TrailRouter
+  /// just falls back to whatever's actually rendered on screen for any gap
+  /// left in this region until a re-download improves coverage.
+  double get routeGraphCoverage => _routeGraphCoverage;
+  double _routeGraphCoverage = 1.0;
+  bool get routeGraphFailed => _routeGraphCoverage < 0.999;
+
+  /// A user-facing warning for [coverage] of [what] (e.g. "Street search"),
+  /// or null when coverage is complete enough not to bother mentioning.
+  /// Distinguishes "not available at all" (0%, e.g. Overpass unreachable)
+  /// from "partially available" (some real percentage) rather than
+  /// collapsing both into one "failed" message — a huge/dense area that
+  /// still got most of its data covered shouldn't read the same as one that
+  /// got none of it.
+  static String? coverageWarning(String what, double coverage) {
+    if (coverage >= 0.999) return null;
+    if (coverage <= 0.001) {
+      return "$what isn't available for this area — re-download it later "
+          'if you want to try again.';
+    }
+    final pct = (coverage * 100).round();
+    return '$what is only $pct% complete for this area (it\'s large/dense '
+        'enough that some of it timed out) — re-download it later to try '
+        'filling in the rest.';
+  }
 
   /// Downloads the region into `<docs>/map/<id>.pmtiles` and returns a [Region].
   Future<Region?> download({
@@ -228,28 +255,26 @@ class RegionDownloader {
         minZoom: kRegionMinZoom, maxZoom: kRegionMaxZoom);
 
     try {
-      final streets = await _fetchStreets(west, south, east, north,
+      final result = await _fetchStreets(west, south, east, north,
           onCellProgress: (d, t) => onProgress?.call(DownloadProgress(
               d, t, writer.byteCount, phase: 'Fetching street names')));
-      await SearchService.instance.addStreets(id, streets);
+      await SearchService.instance.addStreets(id, result.items);
+      _streetsCoverage = result.coverage;
     } catch (_) {
       // Soft-fail — street search for this region just won't work until a
-      // re-download succeeds; the map itself is unaffected. Also the escape
-      // hatch for an area too large to even attempt (_fetchOverpassTiled
-      // throws outright rather than queuing hundreds of sequential
-      // requests) — a slow-but-still-bounded area instead just returns
-      // whatever cells finished inside its time budget, no exception.
-      _streetsFailed = true;
+      // re-download succeeds; the map itself is unaffected.
+      _streetsCoverage = 0;
     }
 
     try {
-      final ways = await _fetchWays(west, south, east, north,
+      final result = await _fetchWays(west, south, east, north,
           onCellProgress: (d, t) => onProgress?.call(DownloadProgress(
               d, t, writer.byteCount, phase: 'Fetching trail & road data')));
-      await RouteGraphStore.instance.addWays(id, ways);
+      await RouteGraphStore.instance.addWays(id, result.items);
+      _routeGraphCoverage = result.coverage;
     } catch (_) {
-      // Soft-fail — same contract as streetsFailed above.
-      _routeGraphFailed = true;
+      // Soft-fail — same contract as streetsCoverage above.
+      _routeGraphCoverage = 0;
     }
 
     return Region(
@@ -291,49 +316,70 @@ class RegionDownloader {
     }
   }
 
-  /// Max cell size (degrees) per Overpass request — mirrors
+  /// Starting cell size (degrees) per Overpass request — mirrors
   /// `tools/build_route_graph.py`'s `CELL_DEG`. Most downloaded areas are a
-  /// single cell (whatever fit on screen when the user tapped Download),
-  /// but a large/dense metro area (e.g. all of Jakarta, or zooming out to
-  /// capture a whole province) can otherwise blow past the public Overpass
-  /// instance's per-request timeout/size limit in one unbounded request —
-  /// this is the bug that made street/route-graph data silently fail to
-  /// fetch for exactly that kind of area.
+  /// single cell (whatever fit on screen when the user tapped Download);
+  /// a large/dense metro area (e.g. Jakarta) starts at this size too but
+  /// [_fetchCellAdaptive] shrinks any cell that fails down toward
+  /// [_minCellDeg] rather than just giving up on it — see that doc for why
+  /// a flat cell size silently left dense areas with big gaps even after
+  /// downloading real data.
   static const _overpassCellDeg = 0.15;
 
-  /// Hard cap on how many cells a single download will attempt. Beyond
-  /// this, the area needs so many sequential Overpass requests (each with
-  /// its own retry/backoff) that it can run for many minutes with no
-  /// visible progress once the map-tile bar already reads 100% — which is
-  /// exactly what read as the app "stuck forever" (users had to force-quit
-  /// out of it). Skipping outright and telling the user, instead of
-  /// silently grinding for a very long time, is the better failure mode.
-  static const _overpassMaxCells = 60;
+  /// Smallest a cell may shrink to while subdividing after a failure —
+  /// mirrors the Jakarta/Tangerang diagnostic bundles' `CELL_OVERRIDES`
+  /// (`tools/build_route_graph.py`), confirmed small enough to reliably
+  /// succeed against the public Overpass instance even over a dense urban
+  /// core, where the default 0.15° size reliably 504s.
+  static const _minCellDeg = 0.05;
 
-  /// Wall-clock budget for the *whole* tiled fetch, independent of the cell
-  /// cap above — a safety net for the case where even a modest-sized area
-  /// turns out to be unexpectedly slow (an overloaded public instance,
-  /// dense city data). Stops issuing new cell requests once exceeded and
-  /// returns whatever succeeded so far, rather than the cap alone (which
-  /// only guards against *area*, not per-cell slowness).
-  static const _overpassTimeBudget = Duration(seconds: 45);
+  /// How many times a single top-level cell may be quartered before giving
+  /// up on whatever patch is still failing — bounds worst-case effort per
+  /// cell (4³ = 64 leaf attempts) rather than subdividing indefinitely on a
+  /// cell that's failing for a non-size reason (e.g. the instance is down).
+  static const _maxSubdivideDepth = 3;
 
-  static int _cellCount(double west, double south, double east, double north) {
-    final rows = math.max(1, ((north - south) / _overpassCellDeg).ceil());
-    final cols = math.max(1, ((east - west) / _overpassCellDeg).ceil());
-    return rows * cols;
+  /// Wall-clock budget for the *whole* tiled fetch (every top-level cell
+  /// plus any subdivisions they need) — now the sole backstop against
+  /// "runs forever silently", since a too-large area degrades gracefully to
+  /// partial coverage (see [RegionDownloader.streetsCoverage]/
+  /// [routeGraphCoverage]) instead of being rejected outright before even
+  /// trying. Raised well past the original 45s: that budget was sized for
+  /// a flat per-cell-skip strategy where 45s was already "a while"; an
+  /// adaptive strategy needs real time to retry a failing cell smaller, and
+  /// the download screen's progress bar keeps moving throughout (each
+  /// top-level cell still reports done/total as it resolves), so a longer
+  /// budget doesn't reintroduce the old "looks stuck" bug that number was
+  /// originally chosen to prevent.
+  static const _overpassTimeBudget = Duration(minutes: 4);
+
+  static List<(double, double, double, double)> _cells(
+      double west, double south, double east, double north, double cellDeg) {
+    final cells = <(double, double, double, double)>[];
+    var lat = south;
+    while (lat < north) {
+      final lat2 = math.min(lat + cellDeg, north);
+      var lon = west;
+      while (lon < east) {
+        final lon2 = math.min(lon + cellDeg, east);
+        cells.add((lat, lon, lat2, lon2));
+        lon = lon2;
+      }
+      lat = lat2;
+    }
+    return cells;
   }
 
   /// Fetches [queryFor]'s ways over the whole bbox, tiled into a grid of
-  /// `_overpassCellDeg` cells and deduped by OSM way id (a way spanning a
-  /// cell boundary comes back from more than one cell). Each cell's failure
-  /// is caught and skipped individually rather than aborting the whole
-  /// fetch — a partial street/route index for a huge area is far more
-  /// useful than none at all, matching [RegionDownloader.download]'s own
-  /// "keep whatever tiles succeeded" philosophy for map tiles. Throws (a
-  /// deliberate, immediate soft-fail via the caller's try/catch) if the
-  /// area is too large to even attempt — see [_overpassMaxCells].
-  static Future<List<Map>> _fetchOverpassTiled(
+  /// [_overpassCellDeg] top-level cells (each recursively shrunk on failure
+  /// by [_fetchCellAdaptive]) and deduped by OSM way id (a way spanning a
+  /// cell boundary comes back from more than one cell). [coverage] is the
+  /// fraction of every leaf cell attempted (top-level cells plus whatever
+  /// subdivisions they needed) that actually succeeded — 1.0 for a clean
+  /// fetch, lower for a dense/huge area that hit the time budget or genuine
+  /// repeated failures, so the caller can report real completeness instead
+  /// of a binary succeeded/failed.
+  static Future<({List<Map> elements, double coverage})> _fetchOverpassTiled(
     double west,
     double south,
     double east,
@@ -341,39 +387,79 @@ class RegionDownloader {
     String Function(double s, double w, double n, double e) queryFor, {
     void Function(int done, int total)? onCellProgress,
   }) async {
-    final totalCells = _cellCount(west, south, east, north);
-    if (totalCells > _overpassMaxCells) {
-      throw StateError(
-          'Area needs $totalCells Overpass requests, over the $_overpassMaxCells cap');
-    }
+    final cells = _cells(west, south, east, north, _overpassCellDeg);
     final deadline = DateTime.now().add(_overpassTimeBudget);
     final byId = <int, Map>{};
-    var cellsDone = 0;
-    var lat = south;
-    outer:
-    while (lat < north) {
-      final lat2 = math.min(lat + _overpassCellDeg, north);
-      var lon = west;
-      while (lon < east) {
-        if (DateTime.now().isAfter(deadline)) break outer;
-        final lon2 = math.min(lon + _overpassCellDeg, east);
-        final elements = await _postOverpass(queryFor(lat, lon, lat2, lon2));
-        if (elements != null) {
-          for (final el in elements) {
-            final id = el['id'];
-            if (el['type'] == 'way' && id != null) byId[id as int] = el;
-          }
-        }
-        cellsDone++;
-        onCellProgress?.call(cellsDone, totalCells);
-        lon = lon2;
-        if (lon < east || lat2 < north) {
-          await Future.delayed(const Duration(milliseconds: 400));
-        }
+    var attempted = 0, succeeded = 0, topDone = 0;
+    for (final cell in cells) {
+      if (DateTime.now().isAfter(deadline)) break;
+      final result = await _fetchCellAdaptive(
+          cell.$1, cell.$2, cell.$3, cell.$4, queryFor, deadline, 0);
+      for (final el in result.elements) {
+        final id = el['id'];
+        if (el['type'] == 'way' && id != null) byId[id as int] = el;
       }
-      lat = lat2;
+      attempted += result.attempted;
+      succeeded += result.succeeded;
+      topDone++;
+      onCellProgress?.call(topDone, cells.length);
+      await Future.delayed(const Duration(milliseconds: 400));
     }
-    return byId.values.toList();
+    final coverage = attempted == 0 ? 0.0 : succeeded / attempted;
+    return (elements: byId.values.toList(), coverage: coverage);
+  }
+
+  /// Fetches one cell, recursively quartering it into smaller cells on
+  /// failure instead of just skipping it outright — the actual fix for a
+  /// dense area (Jakarta-scale) silently ending up with big gaps even
+  /// though real data did download: the default 0.15° cell size reliably
+  /// 504s over a dense urban core, but a smaller one succeeds there, so
+  /// retrying smaller recovers real coverage that the old flat
+  /// skip-on-failure approach was leaving on the table. Stops subdividing
+  /// at [_minCellDeg] or [_maxSubdivideDepth], whichever comes first — at
+  /// that point the patch is counted as attempted-but-failed rather than
+  /// retried forever — and checks [deadline] on every call so a
+  /// pathologically slow deep dive into one bad top-level cell can't blow
+  /// the overall time budget either.
+  static Future<({List<Map> elements, int attempted, int succeeded})>
+      _fetchCellAdaptive(
+    double s,
+    double w,
+    double n,
+    double e,
+    String Function(double s, double w, double n, double e) queryFor,
+    DateTime deadline,
+    int depth,
+  ) async {
+    if (DateTime.now().isAfter(deadline)) {
+      return (elements: const <Map>[], attempted: 0, succeeded: 0);
+    }
+    final elements = await _postOverpass(queryFor(s, w, n, e));
+    if (elements != null) {
+      return (elements: elements, attempted: 1, succeeded: 1);
+    }
+    final canSubdivide = depth < _maxSubdivideDepth && (n - s) > _minCellDeg * 2;
+    if (!canSubdivide) {
+      return (elements: const <Map>[], attempted: 1, succeeded: 0);
+    }
+    final midLat = (s + n) / 2, midLon = (w + e) / 2;
+    final quadrants = [
+      (s, w, midLat, midLon),
+      (s, midLon, midLat, e),
+      (midLat, w, n, midLon),
+      (midLat, midLon, n, e),
+    ];
+    final out = <Map>[];
+    var attempted = 0, succeeded = 0;
+    for (final q in quadrants) {
+      await Future.delayed(const Duration(milliseconds: 300));
+      final r = await _fetchCellAdaptive(
+          q.$1, q.$2, q.$3, q.$4, queryFor, deadline, depth + 1);
+      out.addAll(r.elements);
+      attempted += r.attempted;
+      succeeded += r.succeeded;
+    }
+    return (elements: out, attempted: attempted, succeeded: succeeded);
   }
 
   /// POSTs one Overpass query, retrying transient failures. Returns null
@@ -414,15 +500,16 @@ class RegionDownloader {
   /// One representative point per name (midpoint of the longest matching
   /// way), so a repeated street name (common for long roads split into many
   /// OSM ways) doesn't produce duplicate search results.
-  static Future<List<({String name, double lat, double lon})>> _fetchStreets(
+  static Future<({List<({String name, double lat, double lon})> items, double coverage})>
+      _fetchStreets(
       double west, double south, double east, double north,
       {void Function(int done, int total)? onCellProgress}) async {
-    final elements = await _fetchOverpassTiled(west, south, east, north,
+    final result = await _fetchOverpassTiled(west, south, east, north,
         (s, w, n, e) => '[out:json][timeout:180];'
             'way["highway"]["name"]($s,$w,$n,$e);'
             'out tags geom;',
         onCellProgress: onCellProgress);
-    return _dedupeStreets(elements);
+    return (items: _dedupeStreets(result.elements), coverage: result.coverage);
   }
 
   static const _excludedHighway = {
@@ -466,19 +553,16 @@ class RegionDownloader {
   /// Every walkable way within the bbox, from the Overpass API — same query
   /// shape as `tools/build_route_graph.py` uses for the bundled regions
   /// (full geometry, every `highway=*` value, not just named ones), so a
-  /// downloaded region's routing coverage matches the bundled ones. A single
-  /// request is fine here (unlike the build script's grid-tiled fetch for
-  /// the huge bundled-region bboxes) since a downloaded area is just
-  /// whatever fit in the user's screen when they tapped Download.
-  static Future<List<RouteWay>> _fetchWays(
+  /// downloaded region's routing coverage matches the bundled ones.
+  static Future<({List<RouteWay> items, double coverage})> _fetchWays(
       double west, double south, double east, double north,
       {void Function(int done, int total)? onCellProgress}) async {
-    final elements = await _fetchOverpassTiled(west, south, east, north,
+    final result = await _fetchOverpassTiled(west, south, east, north,
         (s, w, n, e) => '[out:json][timeout:180];'
             'way["highway"]($s,$w,$n,$e);'
             'out tags geom;',
         onCellProgress: onCellProgress);
-    return _classifyWays(elements);
+    return (items: _classifyWays(result.elements), coverage: result.coverage);
   }
 
   // Mirrors tools/build_route_graph.py's classify() exactly, so bundled and

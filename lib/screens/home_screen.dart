@@ -723,14 +723,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     // download_region_screen.dart's brand-new-download flow already toasts
     // these; the update flow didn't, so a failure here went completely
     // unnoticed (the bug that motivated this).
-    if (downloader.streetsFailed) {
-      _toast('Street search isn\'t available for this area — '
-          're-update it later if you want to search streets here.');
-    }
-    if (downloader.routeGraphFailed) {
-      _toast('Route planning outside what\'s on screen won\'t work for '
-          'this area yet — re-update it later to fix that.');
-    }
+    final streetsWarning = RegionDownloader.coverageWarning(
+        'Street search', downloader.streetsCoverage);
+    if (streetsWarning != null) _toast(streetsWarning);
+    final routeWarning = RegionDownloader.coverageWarning(
+        'Offline route planning', downloader.routeGraphCoverage);
+    if (routeWarning != null) _toast(routeWarning);
     if (mounted) setState(() {});
   }
 
