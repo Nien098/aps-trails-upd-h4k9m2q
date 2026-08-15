@@ -1013,7 +1013,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 leading: const Icon(Icons.route, size: 34),
                 title: Text(t.name),
                 subtitle: Text(
-                    '${regionById(t.regionId).name}  •  '
+                    '${regionForTrail(t).name}  •  '
                     '${Settings.instance.formatDistance(pathLength(t.path))}'
                     ' • ${t.cues.length} ${t.cues.length == 1 ? "cue" : "cues"}'
                     '${t.walkCount > 0 ? '\n${Settings.instance.formatDistance(t.walkedMeters)} • ↑ ${Settings.instance.formatElevation(t.elevGainMeters)} • ${t.walkCount}×' : ''}'),

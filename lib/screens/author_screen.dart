@@ -267,7 +267,16 @@ class _AuthorScreenState extends State<AuthorScreen> {
     super.initState();
     if (widget.trail != null) {
       _trail = widget.trail!;
-      _region = regionById(_trail.regionId);
+      _region = regionForTrail(_trail);
+      // Self-heal: a downloaded region's id isn't stable across delete +
+      // redownload (see regionForTrail's doc) — once found via the
+      // geography fallback, persist the corrected id so this trail opens
+      // instantly next time instead of paying for that fallback again, and
+      // so the trail list (home_screen.dart) picks up the right region too.
+      if (_region.id != _trail.regionId) {
+        _trail.regionId = _region.id;
+        unawaited(TrailStore.instance.save(_trail));
+      }
     } else {
       _region = widget.region ?? kDefaultRegion;
       _trail = Trail(name: 'New trail', regionId: _region.id);

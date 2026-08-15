@@ -4,6 +4,8 @@ import 'dart:io';
 import 'package:maplibre_gl/maplibre_gl.dart';
 import 'package:path_provider/path_provider.dart';
 
+import 'trail.dart';
+
 /// The single bundled offline basemap covering ~100 km around Burnaby
 /// (Victoria → Whistler → Hope → the US border). Matches the pmtiles asset
 /// name assets/map/<id>.pmtiles.
@@ -145,3 +147,28 @@ Region regionById(String id) =>
 /// The bookmarked area whose bounds contain [p], or the default if none match.
 Region regionForPoint(LatLng p) =>
     allRegions().firstWhere((r) => r.contains(p), orElse: () => kDefaultRegion);
+
+/// Resolves the region a trail belongs to — primarily by its stored
+/// [Trail.regionId], but falling back to geography (the region whose bbox
+/// actually contains the trail's own first point) when that id no longer
+/// matches any current region.
+///
+/// A downloaded region's id isn't stable across delete-then-redownload — a
+/// fresh download always mints a brand-new one (see
+/// `DownloadRegionScreen._startDownload`'s `'dl_${DateTime.now()...}'`) —
+/// so without this fallback, deleting and redownloading the exact same area
+/// would silently orphan every trail that pointed at the old id: they'd
+/// fall through [regionById]'s generic `orElse` straight to
+/// [kDefaultRegion], the *wrong* basemap entirely, rather than finding
+/// their way back to the region that now actually covers them. Callers that
+/// can persist the correction (see `AuthorScreen`/`GuideScreen`) should
+/// update `Trail.regionId` once this returns a match that differs from the
+/// stored one, so the trail "self-heals" — future lookups go straight to
+/// [regionById] again instead of paying for a geography fallback every time.
+Region regionForTrail(Trail t) {
+  final exact = allRegions().where((r) => r.id == t.regionId);
+  if (exact.isNotEmpty) return exact.first;
+  final point =
+      t.anchors.isNotEmpty ? t.anchors.first : (t.path.isNotEmpty ? t.path.first : null);
+  return point == null ? kDefaultRegion : regionForPoint(point);
+}

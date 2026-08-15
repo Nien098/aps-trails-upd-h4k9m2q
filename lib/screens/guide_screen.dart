@@ -136,6 +136,15 @@ class _GuideScreenState extends State<GuideScreen> {
     NativeBridge.onAcknowledgeStillness = _acknowledgeStillness;
     NativeBridge.onPauseWalk = _pauseWalk;
     NativeBridge.onResumeWalk = _resumeWalk;
+    // Self-heal a stale regionId (a downloaded region's id isn't stable
+    // across delete + redownload — see regionForTrail's doc) so this trail
+    // opens against the right basemap directly next time instead of paying
+    // for the geography fallback again on every walk.
+    final healedRegionId = regionForTrail(widget.trail).id;
+    if (healedRegionId != widget.trail.regionId) {
+      widget.trail.regionId = healedRegionId;
+      if (widget.trail.id != null) unawaited(TrailStore.instance.save(widget.trail));
+    }
     final r = widget.resume;
     if (r != null) {
       _nextIndex = r.nextIndex.clamp(0, _cues.length);
@@ -945,7 +954,7 @@ class _GuideScreenState extends State<GuideScreen> {
     await layer.setMarkers(markers);
   }
 
-  Region get _region => regionById(widget.trail.regionId);
+  Region get _region => regionForTrail(widget.trail);
 
   CameraPosition get _initialCamera {
     // Resuming a checkpoint centres on where the walk actually was, not the
