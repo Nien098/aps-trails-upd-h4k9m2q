@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 /// Writes a PMTiles v3 archive from downloaded MVT tiles, so a downloaded
@@ -47,6 +48,14 @@ class PmTilesWriter {
   }
 
   /// Assembles the final `.pmtiles` at [outPath]. Bounds are in degrees.
+  ///
+  /// [onCopyProgress] — bytes copied so far / total — covers the one
+  /// genuinely slow part of this method: streaming the whole temp tile file
+  /// (hundreds of MB for a large region) into the staged output file below.
+  /// Without it, a caller-side progress dialog has nothing to show for
+  /// however long that takes and looks stuck at whatever the tile-fetch
+  /// phase's own progress last read (typically 100%) — real reported bug,
+  /// not a hypothetical.
   Future<void> finish(
     String outPath, {
     required double west,
@@ -55,6 +64,7 @@ class PmTilesWriter {
     required double north,
     required int minZoom,
     required int maxZoom,
+    void Function(int copied, int total)? onCopyProgress,
   }) async {
     await _temp.flush();
     await _temp.close();
@@ -103,11 +113,25 @@ class PmTilesWriter {
       await out.writeFrom(dirs.root);
       await out.writeFrom(metadata);
       if (dirs.leaves.isNotEmpty) await out.writeFrom(dirs.leaves);
-      // Append the tile data from the temp file in chunks.
+      // Append the tile data from the temp file in chunks, reporting
+      // progress at a bounded rate (~1% steps, floored at 1MB) regardless of
+      // file size — a naive per-chunk callback would fire thousands of
+      // times for a large archive, well beyond what a UI progress listener
+      // needs.
       final tin = File(_tempPath).openRead();
+      var copied = 0;
+      final reportEvery = math.max(_offset ~/ 100, 1 << 20);
+      var sinceReport = 0;
       await for (final chunk in tin) {
         await out.writeFrom(chunk);
+        copied += chunk.length;
+        sinceReport += chunk.length;
+        if (sinceReport >= reportEvery) {
+          sinceReport = 0;
+          onCopyProgress?.call(copied, _offset);
+        }
       }
+      onCopyProgress?.call(copied, _offset);
     } finally {
       await out.close();
     }

@@ -228,13 +228,16 @@ class RegionDownloader {
       // one more slower, sequential pass before accepting the gap.
       if (!_cancelled && failed.isNotEmpty) {
         final stillFailed = <List<int>>[];
-        for (final t in failed) {
+        for (var i = 0; i < failed.length; i++) {
+          final t = failed[i];
           final bytes = await _fetch(client, t[0], t[1], t[2], retries: 4);
           if (bytes != null && bytes.isNotEmpty) {
             await writer.addTile(t[0], t[1], t[2], bytes);
           } else {
             stillFailed.add(t);
           }
+          onProgress?.call(DownloadProgress(i + 1, failed.length,
+              writer.byteCount, phase: 'Retrying missed tiles'));
         }
         _failedTileCount = stillFailed.length;
       }
@@ -252,7 +255,9 @@ class RegionDownloader {
 
     await writer.finish(outPath,
         west: west, south: south, east: east, north: north,
-        minZoom: kRegionMinZoom, maxZoom: kRegionMaxZoom);
+        minZoom: kRegionMinZoom, maxZoom: kRegionMaxZoom,
+        onCopyProgress: (copied, total) => onProgress?.call(
+            DownloadProgress(copied, total, copied, phase: 'Finalizing map file')));
 
     try {
       final result = await _fetchStreets(west, south, east, north,
