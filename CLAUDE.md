@@ -7,7 +7,7 @@ offline-capable (bundled/downloaded region tiles, no network needed on a
 walk). Android is the only shipped target; Windows desktop build exists but
 is secondary.
 
-## Current state (as of v1.5.0+134)
+## Current state (as of v1.5.0+137)
 
 Beyond the original trail-drawing/walking app, this project now also has:
 offline street/trail search (`SearchService`), a view-only "Browse Map" mode,
@@ -31,19 +31,34 @@ region merge** below before touching `pmtiles_reader.dart`,
 `pmtiles_writer.dart`, or `region_downloader.dart`'s tile-fetch/merge logic
 — this is hand-rolled binary format work with real, specific gotchas.
 
+This session (v1.5.0+135 through +137) tackled two navigation-usability
+reports: the map viewer/editor's zoom-out floor was locked at 10 everywhere,
+and there was no way to discover/reach another downloaded region short of
+exiting to the region picker. Fixed with: a lower, per-screen `minZoom` on
+`BaseMap` (see **Architecture map** below), a bundled whole-world low-zoom
+basemap so panning past a region's real tile floor shows real coastline/
+landmass instead of grey (new **World basemap** section below), and
+cross-region-awareness (outlines for other downloaded regions + a
+camera-idle prompt to switch/open one) in both `BrowseMapScreen` and
+`AuthorScreen` — though `AuthorScreen`'s version deliberately opens the
+other region in Browse Map rather than swapping its own live basemap (see
+that section for why).
+
 See **Search & routing infrastructure**, **PMTiles tile reuse & region
-merge**, and **Known limitations / next steps** below for the full picture
-— read those before touching any of `search_service.dart`,
-`route_graph_store.dart`, `trail_router.dart`'s offline-merge code, or
-`region_downloader.dart`, all of which have real, hard-won lessons baked in
-already.
+merge**, **World basemap**, and **Known limitations / next steps** below for
+the full picture — read those before touching any of `search_service.dart`,
+`route_graph_store.dart`, `trail_router.dart`'s offline-merge code,
+`region_downloader.dart`, or `offline_map.dart`'s style-building, all of
+which have real, hard-won lessons baked in already.
 
 App size has grown substantially from these additions: bundled assets alone
-are now ~337MB total (basemap + streets.sqlite + route_graph.sqlite, the last
-of which is Git-LFS-tracked since it exceeds GitHub's 100MB per-file limit).
-This is expected and was confirmed with the user at each size jump — don't
-be alarmed by it, but do keep flagging *further* size jumps before bundling
-more diagnostic/regional data (see below).
+are now ~398MB total (basemap + streets.sqlite + route_graph.sqlite +
+world.pmtiles; route_graph.sqlite is Git-LFS-tracked since it exceeds
+GitHub's 100MB per-file limit — world.pmtiles at ~61MB stays just under that
+limit and pushes as a normal git object, just with GitHub's advisory "over
+50MB" warning). This is expected and was confirmed with the user at each
+size jump — don't be alarmed by it, but do keep flagging *further* size
+jumps before bundling more diagnostic/regional data (see below).
 
 ## Environment & tool paths (Windows)
 
@@ -198,7 +213,16 @@ wrong-versionCode release has bitten this project before.
   action. `_DrawGestureSurface` is the shared widget behind the
   boundary/drag-draw/line-adjust tools' full-screen drag overlay — see the
   gotchas below for why it exists instead of a plain `GestureDetector`.
-  `Scaffold(resizeToAvoidBottomInset: false)` — see gotchas.
+  `Scaffold(resizeToAvoidBottomInset: false)` — see gotchas. Also draws a
+  faint outline for every *other* downloaded region and, on camera-idle,
+  prompts to open one in Browse Map (`_checkNearbyDownloadedRegions`,
+  `_openInBrowseMap`) — deliberately does **not** swap its own basemap
+  mid-edit (existing constraint predating this session, see
+  `_onSearchResult`/`_openBookmarks`'s doc: a search/bookmark result outside
+  `_region` already just tells the author rather than trying to load a
+  second pmtiles file live). Mirrors `BrowseMapScreen`'s own version of this
+  almost exactly; the only real difference is what "switch" means for each
+  screen.
 - `lib/services/geo.dart` — shared geometry math (`metersBetween`,
   `nearestPointOnPath`/`nearestPointOnPolyline`, `distanceToPath`,
   `simplifyPath` Douglas-Peucker, `_projectOntoSegment` private per-file).
@@ -206,7 +230,20 @@ wrong-versionCode release has bitten this project before.
   source/layer wrappers around `MapLibreMapController`. `RouteLayer.setRoute`
   is vertex-count-agnostic — always draws a smooth LineString regardless of
   how dense the input array is, so densifying editable geometry never makes
-  the visible line look different.
+  the visible line look different. `BoundaryLayer.setPolygons` (plural —
+  `setPolygon` is now a one-ring convenience wrapper around it) draws
+  multiple independent ring features under one source/layer pair, an
+  optional per-feature `regionId` property for tap identification — added
+  so "outline every other downloaded region" doesn't need one `BoundaryLayer`
+  instance (and pair of map layers) per region.
+- `lib/widgets/base_map.dart` — shared offline MapLibre map widget (see
+  gotchas below for its keyboard/mouse-wheel/rotate support). `minZoom`
+  (default `10`, the real data floor for a *downloaded* region — see
+  `kRegionMinZoom`) is now a constructor param instead of hardcoded;
+  `BrowseMapScreen` and `AuthorScreen` pass `2` so panning far out is
+  possible, `GuideScreen`/`NavigateScreen` keep the default. Also now
+  forwards `onCameraIdle` (previously not wired at all) — both screens'
+  cross-region-proximity checks hang off it.
 - `lib/screens/record_trail_screen.dart` — GPS-track recording; cleanup
   (`_cleanPath`) snaps each simplified point individually (`snapPoint`, no
   routing between points) — this was deliberately changed away from
@@ -219,7 +256,19 @@ wrong-versionCode release has bitten this project before.
   (pan/zoom/search freely, no trail/edit context). Owns its own `Region`
   state and can swap basemaps on demand (unlike Guide/Author, which are tied
   to one trail's region) — the only screen where search is unconfined
-  (`confineTo: null`).
+  (`confineTo: null`). Also draws a faint outline for every *other*
+  downloaded region (`_drawOtherRegionOutlines`, via `BoundaryLayer.
+  setPolygons` — one `BoundaryLayer` instance, many features, not one
+  instance per region) and, on camera-idle, offers to switch when the
+  visible viewport drifts into one (`_checkCrossRegionProximity` — a single
+  candidate gets a SnackBar action, multiple candidates get a picker sheet
+  rather than a guess). Tapping an outline directly
+  (`_onMapClick`/`queryRenderedFeaturesInRect` against the
+  `other-regions-outline-fill` layer) does the same switch without waiting
+  for camera-idle. `_promptedRegionIds` (cleared on any real jump/switch)
+  stops the prompt from re-firing every idle tick while lingering near an
+  edge. `AuthorScreen` has its own near-identical version of this — see that
+  entry for the one real difference (it can't swap its own live basemap).
 - `lib/screens/region_picker_screen.dart` — full-screen area picker
   (replaced an app-bar dropdown that got cramped once downloaded regions
   piled up alongside the bundled ones).
@@ -429,6 +478,69 @@ from-scratch, staged system:
   already guarantees old data is never lost even if a merge fails from
   running out of space partway through).
 
+## World basemap (added this session)
+
+Before this, zooming/panning past a region's real tile coverage (any
+downloaded region below zoom 10, or the bundled basemap outside its own
+extract bbox) showed nothing but the style's flat grey `background` layer
+— fine as a hard floor, but bad for actually finding your way to another
+downloaded area (see `BrowseMapScreen`/`AuthorScreen`'s cross-region
+awareness above, which this basemap makes legible rather than just "grey
+with an outline on it").
+
+- **`assets/map/world.pmtiles`** — a whole-world, low-zoom (z0-6) Protomaps
+  vector-tile pyramid, built once by `tools/build_world_basemap.dart` (a
+  standalone Dart script — `dart run tools/build_world_basemap.dart` from
+  the repo root — using the same `PmTilesWriter`/`protomapsTileUrl` the app
+  itself uses for downloading a region, just for the whole planet instead
+  of one bbox). Bundled as a single ~61MB file, copied on first run exactly
+  like `route_graph.sqlite` (single `rootBundle.load`, no chunking — see
+  `OfflineMap._copyWorld`/`_worldBytes`; only the much-larger bundled
+  basemap (`southwest_bc.pmtiles`, ~196MB) needs the 14-part chunked copy).
+- **Rendered as a second, always-present source** in `style.json`
+  (`"world"`, pointing at `world.pmtiles`) with two new layers
+  (`world_earth`/`world_water`) inserted directly after `background` and
+  before the existing `earth`/`water` layers — so wherever the *current*
+  region's own pmtiles has real data, its `earth`/`water` layers paint
+  fully over the world layer underneath (no visual seam); wherever it
+  doesn't, the world layer's coastline/landmass shapes show through instead
+  of the flat background. `OfflineMap._buildStyle`/`_buildOnline` both call
+  `_ensureWorldBasemap()` (alongside the existing `_ensureGlyphs()`) so this
+  works for every style variant, including the download screen's online
+  preview.
+- **MapLibre overzooms the z6 tiles automatically** for any camera zoom
+  beyond 6 (same mechanism already relied on for the regional pmtiles' zoom
+  15 data being usable at zoom 18 — see `kRegionMaxZoom`'s doc in
+  `config.dart`) — no explicit zoom-range handling was needed in the style
+  for "still show *something* at zoom 8+ outside any real coverage," it
+  just falls out of how vector tile sources already behave past their
+  declared maxzoom.
+- **The real lesson: don't trust a small sample for vector-tile byte
+  size.** Before building anything, a small stratified sample (8 tiles per
+  zoom level) predicted a z0-7 world pyramid at ~37MB. The real, fully-built
+  archive came back at ~267MB (z7 alone ~206MB) — Protomaps' basemap carries
+  far more real coastline/landcover detail at zoom 3-7 than a handful of
+  samples caught (low zoom tiles cram a lot of simplified-but-real
+  complexity into few tiles; z1/z2 tiles alone measured 50-100KB+ each).
+  z0-6 was measured directly from the real built file (~61MB, not
+  estimated) before being accepted — if this pyramid is ever rebuilt
+  deeper, measure the *actual* output size the same way, the sample-based
+  estimate is not trustworthy for this kind of data. (This mirrors, and
+  reinforces, the project's existing "measure a small sample before
+  bundling" rule from the Jakarta/Tangerang diagnostic data below — the
+  difference here is that even the *sample itself* was misleading, not just
+  "no sample taken at all.")
+- z8+ was not just skipped for budget reasons — Protomaps' basemap starts
+  including road/building/place-label detail around there, so the *same*
+  pyramid balloons into the hundreds of MB regardless of how carefully it's
+  measured. Not worth chasing a deeper bundled world layer without a
+  fundamentally different approach (e.g. PMTiles content-level dedup, which
+  this project's hand-rolled `PmTilesWriter` deliberately doesn't do yet —
+  see its header comment — likely the single biggest lever for a
+  much-larger world archive, given how repetitive open-ocean tiles are, but
+  real engineering work against the same hand-rolled binary format the
+  **PMTiles tile reuse & region merge** section above already warns about).
+
 ## Hard-won gotchas (don't re-discover these)
 
 - **Screen-pixel vs logical-pixel mismatch**: `toScreenLocation`,
@@ -495,8 +607,11 @@ from-scratch, staged system:
 - **MapLibre's `animateCamera` does a Mapbox-style "flyTo" on Android for any
   long-distance + zoom-changing jump — it zooms OUT mid-transition** (an arc
   effect, inherited from Mapbox GL's algorithm). If the flight dips below
-  wherever the offline data floor is (`BaseMap`'s `minMaxZoomPreference`
-  starts at zoom 10; no tiles below it), you get real black frames — this
+  wherever the offline data floor is (`BaseMap`'s `minZoom`, `10` by default
+  — see **World basemap** above for why dipping below it is now a real
+  coastline/landmass layer rather than a black frame on the screens that
+  lower it to `2`, but still worth avoiding an unnecessary flight-arc for),
+  you get real black frames on any screen still at the default floor — this
   bit the search "jump to result" feature (fine on GPS recenter, which never
   changes zoom/never moves far). Fix: `jumpCamera()` in
   `map_search_bar.dart` splits it into an instant `moveCamera` reposition
@@ -624,9 +739,10 @@ from-scratch, staged system:
   big now": ~281MB baseline (basemap + engine + native libs, already present
   before this cycle) → +1MB (streets.sqlite) → +131MB (route_graph.sqlite,
   bundled regions) → +17MB/+10MB (Jakarta/Tangerang route diagnostic data)
-  → +1MB (Jakarta/Tangerang street diagnostic data) → **~337MB current**.
-  Route graph geometry (not street names, not the basemap) is by far the
-  biggest line item — keep that in mind before bundling more of it.
+  → +1MB (Jakarta/Tangerang street diagnostic data) → ~337MB →
+  +61MB (`world.pmtiles`, see **World basemap** above) → **~398MB current**.
+  Route graph geometry (not street names, not the basemap) is still by far
+  the biggest line item — keep that in mind before bundling more of it.
 
 ## Efficiency / working-agreement notes (the user has explicitly asked to minimize token spend)
 
