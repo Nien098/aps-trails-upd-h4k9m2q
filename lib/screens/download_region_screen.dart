@@ -1,3 +1,6 @@
+import 'dart:convert';
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:maplibre_gl/maplibre_gl.dart';
@@ -96,10 +99,11 @@ class _DownloadRegionScreenState extends State<DownloadRegionScreen> {
       _showBlocking('Estimating size…');
       final estBytes = await RegionDownloader().estimateBytes(w, s, e, n);
       final tiles = RegionDownloader.tilesFor(w, s, e, n).length;
+      final suggestedName = await _suggestName(c, b);
       if (mounted) Navigator.pop(context); // close "estimating"
       if (!mounted) return;
 
-      final name = await _askConfirm(estBytes, tiles);
+      final name = await _askConfirm(estBytes, tiles, suggestedName);
       if (name == null) return;
 
       final id = 'dl_${DateTime.now().millisecondsSinceEpoch}';
@@ -157,8 +161,92 @@ class _DownloadRegionScreenState extends State<DownloadRegionScreen> {
     }
   }
 
-  Future<String?> _askConfirm(int estBytes, int tiles) {
-    final controller = TextEditingController(text: 'My area');
+  /// Best-effort placeholder name for the naming field — the dominant place
+  /// label (city/town, falling back to region/country) already rendered on
+  /// the live preview map within [bounds], so the author can just accept it,
+  /// tweak it ("Tangerang Trip"), or clear it and type their own instead of
+  /// always starting from a generic "My area". Returns null (leaving the
+  /// generic default) if nothing usable is found — a rural/unlabeled area,
+  /// or a query failure, are both fine to just fall through silently for.
+  ///
+  /// Tries `places_locality` first (the actual city/town labels — see
+  /// assets/style/style.json), then `places_region`, then `places_country`,
+  /// stopping at the first tier with any results; picks the candidate with
+  /// the highest `population_rank` (Protomaps' place-importance field —
+  /// higher is bigger/more prominent) as "the" dominant place, breaking ties
+  /// by whichever is closest to the bbox's center.
+  Future<String?> _suggestName(
+      MapLibreMapController c, LatLngBounds bounds) async {
+    try {
+      final rect = await _screenRectForBounds(c, bounds);
+      final center = LatLng(
+        (bounds.southwest.latitude + bounds.northeast.latitude) / 2,
+        (bounds.southwest.longitude + bounds.northeast.longitude) / 2,
+      );
+      for (final layer in const ['places_locality', 'places_region', 'places_country']) {
+        final raw = await c.queryRenderedFeaturesInRect(rect, [layer], null);
+        String? best;
+        double? bestRank;
+        double? bestDist;
+        for (final f in raw) {
+          final feature = f is String ? jsonDecode(f) : f;
+          if (feature is! Map) continue;
+          final props =
+              (feature['properties'] as Map?)?.cast<String, dynamic>() ?? const {};
+          final name = (props['name:en'] ?? props['pgf:name'] ?? props['name'])
+              as String?;
+          if (name == null || name.trim().isEmpty) continue;
+          final rank = (props['population_rank'] as num?)?.toDouble() ?? 0;
+          double dist = 0;
+          final geom = feature['geometry'];
+          if (geom is Map && geom['type'] == 'Point') {
+            final coords = geom['coordinates'];
+            if (coords is List && coords.length >= 2) {
+              final lon = (coords[0] as num).toDouble();
+              final lat = (coords[1] as num).toDouble();
+              dist = math.sqrt(
+                  math.pow(lat - center.latitude, 2) + math.pow(lon - center.longitude, 2));
+            }
+          }
+          final better = best == null ||
+              rank > bestRank! ||
+              (rank == bestRank && dist < bestDist!);
+          if (better) {
+            best = name.trim();
+            bestRank = rank;
+            bestDist = dist;
+          }
+        }
+        if (best != null) return best;
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Same bbox-to-screen-pixel-Rect conversion as
+  /// TrailRouter._screenRectForBounds — see that method's doc for why
+  /// `toScreenLocation` is used instead of `MediaQuery` (device pixels vs
+  /// logical pixels; `queryRenderedFeaturesInRect` needs the former).
+  Future<Rect> _screenRectForBounds(
+      MapLibreMapController c, LatLngBounds bounds) async {
+    final corners = await Future.wait([
+      c.toScreenLocation(bounds.northeast),
+      c.toScreenLocation(bounds.southwest),
+      c.toScreenLocation(
+          LatLng(bounds.northeast.latitude, bounds.southwest.longitude)),
+      c.toScreenLocation(
+          LatLng(bounds.southwest.latitude, bounds.northeast.longitude)),
+    ]);
+    final xs = corners.map((p) => p.x.toDouble());
+    final ys = corners.map((p) => p.y.toDouble());
+    return Rect.fromLTRB(
+        xs.reduce(math.min), ys.reduce(math.min), xs.reduce(math.max), ys.reduce(math.max));
+  }
+
+  Future<String?> _askConfirm(int estBytes, int tiles, String? suggestedName) {
+    final controller = TextEditingController(text: suggestedName ?? 'My area');
     final mb = (estBytes / 1e6).toStringAsFixed(estBytes < 1e7 ? 1 : 0);
     return showDialog<String>(
       context: context,
@@ -191,7 +279,7 @@ class _DownloadRegionScreenState extends State<DownloadRegionScreen> {
             onPressed: () => Navigator.pop(
                 ctx,
                 controller.text.trim().isEmpty
-                    ? 'My area'
+                    ? (suggestedName ?? 'My area')
                     : controller.text.trim()),
             child: const Text('Download'),
           ),
