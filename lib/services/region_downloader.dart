@@ -10,6 +10,7 @@ import '../config.dart';
 import '../models/region.dart';
 import 'crash_log.dart';
 import 'native_bridge.dart';
+import 'pmtiles_ids.dart';
 import 'pmtiles_reader.dart';
 import 'pmtiles_writer.dart';
 import 'route_graph_store.dart';
@@ -71,6 +72,16 @@ class RegionDownloader {
     }
     return tiles;
   }
+
+  /// Plain axis-aligned rectangle overlap test — used to decide which
+  /// already-downloaded archives are worth checking for reusable tiles
+  /// before fetching a new area, and (later) to detect merge-worthy
+  /// downloaded regions.
+  static bool _bboxesOverlap(
+    double aWest, double aSouth, double aEast, double aNorth,
+    double bWest, double bSouth, double bEast, double bNorth,
+  ) =>
+      aWest < bEast && bWest < aEast && aSouth < bNorth && bSouth < aNorth;
 
   /// Estimates the download size (bytes) by sampling a spread of tiles.
   Future<int> estimateBytes(
@@ -195,6 +206,60 @@ class RegionDownloader {
     }
   }
 
+  /// Every already-on-disk archive whose bbox overlaps
+  /// [west,south,east,north], opened read-only for tile reuse — this
+  /// region's own current file first (if [selfOutPath] exists; most
+  /// authoritative, since it's exactly what's being refreshed), then every
+  /// other downloaded region that overlaps, then the bundled map last (the
+  /// broadest/lowest-priority source — a downloaded region is more likely
+  /// to be current for its own area). A candidate that fails to open
+  /// (corrupt/foreign file) is silently dropped, not surfaced as an error —
+  /// missing out on reuse for one bad file should never block a download.
+  Future<List<PmTilesReader>> _reuseCandidates({
+    required String selfId,
+    required String selfOutPath,
+    required double west,
+    required double south,
+    required double east,
+    required double north,
+  }) async {
+    final docs = await getApplicationDocumentsDirectory();
+    final candidates = <PmTilesReader>[];
+
+    if (File(selfOutPath).existsSync()) {
+      try {
+        candidates.add(await PmTilesReader.open(selfOutPath));
+      } catch (_) {}
+    }
+
+    for (final r in userRegions) {
+      if (r.id == selfId) continue;
+      if (!_bboxesOverlap(west, south, east, north, r.west, r.south, r.east, r.north)) {
+        continue;
+      }
+      final path = '${docs.path}/map/${r.id}.pmtiles';
+      if (!File(path).existsSync()) continue;
+      try {
+        candidates.add(await PmTilesReader.open(path));
+      } catch (_) {}
+    }
+
+    final bundledPath = '${docs.path}/map/$kMapAsset.pmtiles';
+    if (File(bundledPath).existsSync()) {
+      try {
+        final reader = await PmTilesReader.open(bundledPath);
+        if (_bboxesOverlap(
+            west, south, east, north, reader.west, reader.south, reader.east, reader.north)) {
+          candidates.add(reader);
+        } else {
+          await reader.close();
+        }
+      } catch (_) {}
+    }
+
+    return candidates;
+  }
+
   Future<Region?> _downloadInner({
     required String id,
     required String name,
@@ -209,24 +274,19 @@ class RegionDownloader {
   }) async {
     final writer = await PmTilesWriter.create(tempPath);
 
-    // Stage 1 of tile reuse: if a region already exists at outPath — an
-    // "Update this area" re-download reusing its existing id (see
-    // home_screen.dart's _updateArea) — read whatever tiles it already has
-    // instead of re-fetching every one from the network again. Strictly
-    // read-only against the OLD file: nothing here writes to or deletes
-    // outPath, since the new archive is only ever assembled at a staging
-    // path and atomically renamed over it by PmTilesWriter.finish(),
-    // exactly as before this existed. A reader that fails to open (corrupt
-    // or foreign file) just means "nothing to reuse" — never aborts the
-    // update over it.
-    PmTilesReader? oldReader;
-    if (File(outPath).existsSync()) {
-      try {
-        oldReader = await PmTilesReader.open(outPath);
-      } catch (_) {
-        oldReader = null;
-      }
-    }
+    // Tile reuse: read whatever tiles already exist somewhere on disk
+    // instead of re-fetching them from the network — this region's own
+    // current file (an "Update this area" re-download reusing its existing
+    // id, see home_screen.dart's _updateArea; most authoritative, checked
+    // first), every other downloaded region whose bbox overlaps this one,
+    // and the bundled map. Strictly read-only against every candidate file:
+    // nothing here writes to or deletes any of them, since the new archive
+    // is only ever assembled at a staging path and atomically renamed over
+    // outPath by PmTilesWriter.finish(), exactly as before this existed. A
+    // candidate that fails to open (corrupt/foreign file) is just dropped
+    // — never aborts the download over it.
+    final candidates = await _reuseCandidates(
+        selfId: id, selfOutPath: outPath, west: west, south: south, east: east, north: north);
 
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 20);
     var done = 0;
@@ -241,19 +301,33 @@ class RegionDownloader {
     var totalSteps = 4;
     try {
       var toFetch = tiles;
-      if (oldReader != null) {
+      if (candidates.isNotEmpty) {
+        // Presence sets built once per candidate (directory-only — cheap,
+        // never touches the multi-hundred-MB tile-data region) rather than
+        // one file-seek per tile per candidate.
+        final idSets = [
+          for (final c in candidates) (await c.listTileIds()).toSet(),
+        ];
         toFetch = [];
         for (final t in tiles) {
           if (_cancelled) break;
-          final existing = await oldReader.getTile(t[0], t[1], t[2]);
-          if (existing != null) {
-            await writer.addTile(t[0], t[1], t[2], existing);
+          final tileId = zxyToTileId(t[0], t[1], t[2]);
+          Uint8List? bytes;
+          for (var ci = 0; ci < candidates.length && bytes == null; ci++) {
+            if (idSets[ci].contains(tileId)) {
+              bytes = await candidates[ci].getTile(t[0], t[1], t[2]);
+            }
+          }
+          if (bytes != null) {
+            await writer.addTile(t[0], t[1], t[2], bytes);
             done++;
           } else {
             toFetch.add(t);
           }
         }
-        await oldReader.close();
+        for (final c in candidates) {
+          await c.close();
+        }
         onProgress?.call(DownloadProgress(done, tiles.length, writer.byteCount,
             step: 1, totalSteps: totalSteps));
       }
