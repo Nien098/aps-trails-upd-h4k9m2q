@@ -7,6 +7,7 @@ import 'package:maplibre_gl/maplibre_gl.dart';
 import '../models/bookmark.dart';
 import '../models/region.dart';
 import '../services/bookmark_layer.dart';
+import '../services/boundary_layer.dart';
 import '../services/search_service.dart';
 import '../services/trail_store.dart';
 import '../widgets/base_map.dart';
@@ -37,6 +38,7 @@ class _BrowseMapScreenState extends State<BrowseMapScreen> {
   MapLibreMapController? _c;
   bool _searchOpen = false;
   BookmarkLayer? _bookmarkLayer;
+  BoundaryLayer? _regionOutline;
 
   /// Set just before a basemap-swapping jump (see [_goTo]) so the freshly
   /// remounted [BaseMap] opens on the searched spot instead of the new
@@ -50,12 +52,51 @@ class _BrowseMapScreenState extends State<BrowseMapScreen> {
     _c = c;
     _bookmarkLayer = BookmarkLayer(c);
     _bookmarkLayer!.listen(_onBookmarkTapped);
+    // Faint, no-fill outline — deliberately styled differently from
+    // AuthorScreen's generation-boundary tool (which uses this same class
+    // with its default teal fill) since this one is purely informational,
+    // not an active editing target.
+    _regionOutline = BoundaryLayer(
+      c,
+      id: 'region-outline',
+      lineColor: '#757575',
+      fillOpacity: 0,
+      lineWidth: 1.5,
+      lineDasharray: const [4, 3],
+    );
   }
 
   /// Bookmark markers use the circle/symbol annotation API (see
   /// [BookmarkLayer]), which — like [AuthorScreen]'s cue markers — needs the
   /// style loaded before it'll draw, not just the controller created.
-  Future<void> _onStyleLoaded() => _loadBookmarks();
+  Future<void> _onStyleLoaded() async {
+    await _loadBookmarks();
+    await _drawRegionOutline();
+  }
+
+  /// Outlines the active region's real download bbox — only meaningful for
+  /// a *downloaded* region (its own separate, genuinely bounded pmtiles
+  /// file); the bundled basemap covers ~100km as one file, so an outline for
+  /// it wouldn't mark a boundary anyone would actually reach by panning.
+  /// This is the fix for "the map looks like it covers more area than it
+  /// actually has data for" — panning past a downloaded region's real edge
+  /// doesn't auto-swap back to the bundled map the way a search/bookmark
+  /// jump does, so without this there's no visual cue you've left real data
+  /// behind (see BrowseMapScreen's `_goTo`).
+  Future<void> _drawRegionOutline() async {
+    if (!_region.isDownloaded) {
+      await _regionOutline?.setPolygon(null);
+      return;
+    }
+    final r = _region;
+    await _regionOutline?.ensure();
+    await _regionOutline?.setPolygon([
+      LatLng(r.north, r.west),
+      LatLng(r.north, r.east),
+      LatLng(r.south, r.east),
+      LatLng(r.south, r.west),
+    ]);
+  }
 
   /// (Re)loads bookmarks onto the map, filtered to whatever's reachable on
   /// the currently-loaded basemap — same reasoning as

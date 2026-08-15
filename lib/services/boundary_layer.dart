@@ -7,8 +7,21 @@ import 'package:maplibre_gl/maplibre_gl.dart';
 /// Structured the same way as [RouteLayer] (a single GeoJSON source,
 /// live-updated via `setGeoJsonSource`) — see lib/services/route_layer.dart.
 class BoundaryLayer {
-  BoundaryLayer(this.controller, {String id = 'gen-boundary'})
-      : _sourceId = id,
+  /// [lineColor]/[fillColor]/[fillOpacity]/[lineWidth]/[lineDasharray] let a
+  /// second instance draw a differently-styled outline for a different
+  /// purpose (see [BrowseMapScreen]'s downloaded-region boundary, a fainter
+  /// no-fill outline reusing this same draw/clear machinery rather than
+  /// duplicating it) without changing the generation-boundary tool's own
+  /// look.
+  BoundaryLayer(
+    this.controller, {
+    String id = 'gen-boundary',
+    this.lineColor = '#3E8FB0',
+    this.fillColor = '#3E8FB0',
+    this.fillOpacity = 0.15,
+    this.lineWidth = 2.5,
+    this.lineDasharray = const [2, 2],
+  })  : _sourceId = id,
         _fillLayerId = '$id-fill',
         _lineLayerId = '$id-line';
 
@@ -16,6 +29,11 @@ class BoundaryLayer {
   final String _sourceId;
   final String _fillLayerId;
   final String _lineLayerId;
+  final String lineColor;
+  final String fillColor;
+  final double fillOpacity;
+  final double lineWidth;
+  final List<double> lineDasharray;
 
   bool _ready = false;
 
@@ -38,9 +56,9 @@ class BoundaryLayer {
     await controller.addFillLayer(
       _sourceId,
       _fillLayerId,
-      const FillLayerProperties(
-        fillColor: '#3E8FB0',
-        fillOpacity: 0.15,
+      FillLayerProperties(
+        fillColor: fillColor,
+        fillOpacity: fillOpacity,
       ),
       enableInteraction: false,
       belowLayerId: belowId,
@@ -48,10 +66,10 @@ class BoundaryLayer {
     await controller.addLineLayer(
       _sourceId,
       _lineLayerId,
-      const LineLayerProperties(
-        lineColor: '#3E8FB0',
-        lineWidth: 2.5,
-        lineDasharray: [2, 2],
+      LineLayerProperties(
+        lineColor: lineColor,
+        lineWidth: lineWidth,
+        lineDasharray: lineDasharray,
       ),
       enableInteraction: false,
       belowLayerId: belowId,
