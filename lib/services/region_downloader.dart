@@ -10,6 +10,7 @@ import '../config.dart';
 import '../models/region.dart';
 import 'crash_log.dart';
 import 'native_bridge.dart';
+import 'pmtiles_reader.dart';
 import 'pmtiles_writer.dart';
 import 'route_graph_store.dart';
 import 'search_service.dart';
@@ -207,6 +208,26 @@ class RegionDownloader {
     void Function(DownloadProgress)? onProgress,
   }) async {
     final writer = await PmTilesWriter.create(tempPath);
+
+    // Stage 1 of tile reuse: if a region already exists at outPath — an
+    // "Update this area" re-download reusing its existing id (see
+    // home_screen.dart's _updateArea) — read whatever tiles it already has
+    // instead of re-fetching every one from the network again. Strictly
+    // read-only against the OLD file: nothing here writes to or deletes
+    // outPath, since the new archive is only ever assembled at a staging
+    // path and atomically renamed over it by PmTilesWriter.finish(),
+    // exactly as before this existed. A reader that fails to open (corrupt
+    // or foreign file) just means "nothing to reuse" — never aborts the
+    // update over it.
+    PmTilesReader? oldReader;
+    if (File(outPath).existsSync()) {
+      try {
+        oldReader = await PmTilesReader.open(outPath);
+      } catch (_) {
+        oldReader = null;
+      }
+    }
+
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 20);
     var done = 0;
     final failed = <List<int>>[];
@@ -219,11 +240,28 @@ class RegionDownloader {
     // point (see [DownloadProgress]'s doc).
     var totalSteps = 4;
     try {
+      var toFetch = tiles;
+      if (oldReader != null) {
+        toFetch = [];
+        for (final t in tiles) {
+          if (_cancelled) break;
+          final existing = await oldReader.getTile(t[0], t[1], t[2]);
+          if (existing != null) {
+            await writer.addTile(t[0], t[1], t[2], existing);
+            done++;
+          } else {
+            toFetch.add(t);
+          }
+        }
+        await oldReader.close();
+        onProgress?.call(DownloadProgress(done, tiles.length, writer.byteCount,
+            step: 1, totalSteps: totalSteps));
+      }
       // Fetch in small concurrent batches to keep memory + sockets bounded.
       const batch = 6;
-      for (var i = 0; i < tiles.length; i += batch) {
+      for (var i = 0; i < toFetch.length; i += batch) {
         if (_cancelled) break;
-        final slice = tiles.sublist(i, math.min(i + batch, tiles.length));
+        final slice = toFetch.sublist(i, math.min(i + batch, toFetch.length));
         final results = await Future.wait(
             slice.map((t) => _fetch(client, t[0], t[1], t[2])));
         for (var j = 0; j < slice.length; j++) {
