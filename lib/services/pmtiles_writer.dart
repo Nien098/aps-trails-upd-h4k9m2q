@@ -3,6 +3,8 @@ import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'pmtiles_ids.dart';
+
 /// Writes a PMTiles v3 archive from downloaded MVT tiles, so a downloaded
 /// region is byte-compatible with the same offline pipeline (style.json,
 /// routing, glyphs) the bundled maps use.
@@ -30,7 +32,7 @@ class PmTilesWriter {
   Future<void> addTile(int z, int x, int y, List<int> bytes) async {
     if (bytes.isEmpty) return;
     await _temp.writeFrom(bytes);
-    _entries.add(_Entry(_zxyToTileId(z, x, y), _offset, bytes.length));
+    _entries.add(_Entry(zxyToTileId(z, x, y), _offset, bytes.length));
     _offset += bytes.length;
   }
 
@@ -275,31 +277,6 @@ class PmTilesWriter {
     b.addByte(v & 0x7f);
   }
 
-  /// ZXY → PMTiles Hilbert tile id.
-  static int _zxyToTileId(int z, int x, int y) {
-    var acc = 0;
-    for (var t = 0; t < z; t++) {
-      acc += (1 << t) * (1 << t);
-    }
-    final n = 1 << z;
-    var rx = 0, ry = 0, d = 0;
-    var tx = x, ty = y;
-    for (var s = n >> 1; s > 0; s >>= 1) {
-      rx = (tx & s) > 0 ? 1 : 0;
-      ry = (ty & s) > 0 ? 1 : 0;
-      d += s * s * ((3 * rx) ^ ry);
-      if (ry == 0) {
-        if (rx == 1) {
-          tx = s - 1 - tx;
-          ty = s - 1 - ty;
-        }
-        final tmp = tx;
-        tx = ty;
-        ty = tmp;
-      }
-    }
-    return acc + d;
-  }
 }
 
 class _Entry {
