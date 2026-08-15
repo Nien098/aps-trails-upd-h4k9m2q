@@ -135,10 +135,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     return added;
   }
 
-  void _toast(String msg) {
+  void _toast(String msg, {Duration duration = const Duration(seconds: 4)}) {
     if (mounted) {
       ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(msg)));
+          .showSnackBar(SnackBar(content: Text(msg), duration: duration));
     }
   }
 
@@ -722,13 +722,21 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     // download() also (soft-)fetches street/route-graph data for the area —
     // download_region_screen.dart's brand-new-download flow already toasts
     // these; the update flow didn't, so a failure here went completely
-    // unnoticed (the bug that motivated this).
+    // unnoticed (the bug that motivated this). Longer duration: up to two
+    // of these can queue back-to-back after the one above, and the default
+    // 4s was reported as too short to actually read one (see
+    // download_region_screen.dart's matching fix for the same complaint).
+    const warningDuration = Duration(seconds: 7);
     final streetsWarning = RegionDownloader.coverageWarning(
         'Street search', downloader.streetsCoverage);
-    if (streetsWarning != null) _toast(streetsWarning);
+    if (streetsWarning != null) {
+      _toast(streetsWarning, duration: warningDuration);
+    }
     final routeWarning = RegionDownloader.coverageWarning(
         'Offline route planning', downloader.routeGraphCoverage);
-    if (routeWarning != null) _toast(routeWarning);
+    if (routeWarning != null) {
+      _toast(routeWarning, duration: warningDuration);
+    }
     if (mounted) setState(() {});
   }
 

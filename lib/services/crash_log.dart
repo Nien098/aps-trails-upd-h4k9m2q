@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 
 /// A minimal, local-only crash/error log — this app has no cloud backend and
 /// no crash-reporting SDK (Crashlytics/Sentry), so without this there is
@@ -44,6 +45,29 @@ class CrashLog {
       return await file.readAsString();
     } catch (_) {
       return '';
+    }
+  }
+
+  /// Writes the log to a temp file and opens the OS share sheet — same
+  /// pattern as [TrailShare.shareTrail], so a walker (or whoever's
+  /// debugging a hard-to-reproduce report on their behalf) can send
+  /// diagnostics over WhatsApp/email/etc. without a USB cable or dev tools.
+  /// Returns false (no share sheet opened) when there's nothing logged yet.
+  static Future<bool> share() async {
+    try {
+      final contents = await read();
+      if (contents.isEmpty) return false;
+      final dir = await getTemporaryDirectory();
+      final file = File('${dir.path}/trailguide_diagnostics.txt');
+      await file.writeAsString(contents);
+      await SharePlus.instance.share(ShareParams(
+        files: [XFile(file.path, mimeType: 'text/plain')],
+        subject: 'TrailGuide diagnostics log',
+        text: 'Diagnostic log from TrailGuide.',
+      ));
+      return true;
+    } catch (_) {
+      return false;
     }
   }
 

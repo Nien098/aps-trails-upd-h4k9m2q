@@ -8,6 +8,7 @@ import 'package:path_provider/path_provider.dart';
 
 import '../config.dart';
 import '../models/region.dart';
+import 'crash_log.dart';
 import 'native_bridge.dart';
 import 'pmtiles_writer.dart';
 import 'route_graph_store.dart';
@@ -286,9 +287,15 @@ class RegionDownloader {
               step: finalizeStep + 1, totalSteps: totalSteps)));
       await SearchService.instance.addStreets(id, result.items);
       _streetsCoverage = result.coverage;
-    } catch (_) {
+    } catch (e, st) {
       // Soft-fail — street search for this region just won't work until a
-      // re-download succeeds; the map itself is unaffected.
+      // re-download succeeds; the map itself is unaffected. Logged (not just
+      // swallowed) so a real bug here is diagnosable from a real device's
+      // crash log instead of vanishing into "not available" with no trace —
+      // exactly what made an earlier version of this bug (an uncaught
+      // exception on malformed Overpass geometry, since fixed in
+      // _dedupeStreets) invisible.
+      CrashLog.log('Street-name fetch', e, st);
       _streetsCoverage = 0;
     }
 
@@ -300,8 +307,10 @@ class RegionDownloader {
               step: finalizeStep + 2, totalSteps: totalSteps)));
       await RouteGraphStore.instance.addWays(id, result.items);
       _routeGraphCoverage = result.coverage;
-    } catch (_) {
-      // Soft-fail — same contract as streetsCoverage above.
+    } catch (e, st) {
+      // Soft-fail — same contract (and same logging reasoning) as
+      // streetsCoverage above.
+      CrashLog.log('Route-graph fetch', e, st);
       _routeGraphCoverage = 0;
     }
 
@@ -545,31 +554,44 @@ class RegionDownloader {
     'proposed', 'construction', 'razed', 'abandoned',
   };
 
+  /// One malformed element must never cost the whole batch — a dense/huge
+  /// area's Overpass response (e.g. Tangerang-scale) is exactly where a
+  /// single unresolved node reference (`geom` containing a `null` entry
+  /// instead of a real point — real, documented Overpass behavior under
+  /// load, not hypothetical) is most likely, and this method previously had
+  /// no guard against it at all: one bad element threw an uncaught
+  /// exception straight out of [_fetchStreets], discarding everything
+  /// already successfully fetched and reporting "not available" instead of
+  /// whatever real (possibly large) coverage had actually been gathered.
   static List<({String name, double lat, double lon})> _dedupeStreets(
       List<Map> elements) {
     final bestLen = <String, double>{};
     final bestPoint = <String, (double, double)>{};
     for (final el in elements) {
-      if (el['type'] != 'way') continue;
-      final tags = (el['tags'] as Map?)?.cast<String, dynamic>() ?? const {};
-      final name = (tags['name'] as String?)?.trim();
-      final highway = tags['highway'] as String?;
-      final geom = (el['geom'] as List?)?.cast<Map>();
-      if (name == null || name.isEmpty || geom == null || geom.isEmpty) continue;
-      if (_excludedHighway.contains(highway)) continue;
-      var length = 0.0;
-      for (var i = 0; i < geom.length - 1; i++) {
-        final a = geom[i], b = geom[i + 1];
-        final dlat = ((b['lat'] as num) - (a['lat'] as num)) * 111320;
-        final dlon = ((b['lon'] as num) - (a['lon'] as num)) *
-            111320 *
-            math.cos((a['lat'] as num) * math.pi / 180);
-        length += math.sqrt(dlat * dlat + dlon * dlon);
-      }
-      if (length > (bestLen[name] ?? -1)) {
-        bestLen[name] = length;
-        final mid = geom[geom.length ~/ 2];
-        bestPoint[name] = ((mid['lat'] as num).toDouble(), (mid['lon'] as num).toDouble());
+      try {
+        if (el['type'] != 'way') continue;
+        final tags = (el['tags'] as Map?)?.cast<String, dynamic>() ?? const {};
+        final name = (tags['name'] as String?)?.trim();
+        final highway = tags['highway'] as String?;
+        final geom = (el['geom'] as List?)?.cast<Map>();
+        if (name == null || name.isEmpty || geom == null || geom.isEmpty) continue;
+        if (_excludedHighway.contains(highway)) continue;
+        var length = 0.0;
+        for (var i = 0; i < geom.length - 1; i++) {
+          final a = geom[i], b = geom[i + 1];
+          final dlat = ((b['lat'] as num) - (a['lat'] as num)) * 111320;
+          final dlon = ((b['lon'] as num) - (a['lon'] as num)) *
+              111320 *
+              math.cos((a['lat'] as num) * math.pi / 180);
+          length += math.sqrt(dlat * dlat + dlon * dlon);
+        }
+        if (length > (bestLen[name] ?? -1)) {
+          bestLen[name] = length;
+          final mid = geom[geom.length ~/ 2];
+          bestPoint[name] = ((mid['lat'] as num).toDouble(), (mid['lon'] as num).toDouble());
+        }
+      } catch (_) {
+        // Skip just this one way — see this method's doc.
       }
     }
     return [
@@ -616,21 +638,30 @@ class RegionDownloader {
     return 'trail';
   }
 
+  /// Same "one bad element can't cost the batch" reasoning as
+  /// [_dedupeStreets] — an unresolved node reference in `geom` (Overpass
+  /// returning `null` for a point it couldn't resolve, real behavior under
+  /// load) would otherwise throw here and discard the whole route-graph
+  /// fetch.
   static List<RouteWay> _classifyWays(List<Map> elements) {
     final ways = <RouteWay>[];
     for (final el in elements) {
-      if (el['type'] != 'way') continue;
-      final tags = (el['tags'] as Map?)?.cast<String, dynamic>() ?? const {};
-      final kind = _classifyWay(tags);
-      final geom = (el['geom'] as List?)?.cast<Map>();
-      if (kind == null || geom == null || geom.length < 2) continue;
-      ways.add((
-        kind: kind,
-        coords: [
-          for (final p in geom)
-            LatLng((p['lat'] as num).toDouble(), (p['lon'] as num).toDouble()),
-        ],
-      ));
+      try {
+        if (el['type'] != 'way') continue;
+        final tags = (el['tags'] as Map?)?.cast<String, dynamic>() ?? const {};
+        final kind = _classifyWay(tags);
+        final geom = (el['geom'] as List?)?.cast<Map>();
+        if (kind == null || geom == null || geom.length < 2) continue;
+        ways.add((
+          kind: kind,
+          coords: [
+            for (final p in geom)
+              LatLng((p['lat'] as num).toDouble(), (p['lon'] as num).toDouble()),
+          ],
+        ));
+      } catch (_) {
+        // Skip just this one way — see this method's doc.
+      }
     }
     return ways;
   }

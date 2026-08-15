@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import '../services/crash_log.dart';
 import '../services/native_bridge.dart';
 import '../services/settings.dart';
 import 'voice_settings_screen.dart';
@@ -275,9 +276,34 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   : 'Solid line.'),
             ),
           ),
+          const Divider(height: 40),
+          const Text('Diagnostics',
+              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 6),
+          const Text(
+              "If something goes wrong and you're helping track it down, "
+              'this sends a small local log of recent app errors — never '
+              'sent automatically, only when you tap this.',
+              style: TextStyle(fontSize: 14, color: Color(0xFF4A4A4A))),
+          const SizedBox(height: 12),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.bug_report_outlined),
+            title: const Text('Share diagnostics log'),
+            trailing: const Icon(Icons.ios_share),
+            onTap: _shareDiagnostics,
+          ),
         ],
       ),
     );
+  }
+
+  Future<void> _shareDiagnostics() async {
+    final shared = await CrashLog.share();
+    if (!shared && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('Nothing to share yet — no errors logged.')));
+    }
   }
 }
 

@@ -125,20 +125,32 @@ class _DownloadRegionScreenState extends State<DownloadRegionScreen> {
       // spot — same fix as re-running the download, so say so plainly
       // rather than leaving an inaccurate-looking map unexplained. Must
       // toast before popping — mounted goes false right after.
+      // Up to three of these can queue back-to-back (Flutter shows each
+      // SnackBar in a queued sequence, not overlapping) — the default 4s
+      // duration was too short to actually read one, let alone notice a
+      // later one arrived at all (reported directly: a coverage warning
+      // "didn't stay on screen long enough").
+      const warningDuration = Duration(seconds: 7);
       final missing = downloader.failedTileCount;
       if (missing > 0) {
-        _toast(missing == 1
-            ? '1 map tile failed to download — that spot may look a bit '
-                'off. Re-download this area if it matters.'
-            : '$missing map tiles failed to download — some spots may look '
-                'a bit off. Re-download this area if it matters.');
+        _toast(
+            missing == 1
+                ? '1 map tile failed to download — that spot may look a bit '
+                    'off. Re-download this area if it matters.'
+                : '$missing map tiles failed to download — some spots may '
+                    'look a bit off. Re-download this area if it matters.',
+            duration: warningDuration);
       }
       final streetsWarning = RegionDownloader.coverageWarning(
           'Street search', downloader.streetsCoverage);
-      if (streetsWarning != null) _toast(streetsWarning);
+      if (streetsWarning != null) {
+        _toast(streetsWarning, duration: warningDuration);
+      }
       final routeWarning = RegionDownloader.coverageWarning(
           'Offline route planning', downloader.routeGraphCoverage);
-      if (routeWarning != null) _toast(routeWarning);
+      if (routeWarning != null) {
+        _toast(routeWarning, duration: warningDuration);
+      }
       if (mounted) Navigator.pop(context, region.id);
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -247,10 +259,10 @@ class _DownloadRegionScreenState extends State<DownloadRegionScreen> {
     );
   }
 
-  void _toast(String msg) {
+  void _toast(String msg, {Duration duration = const Duration(seconds: 4)}) {
     if (mounted) {
       ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(msg)));
+          .showSnackBar(SnackBar(content: Text(msg), duration: duration));
     }
   }
 }
