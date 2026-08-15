@@ -1004,6 +1004,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             );
           }
           return ListView.separated(
+            // Bottom padding equal to the "New trail" FAB's footprint so the
+            // last row can scroll fully clear of it — without this, the
+            // FAB permanently covers that row's trailing 3-dot menu once
+            // you've scrolled to the end of the list, with no way to tap it.
+            padding: EdgeInsets.only(
+                bottom: 88 + MediaQuery.viewPaddingOf(context).bottom),
             itemCount: trails.length,
             separatorBuilder: (_, _) => const Divider(height: 1),
             itemBuilder: (context, i) {
