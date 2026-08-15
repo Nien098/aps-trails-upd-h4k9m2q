@@ -477,7 +477,7 @@ class RegionDownloader {
     if (DateTime.now().isAfter(deadline)) {
       return (elements: const <Map>[], attempted: 0, succeeded: 0);
     }
-    final elements = await _postOverpass(queryFor(s, w, n, e));
+    final elements = await _postOverpass(queryFor(s, w, n, e), deadline);
     if (elements != null) {
       return (elements: elements, attempted: 1, succeeded: 1);
     }
@@ -522,10 +522,25 @@ class RegionDownloader {
   /// this method's own retry logic, turns "one malformed element" into
   /// "this attempt found one fewer usable element" instead of a crash three
   /// call frames away.
-  static Future<List<Map>?> _postOverpass(String query) async {
+  ///
+  /// [deadline], when given, is checked before every attempt (including the
+  /// first) and before every backoff wait — without this, a single slow or
+  /// hanging cell's own up-to-3-attempt retry loop (each with its own 20s
+  /// connection timeout plus backoff, worst case ~90s+ if a bad-luck
+  /// stretch or an active rate-limit makes every attempt hang) runs to
+  /// completion regardless of the overall time budget. That's real, not
+  /// hypothetical: [_fetchCellAdaptive]'s own deadline check only fires
+  /// *between* calls to this method, so a request already in flight (or
+  /// deep in its retry loop) could still blow well past the intended
+  /// budget on its own — reported directly as a large/dense download
+  /// coming back with 0% coverage instead of whatever partial progress the
+  /// budget should have allowed.
+  static Future<List<Map>?> _postOverpass(String query, [DateTime? deadline]) async {
+    bool overBudget() => deadline != null && DateTime.now().isAfter(deadline);
     final client = HttpClient()..connectionTimeout = const Duration(seconds: 20);
     try {
       for (var attempt = 0; attempt <= 2; attempt++) {
+        if (overBudget()) return null;
         try {
           final req = await client
               .postUrl(Uri.parse('https://overpass-api.de/api/interpreter'));
@@ -549,6 +564,7 @@ class RegionDownloader {
         } catch (_) {
           if (attempt == 2) return null;
         }
+        if (overBudget()) return null;
         await Future.delayed(Duration(seconds: 3 * (attempt + 1)));
       }
       return null;
