@@ -5,6 +5,11 @@
       "type": "vector",
       "attribution": "© OpenStreetMap",
       "url": "pmtiles://file://__DOC__/map/__REGION__.pmtiles"
+    },
+    "world": {
+      "type": "vector",
+      "attribution": "© OpenStreetMap",
+      "url": "pmtiles://file://__DOC__/map/world.pmtiles"
     }
   },
   "layers": [
@@ -13,6 +18,26 @@
       "type": "background",
       "paint": {
         "background-color": "#cccccc"
+      }
+    },
+    {
+      "id": "world_earth",
+      "type": "fill",
+      "filter": ["==", "$type", "Polygon"],
+      "source": "world",
+      "source-layer": "earth",
+      "paint": {
+        "fill-color": "#e2dfda"
+      }
+    },
+    {
+      "id": "world_water",
+      "type": "fill",
+      "filter": ["==", "$type", "Polygon"],
+      "source": "world",
+      "source-layer": "water",
+      "paint": {
+        "fill-color": "#80deea"
       }
     },
     {

@@ -23,6 +23,7 @@ class OfflineMap {
 
   static Future<String>? _glyphsReady;
   static Future<void>? _bakedReady;
+  static Future<void>? _worldReady;
   static final Map<String, Future<String>> _styles = {};
   static Future<String>? _onlineStyle;
 
@@ -32,6 +33,7 @@ class OfflineMap {
 
   static Future<String> _buildStyle(Region region) async {
     final root = await _ensureGlyphs();
+    await _ensureWorldBasemap();
     if (!region.isDownloaded) await _ensureBakedBasemap();
     final template = await rootBundle.loadString('assets/style/style.json');
     final style = template
@@ -47,6 +49,7 @@ class OfflineMap {
 
   static Future<String> _buildOnline() async {
     final root = await _ensureGlyphs();
+    await _ensureWorldBasemap();
     final template = await rootBundle.loadString('assets/style/style.json');
     final style = template
         .replaceAll(
@@ -61,6 +64,27 @@ class OfflineMap {
 
   static const int _mapPartCount = 14;
   static const int _mapBytes = 205760133;
+
+  /// Small (single-file, unchunked — see route_graph.sqlite's copy pattern
+  /// in route_graph_store.dart for precedent at this size) whole-world,
+  /// low-zoom basemap — see tools/build_world_basemap.dart for how it's
+  /// built and why. Layered beneath every region's own pmtiles (style.json's
+  /// "world" source) so panning/zooming out of any bundled or downloaded
+  /// region's coverage shows real coastline/landmass shapes instead of the
+  /// flat background.
+  static const int _worldBytes = 60753026;
+
+  static Future<void> _ensureWorldBasemap() => _worldReady ??= _copyWorld();
+
+  static Future<void> _copyWorld() async {
+    final dir = await getApplicationDocumentsDirectory();
+    final dest = File('${dir.path}/map/world.pmtiles');
+    await dest.parent.create(recursive: true);
+    if (dest.existsSync() && dest.lengthSync() == _worldBytes) return;
+    final data = await rootBundle.load('assets/map/world.pmtiles');
+    final bytes = data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes);
+    await dest.writeAsBytes(bytes, flush: true);
+  }
 
   static Future<String> _ensureGlyphs() => _glyphsReady ??= _copyGlyphs();
 
