@@ -14,6 +14,7 @@ import '../models/trail.dart';
 import '../services/crash_log.dart';
 import '../services/cue_gen.dart';
 import '../services/geo.dart';
+import '../services/gps_filter.dart';
 import '../services/native_bridge.dart';
 import '../services/route_layer.dart';
 import '../services/settings.dart';
@@ -52,6 +53,26 @@ class _RecordTrailScreenState extends State<RecordTrailScreen> {
   LatLng? _last;
   double _meters = 0;
   DateTime? _startedAt;
+
+  /// Smooths raw GPS fixes live as they arrive — see [GpsKalmanFilter]'s doc
+  /// for why this exists (the old step-distance-only filter couldn't tell a
+  /// noisy fix from a real step, so forest/urban-canyon GPS multipath ended
+  /// up recorded as real sideways wander). Created from the first fix.
+  GpsKalmanFilter? _filter;
+
+  /// Quality counters for the post-walk note below — plain counts, nothing
+  /// surfaced live (the smoothing itself is meant to be fully automatic and
+  /// silent while walking).
+  int _fixCount = 0;
+  int _poorFixCount = 0;
+
+  /// A fix worse than this (metres) counts as "poor" for [_poorFixCount] —
+  /// roughly, worse than typical forest-canopy GPS accuracy.
+  static const double _poorAccuracyMeters = 20.0;
+
+  /// If more than this fraction of fixes were poor, the post-walk note
+  /// mentions it — see [_maybeShowSignalNote].
+  static const double _poorFixWarnFraction = 0.3;
   bool _stopping = false;
   bool _cleaning = false;
   String _status = 'Getting your location…';
@@ -96,7 +117,10 @@ class _RecordTrailScreenState extends State<RecordTrailScreen> {
     final r = widget.resume;
     if (r != null) {
       _path.addAll(r.path);
-      if (_path.isNotEmpty) _last = _path.last;
+      if (_path.isNotEmpty) {
+        _last = _path.last;
+        _lastRaw = _path.last;
+      }
       _meters = r.walkedMeters;
       _elevGain = r.elevGainMeters;
       _track.addAll(r.track);
@@ -304,15 +328,40 @@ class _RecordTrailScreenState extends State<RecordTrailScreen> {
         'walked:${w.walkedSinceAnchor.round()}m';
   }
 
+  /// Raw (unfiltered) last fix — kept separate from [_last] (the last
+  /// *filtered* point) purely so [_watchdog]'s stillness detection keeps
+  /// seeing exactly the same raw step distances it always has. The watchdog
+  /// is a separate safety subsystem (the "are you still there?" nudge); it
+  /// doesn't need or want GPS smoothing, just deliberately left untouched.
+  LatLng? _lastRaw;
+
   void _onPosition(Position pos) {
-    final here = LatLng(pos.latitude, pos.longitude);
+    final rawHere = LatLng(pos.latitude, pos.longitude);
+    final rawStep = _lastRaw == null ? null : metersBetween(_lastRaw!, rawHere);
+    _watchdog.update(rawHere, accuracy: pos.accuracy, stepMeters: rawStep);
+    _lastRaw = rawHere;
+
+    _fixCount++;
+    if (pos.accuracy > _poorAccuracyMeters) _poorFixCount++;
+
+    // Smooths this fix against the filter's running motion estimate,
+    // weighted by the fix's own reported accuracy — see GpsKalmanFilter's
+    // doc for why this (not the step-distance gate below) is what actually
+    // fixes GPS-noise wander. The filter seeds itself from the first fix
+    // automatically.
+    _filter ??= GpsKalmanFilter(rawHere);
+    final here = _filter!.update(pos);
+
     final step = _last == null ? null : metersBetween(_last!, here);
-    _watchdog.update(here, accuracy: pos.accuracy, stepMeters: step);
     final ele = pos.altitude != 0 ? pos.altitude : null;
     if (_last == null) {
       _path.add(here);
       _track.add(TrackPoint(here, _elapsedSec, ele: ele));
     } else {
+      // Coarse sanity backstop against a single pathological (teleport-style)
+      // fix — no longer the primary noise defense now that the filter above
+      // weighs every fix by its own reported accuracy instead of accepting
+      // or rejecting purely by distance.
       if (step! >= 2.5 && step <= 100) {
         _meters += step;
         _path.add(here);
@@ -372,8 +421,9 @@ class _RecordTrailScreenState extends State<RecordTrailScreen> {
       return;
     }
     setState(() => _cleaning = true);
-    final finalPath = await _cleanPath(_path);
-    final cues = suggestCues(finalPath);
+    final cleaned = await _cleanPath(_path);
+    final finalPath = cleaned.path;
+    final cues = suggestCues(finalPath, junctions: cleaned.junctions);
     final draft = Trail(
       name: _defaultName(),
       regionId: regionForPoint(finalPath.first).id,
@@ -390,7 +440,28 @@ class _RecordTrailScreenState extends State<RecordTrailScreen> {
       recordedStartedAt: _startedAt,
       recordedDurationSec: _elapsedSec,
     );
+    await _maybeShowSignalNote();
     if (mounted) Navigator.pop(context, draft);
+  }
+
+  /// One-time, informational-only note if GPS was consistently poor during
+  /// the walk — no decision required, just acknowledging it. The live
+  /// smoothing (see [GpsKalmanFilter]) already did what it could
+  /// automatically; this just sets expectations for a walk where the phone
+  /// itself was reporting meaningfully degraded accuracy for a real chunk of
+  /// the recording, rather than silently saying nothing.
+  Future<void> _maybeShowSignalNote() async {
+    if (_fixCount == 0 || _poorFixCount / _fixCount <= _poorFixWarnFraction) return;
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        content: const Text('Signal was weak for part of this walk.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('OK')),
+        ],
+      ),
+    );
   }
 
   /// Removes GPS jitter (Douglas–Peucker), then nudges each simplified anchor
@@ -403,12 +474,26 @@ class _RecordTrailScreenState extends State<RecordTrailScreen> {
   /// segment with a router guess. A per-point local snap can only pull a
   /// point a short, bounded distance toward what's actually mapped — it
   /// can never invent a detour, so the recorded shape is always preserved.
-  Future<List<LatLng>> _cleanPath(List<LatLng> raw) async {
+  ///
+  /// The input is now Kalman-smoothed (see [GpsKalmanFilter]) rather than
+  /// raw GPS, so this 8m Douglas-Peucker tolerance is simplifying an
+  /// already-clean line, not fighting per-fix jitter — left unchanged since
+  /// it's solving a different problem (point-density compression) than the
+  /// live filter does (noise removal).
+  ///
+  /// Also collects real trail-network junctions near each anchor (reusing
+  /// the camera position already paid for below) so [_stop] can pass them to
+  /// [suggestCues] for "stay straight" cues at forks — this was previously
+  /// always empty, silently dropping that cue type for every recorded trail.
+  Future<({List<LatLng> path, List<LatLng> junctions})> _cleanPath(List<LatLng> raw) async {
     final anchors = simplifyPath(raw, 8);
     final c = _c;
-    if (c == null || anchors.length < 2) return anchors;
+    if (c == null || anchors.length < 2) {
+      return (path: anchors, junctions: const <LatLng>[]);
+    }
     final router = TrailRouter(c);
     final out = <LatLng>[];
+    final junctions = <LatLng>[];
     for (final a in anchors) {
       // Bring the point into view so the trail/road network around it is
       // rendered and queryable (the router only sees on-screen features).
@@ -422,8 +507,13 @@ class _RecordTrailScreenState extends State<RecordTrailScreen> {
       if (out.isEmpty || metersBetween(out.last, snapped) >= 3) {
         out.add(snapped);
       }
+      // Costs a second graph build per anchor (snapPoint above already did
+      // one) — acceptable since anchor count here is post-simplification
+      // (a handful to a few dozen points), and this all happens during the
+      // "Cleaning up the trail…" spinner, not live during the walk.
+      junctions.addAll(await router.junctionsNear([a], await router.visibleViewportRect()));
     }
-    return out.length >= 2 ? out : anchors;
+    return (path: out.length >= 2 ? out : anchors, junctions: junctions);
   }
 
   String _defaultName() {
