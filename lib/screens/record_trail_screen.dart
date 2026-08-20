@@ -15,6 +15,7 @@ import '../services/crash_log.dart';
 import '../services/cue_gen.dart';
 import '../services/geo.dart';
 import '../services/gps_filter.dart';
+import '../services/path_retrace.dart';
 import '../services/native_bridge.dart';
 import '../services/route_layer.dart';
 import '../services/settings.dart';
@@ -422,7 +423,7 @@ class _RecordTrailScreenState extends State<RecordTrailScreen> {
     }
     setState(() => _cleaning = true);
     final cleaned = await _cleanPath(_path);
-    final finalPath = cleaned.path;
+    final finalPath = await _reviewExcursions(cleaned.path);
     final cues = suggestCues(finalPath, junctions: cleaned.junctions);
     final draft = Trail(
       name: _defaultName(),
@@ -442,6 +443,101 @@ class _RecordTrailScreenState extends State<RecordTrailScreen> {
     );
     await _maybeShowSignalNote();
     if (mounted) Navigator.pop(context, draft);
+  }
+
+  /// After stopping, offers to keep or remove each detected out-and-back
+  /// excursion (a dead end, a wrong turn corrected, or a short spur — see
+  /// [findExcursions]'s doc for how these are told apart from a genuine
+  /// gradual curve). This is the one decision only the walker can make (was
+  /// this a real, intended part of the route, or a mistake?) — kept to a
+  /// single plain choice per excursion rather than a manual editing task.
+  /// Runs once, automatically, right after stopping, before cue generation
+  /// ever sees the path — a removed excursion is spliced out here, so
+  /// nothing downstream needs to know it ever existed.
+  Future<List<LatLng>> _reviewExcursions(List<LatLng> path) async {
+    final excursions = findExcursions(path);
+    if (excursions.isEmpty || !mounted) return path;
+
+    final toRemove = <Excursion>{};
+    if (excursions.length == 1) {
+      final e = excursions.first;
+      final remove = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          content: Text("Looks like you went off the trail for about "
+              '${e.oneWayMeters.round()}m and came back — keep this as part '
+              'of the route, or remove it?'),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Keep')),
+            FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('Remove')),
+          ],
+        ),
+      );
+      if (remove == true) toRemove.add(e);
+    } else {
+      if (!mounted) return path;
+      final choices = {for (final e in excursions) e: false}; // false = keep
+      await showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        builder: (ctx) => StatefulBuilder(
+          builder: (ctx, setSheetState) => SafeArea(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Padding(
+                  padding: EdgeInsets.all(16),
+                  child: Text(
+                      "You went off the trail and came back in a few spots — "
+                      'keep each as part of the route, or remove it?'),
+                ),
+                for (final e in excursions)
+                  SwitchListTile(
+                    title: Text('~${e.oneWayMeters.round()}m detour'),
+                    subtitle:
+                        Text(choices[e]! ? 'Will be removed' : 'Will be kept'),
+                    value: !choices[e]!,
+                    onChanged: (keep) =>
+                        setSheetState(() => choices[e] = !keep),
+                  ),
+                Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: SizedBox(
+                    width: double.infinity,
+                    child: FilledButton(
+                      onPressed: () => Navigator.pop(ctx),
+                      child: const Text('Done'),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      for (final entry in choices.entries) {
+        if (entry.value) toRemove.add(entry.key);
+      }
+    }
+
+    if (toRemove.isEmpty) return path;
+
+    // Splice out each removed excursion, highest entryIndex first so
+    // earlier indices stay valid as later removals are applied.
+    final sorted = toRemove.toList()
+      ..sort((a, b) => b.entryIndex.compareTo(a.entryIndex));
+    var result = path;
+    for (final e in sorted) {
+      result = [
+        ...result.sublist(0, e.entryIndex + 1),
+        ...result.sublist(e.exitIndex + 1),
+      ];
+    }
+    return result;
   }
 
   /// One-time, informational-only note if GPS was consistently poor during

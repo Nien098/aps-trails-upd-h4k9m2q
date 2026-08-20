@@ -4,6 +4,7 @@ import 'package:maplibre_gl/maplibre_gl.dart';
 
 import '../models/trail.dart';
 import 'geo.dart';
+import 'path_retrace.dart';
 
 /// Auto-suggests direction cues along a walking [path] from its geometry alone:
 /// a Start cue at the beginning, Left/Right cues wherever the route turns
@@ -31,6 +32,7 @@ List<Cue> suggestCues(
   double uturnThresholdDeg = 150,
   List<LatLng> junctions = const [],
   double junctionMatchMeters = 8,
+  double cueMergeMeters = 7,
 }) {
   final cues = <Cue>[];
   if (path.length < 2) return cues;
@@ -55,13 +57,30 @@ List<Cue> suggestCues(
 
   for (var i = 1; i < path.length - 1; i++) {
     final d = cum[i];
+
+    // The path's own immediate-neighbour angle at this vertex — bounded by
+    // real (post-simplification) geometry, not a fixed sampling distance,
+    // so it still sees a sharp reversal even on a short out-and-back spur
+    // shorter than windowMeters each way (see immediateTurnAngle's doc). A
+    // turn this clear is never suppressed just for being close to the
+    // previous cue or the path's ends — real turns happen at irregular
+    // intervals, sometimes just metres apart (e.g. turn onto a spur, a
+    // short walk, then straight back).
+    final immediate = immediateTurnAngle(path, i);
+    final isSharp = immediate.abs() >= turnThresholdDeg;
+
     // Skip the immediate ends where a start/finish cue already sits.
-    if (d < minSpacingMeters || total - d < minSpacingMeters) continue;
-    if (d - lastCueDist < minSpacingMeters) continue;
+    if ((d < minSpacingMeters || total - d < minSpacingMeters) && !isSharp) continue;
+    if (d - lastCueDist < minSpacingMeters && !isSharp) continue;
 
     final before = pointAt(d - windowMeters);
     final after = pointAt(d + windowMeters);
-    final turn = _turnAngle(before, path[i], after);
+    var turn = turnAngle(before, path[i], after);
+    // Trust the tight signal over the windowed one once it's already a
+    // clear U-turn — the windowed angle can be diluted by overshoot on a
+    // short spur (see immediateTurnAngle's doc), the immediate one can't.
+    if (immediate.abs() >= uturnThresholdDeg) turn = immediate;
+
     final isJunction = junctions
         .any((j) => metersBetween(j, path[i]) <= junctionMatchMeters);
 
@@ -90,7 +109,40 @@ List<Cue> suggestCues(
   }
 
   cues.add(Cue(type: CueType.finish, position: path.last, order: cues.length));
-  return cues;
+  return _mergeNearbyCues(cues, cueMergeMeters);
+}
+
+/// Collapses cues that land within [mergeMeters] of an already-kept cue into
+/// one — the actual data-level merge (not just the map's display grouping,
+/// see `AuthorScreen._cueDisplayInfo`). Exempting sharp turns from the
+/// spacing gate above means a kept out-and-back's entry/exit can genuinely
+/// coincide with the same real junction; without this pass that junction
+/// could get two distinct cues a few metres apart. A directional cue
+/// (Left/Right/U-turn) is kept over a generic Stay-straight when the two
+/// disagree, since it's the more actionable instruction. Start/Finish are
+/// never merged away (checked first, always kept).
+List<Cue> _mergeNearbyCues(List<Cue> cues, double mergeMeters) {
+  final kept = <Cue>[];
+  for (final cue in cues) {
+    if (cue.type == CueType.start || cue.type == CueType.finish) {
+      kept.add(cue);
+      continue;
+    }
+    final nearbyIndex =
+        kept.indexWhere((k) => k.type != CueType.start && k.type != CueType.finish &&
+            metersBetween(k.position, cue.position) <= mergeMeters);
+    if (nearbyIndex == -1) {
+      kept.add(cue);
+      continue;
+    }
+    final existing = kept[nearbyIndex];
+    if (existing.type == CueType.straight && cue.type != CueType.straight) {
+      kept[nearbyIndex] = cue; // prefer the more specific, directional cue
+    }
+    // Otherwise drop `cue` — `existing` already covers this spot.
+  }
+  // Re-sequence order to stay dense/gapless after any drops.
+  return [for (var i = 0; i < kept.length; i++) kept[i]..order = i];
 }
 
 /// One-time conversion for a trail saved before the stack-order model: [raw]
@@ -252,28 +304,3 @@ LatLng _pointAtDistance(List<LatLng> path, List<double> cum, double d) {
   );
 }
 
-/// Signed turn at [b] going a→b→c, in degrees. Positive = right (clockwise),
-/// negative = left. 0 = straight on.
-double _turnAngle(LatLng a, LatLng b, LatLng c) {
-  final into = _bearing(a, b);
-  final out = _bearing(b, c);
-  var delta = out - into;
-  while (delta > 180) {
-    delta -= 360;
-  }
-  while (delta < -180) {
-    delta += 360;
-  }
-  return delta;
-}
-
-/// Compass bearing from [a] to [b] in degrees (0 = north, +90 = east).
-double _bearing(LatLng a, LatLng b) {
-  final lat1 = a.latitude * math.pi / 180;
-  final lat2 = b.latitude * math.pi / 180;
-  final dLon = (b.longitude - a.longitude) * math.pi / 180;
-  final y = math.sin(dLon) * math.cos(lat2);
-  final x = math.cos(lat1) * math.sin(lat2) -
-      math.sin(lat1) * math.cos(lat2) * math.cos(dLon);
-  return math.atan2(y, x) * 180 / math.pi;
-}

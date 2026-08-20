@@ -40,7 +40,9 @@ class _CueListScreenState extends State<CueListScreen> {
   }
 
   Future<void> _edit(Cue cue) async {
-    final result = await showCueEditor(context, position: cue.position, existing: cue);
+    final currentRank = _sorted.indexOf(cue);
+    final result = await showCueEditor(context,
+        position: cue.position, existing: cue, initialOrder: currentRank);
     if (result == deletedCueSentinel) {
       setState(() => widget.trail.cues.remove(cue));
     } else if (result == addAnotherCueSentinel) {
@@ -58,6 +60,9 @@ class _CueListScreenState extends State<CueListScreen> {
           ..label = result.label
           ..spoken = result.spoken
           ..radiusMeters = result.radiusMeters;
+        if (result.order != currentRank) {
+          widget.trail.reorderCue(cue, result.order);
+        }
       });
     }
   }
@@ -65,14 +70,11 @@ class _CueListScreenState extends State<CueListScreen> {
   void _delete(Cue cue) => setState(() => widget.trail.cues.remove(cue));
 
   void _reorder(int oldIndex, int newIndex) {
-    final list = _sorted;
-    final moved = list.removeAt(oldIndex);
-    list.insert(newIndex, moved);
-    setState(() {
-      for (var i = 0; i < list.length; i++) {
-        list[i].order = i;
-      }
-    });
+    // onReorderItem's newIndex is already adjusted for the dragged item's
+    // removal (unlike the deprecated onReorder), matching Trail.reorderCue's
+    // own "index in the list with this cue already taken out" semantics
+    // directly — no manual adjustment needed.
+    setState(() => widget.trail.reorderCue(_sorted[oldIndex], newIndex));
   }
 
   @override

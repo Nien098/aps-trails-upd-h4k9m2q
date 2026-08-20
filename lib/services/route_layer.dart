@@ -1,26 +1,45 @@
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:maplibre_gl/maplibre_gl.dart';
 
+import 'path_retrace.dart';
+
 /// Renders a trail route as a GeoJSON line plus directional arrows that point
 /// in the travel direction (start → end). Used by both the author and guide
 /// maps. Interaction is disabled so map taps pass through to cue placement.
 /// The line colour is data-driven (read from the feature) so it can be changed
 /// by simply re-setting the route.
+///
+/// An out-and-back stretch (see [findExcursions]) draws differently from the
+/// rest of the route: the return leg gets its own slightly-offset, dashed
+/// line with no arrows, instead of overlapping the outbound leg with
+/// direction chevrons pointing both ways on the same line — confirmed
+/// confusing to read on screen. The outbound leg and every non-retraced
+/// stretch keep today's solid-line-plus-arrows look unchanged.
 class RouteLayer {
   /// [id] distinguishes multiple RouteLayers drawn on the same map at once
   /// (e.g. the original trail plus a computed escape route) — each needs
   /// its own source/layer ids or the second instance's `ensure()` would
   /// collide with the first's.
-  RouteLayer(this.controller, {String id = 'route'})
+  ///
+  /// [splitOutAndBack] runs excursion detection on every [setRoute] call —
+  /// worth it for a trail's real, final route, but `author_screen.dart`'s
+  /// live drag-trace preview calls `setRoute` on every gesture update with a
+  /// still-growing, not-yet-committed stroke; false there skips the
+  /// per-update detection cost for geometry that's about to be replaced
+  /// anyway.
+  RouteLayer(this.controller, {String id = 'route', this.splitOutAndBack = true})
       : _sourceId = id,
         _lineLayerId = '$id-line',
+        _returnLineLayerId = '$id-line-return',
         _arrowLayerId = '$id-arrows',
         _arrowImage = '$id-arrow';
 
   final MapLibreMapController controller;
+  final bool splitOutAndBack;
 
   final String _sourceId;
   final String _lineLayerId;
+  final String _returnLineLayerId;
   final String _arrowLayerId;
   final String _arrowImage;
 
@@ -30,6 +49,11 @@ class RouteLayer {
     'type': 'FeatureCollection',
     'features': <dynamic>[],
   };
+
+  /// Any feature without this property (every non-excursion stretch, and an
+  /// excursion's outbound leg) renders on the main line/arrow layers exactly
+  /// as before; `'return'` renders on the dashed, offset, arrow-free layer.
+  static const _legProp = 'leg';
 
   /// Adds the arrow image, source and layers. Call once after the style loads.
   Future<void> ensure() async {
@@ -48,6 +72,8 @@ class RouteLayer {
     final symbolLayerIds = controller.symbolManager?.layerIds ?? const [];
     final belowId = symbolLayerIds.isEmpty ? null : symbolLayerIds.first;
 
+    final notReturn = ['!=', ['get', _legProp], 'return'];
+
     await controller.addLineLayer(
       _sourceId,
       _lineLayerId,
@@ -60,6 +86,23 @@ class RouteLayer {
       ),
       enableInteraction: false,
       belowLayerId: belowId,
+      filter: notReturn,
+    );
+    await controller.addLineLayer(
+      _sourceId,
+      _returnLineLayerId,
+      const LineLayerProperties(
+        lineColor: ['get', 'color'],
+        lineWidth: 6.0,
+        lineOpacity: 0.9,
+        lineJoin: 'round',
+        lineCap: 'round',
+        lineOffset: -4.0,
+        lineDasharray: [2, 2],
+      ),
+      enableInteraction: false,
+      belowLayerId: belowId,
+      filter: ['==', ['get', _legProp], 'return'],
     );
     await controller.addSymbolLayer(
       _sourceId,
@@ -80,25 +123,56 @@ class RouteLayer {
       ),
       enableInteraction: false,
       belowLayerId: belowId,
+      filter: notReturn,
     );
     _ready = true;
   }
 
   /// Updates the drawn route to [points] with line colour [colorHex]
-  /// (cleared when fewer than 2 points).
+  /// (cleared when fewer than 2 points). Any out-and-back stretch (see
+  /// [findExcursions]) is split into an outbound feature (drawn on the main
+  /// layers, unchanged) and a return feature (drawn on the dashed/offset/
+  /// arrow-free layers) instead of one straight-through line.
   Future<void> setRoute(List<LatLng> points, String colorHex) async {
     if (!_ready) return;
-    final coords = points.map((p) => [p.longitude, p.latitude]).toList();
+    if (points.length < 2) {
+      await controller.setGeoJsonSource(_sourceId, Map.of(_empty));
+      return;
+    }
+
+    Map<String, dynamic> lineFeature(List<LatLng> pts, {String? leg}) => {
+          'type': 'Feature',
+          'geometry': {
+            'type': 'LineString',
+            'coordinates': pts.map((p) => [p.longitude, p.latitude]).toList(),
+          },
+          'properties': {'color': colorHex, _legProp: ?leg},
+        };
+
+    final excursions = splitOutAndBack ? findExcursions(points) : const <Excursion>[];
+    final features = <Map<String, dynamic>>[];
+    if (excursions.isEmpty) {
+      features.add(lineFeature(points));
+    } else {
+      var cursor = 0;
+      for (final e in excursions) {
+        if (e.entryIndex > cursor) {
+          features.add(lineFeature(points.sublist(cursor, e.entryIndex + 1)));
+        }
+        features.add(lineFeature(
+            points.sublist(e.entryIndex, e.turnIndex + 1), leg: 'outbound'));
+        features.add(lineFeature(
+            points.sublist(e.turnIndex, e.exitIndex + 1), leg: 'return'));
+        cursor = e.exitIndex;
+      }
+      if (cursor < points.length - 1) {
+        features.add(lineFeature(points.sublist(cursor)));
+      }
+    }
+
     await controller.setGeoJsonSource(_sourceId, {
       'type': 'FeatureCollection',
-      'features': [
-        if (points.length >= 2)
-          {
-            'type': 'Feature',
-            'geometry': {'type': 'LineString', 'coordinates': coords},
-            'properties': {'color': colorHex},
-          },
-      ],
+      'features': features,
     });
   }
 }

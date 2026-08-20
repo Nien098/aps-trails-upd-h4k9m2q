@@ -491,7 +491,7 @@ class _AuthorScreenState extends State<AuthorScreen> {
     await _routeLayer!.ensure();
     _boundaryLayer = BoundaryLayer(_c!);
     await _boundaryLayer!.ensure();
-    _strokeLayer = RouteLayer(_c!, id: 'strokePreview');
+    _strokeLayer = RouteLayer(_c!, id: 'strokePreview', splitOutAndBack: false);
     await _strokeLayer!.ensure();
     _otherRegionsOutline = BoundaryLayer(
       _c!,
@@ -1389,7 +1389,10 @@ class _AuthorScreenState extends State<AuthorScreen> {
   }
 
   Future<void> _editCue(Cue cue) async {
-    final result = await showCueEditor(context, position: cue.position, existing: cue);
+    final currentRank = (List.of(_trail.cues)..sort((a, b) => a.order.compareTo(b.order)))
+        .indexOf(cue);
+    final result = await showCueEditor(context,
+        position: cue.position, existing: cue, initialOrder: currentRank);
     if (result == deletedCueSentinel) {
       _pushUndo();
       setState(() => _trail.cues.remove(cue));
@@ -1408,8 +1411,6 @@ class _AuthorScreenState extends State<AuthorScreen> {
       await _redraw();
       return;
     } else if (result != null) {
-      // order is deliberately left untouched — editing a cue's type/text
-      // shouldn't move its place in the firing sequence.
       _pushUndo();
       setState(() {
         cue
@@ -1417,6 +1418,9 @@ class _AuthorScreenState extends State<AuthorScreen> {
           ..label = result.label
           ..spoken = result.spoken
           ..radiusMeters = result.radiusMeters;
+        if (result.order != currentRank) {
+          _trail.reorderCue(cue, result.order);
+        }
       });
     } else {
       return;
@@ -1714,10 +1718,16 @@ class _AuthorScreenState extends State<AuthorScreen> {
         groups.add([cue]);
         continue;
       }
+      // 7m, not 1m — matched to suggestCues' own merge distance
+      // (cue_gen.dart's cueMergeMeters) so this display grouping and the
+      // data-level merge recorded trails already get agree on what "the
+      // same spot" means, rather than showing hand-drawn/generated cues a
+      // few metres apart as separate stacked markers that data-level merge
+      // would have collapsed.
       final match = groups.where((g) =>
           !identical(g.first, _moving) &&
           !identical(g.first, _highlighted) &&
-          metersBetween(g.first.position, cue.position) < 1.0);
+          metersBetween(g.first.position, cue.position) < 7.0);
       if (match.isNotEmpty) {
         match.first.add(cue);
       } else {

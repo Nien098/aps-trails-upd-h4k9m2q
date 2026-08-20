@@ -27,15 +27,18 @@ final Cue addAnotherCueSentinel = Cue(
 /// to stack another cue here (both only possible when [existing] is given),
 /// or null if cancelled.
 ///
-/// [initialOrder] (0-based) is only used — and only shown as an editable
-/// field — when [existing] is null: it's the stack position a brand new cue
-/// defaults to (typically "append to the end"), which the author can type
-/// over directly to insert it somewhere else instead. There's deliberately
-/// no geometric auto-guessing of where a new cue "should" go — that was
-/// tried and broke exactly on the case it most needed to handle (a path
-/// crossing itself), silently reshuffling cues far from where a fresh tap
-/// actually belonged. Editing an existing cue leaves its order untouched;
-/// reposition it via drag-to-reorder in the cue list instead.
+/// [initialOrder] (0-based) is the stack position shown in the editable
+/// "Position in list" field: for a brand new cue, the default is typically
+/// "append to the end" (there's deliberately no geometric auto-guessing of
+/// where a new cue "should" go — that was tried and broke exactly on the
+/// case it most needed to handle, a path crossing itself, silently
+/// reshuffling cues far from where a fresh tap actually belonged); for an
+/// existing cue, the caller passes its *current* rank so the field starts
+/// showing where it already is. Either way the author can type over it to
+/// move the cue — the returned [Cue.order] carries whatever was typed (or
+/// the pre-filled default if untouched), and it's the caller's job to
+/// compare that against the cue's current position and apply the move (see
+/// `Trail.reorderCue`) if it changed.
 Future<Cue?> showCueEditor(
   BuildContext context, {
   required LatLng position,
@@ -140,22 +143,22 @@ class _CueEditorSheetState extends State<CueEditorSheet> {
                 children: [
                   Text(widget.existing == null ? 'New cue' : 'Edit cue',
                       style: Theme.of(context).textTheme.titleLarge),
-                  if (widget.existing == null) ...[
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: _order,
-                      keyboardType: TextInputType.number,
-                      decoration: const InputDecoration(
-                        labelText: 'Position in list (1 = first)',
-                        helperText:
-                            'Defaults to the end of the list — type a smaller '
-                            'number to insert it earlier; everything from '
-                            'there shifts up automatically.',
-                        helperMaxLines: 2,
-                        border: OutlineInputBorder(),
-                      ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: _order,
+                    keyboardType: TextInputType.number,
+                    decoration: InputDecoration(
+                      labelText: 'Position in list (1 = first)',
+                      helperText: widget.existing == null
+                          ? 'Defaults to the end of the list — type a smaller '
+                              'number to insert it earlier; everything from '
+                              'there shifts up automatically.'
+                          : 'Type a new number to move this cue; everything '
+                              'in between shifts to make room.',
+                      helperMaxLines: 2,
+                      border: const OutlineInputBorder(),
                     ),
-                  ],
+                  ),
                   const SizedBox(height: 12),
                   Wrap(
                     spacing: 8,
@@ -247,14 +250,9 @@ class _CueEditorSheetState extends State<CueEditorSheet> {
                 const SizedBox(width: 8),
                 FilledButton(
                   onPressed: () {
-                    final int order;
-                    if (widget.existing != null) {
-                      order = widget.existing!.order; // left untouched
-                    } else {
-                      final typed = int.tryParse(_order.text.trim());
-                      order = ((typed ?? widget.initialOrder + 1) - 1)
-                          .clamp(0, 1 << 30);
-                    }
+                    final typed = int.tryParse(_order.text.trim());
+                    final order = ((typed ?? widget.initialOrder + 1) - 1)
+                        .clamp(0, 1 << 30);
                     Navigator.pop(
                       context,
                       Cue(

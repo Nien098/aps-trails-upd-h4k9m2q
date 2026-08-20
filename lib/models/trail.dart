@@ -157,6 +157,22 @@ class Trail {
   DateTime? recordedStartedAt;
   int? recordedDurationSec;
 
+  /// Moves [cue] (already a member of [cues]) to [newIndex] among the cues
+  /// sorted by their current order, renumbering every cue densely (0..N-1)
+  /// afterward. The single shared move implementation — drag-to-reorder
+  /// (`cue_list_screen.dart`) and typing a new position directly in the
+  /// cue editor both funnel through this, so order can never drift or
+  /// duplicate between the two entry points.
+  void reorderCue(Cue cue, int newIndex) {
+    final sorted = List<Cue>.of(cues)..sort((a, b) => a.order.compareTo(b.order));
+    sorted.remove(cue);
+    final at = newIndex.clamp(0, sorted.length);
+    sorted.insert(at, cue);
+    for (var i = 0; i < sorted.length; i++) {
+      sorted[i].order = i;
+    }
+  }
+
   static String _encodePoints(List<LatLng> pts) =>
       jsonEncode(pts.map((p) => [p.latitude, p.longitude]).toList());
 
