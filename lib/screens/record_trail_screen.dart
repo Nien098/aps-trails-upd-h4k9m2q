@@ -394,14 +394,37 @@ class _RecordTrailScreenState extends State<RecordTrailScreen> {
     if (mounted) setState(() {});
   }
 
+  /// Bright, temporary overlay for whichever excursion [_reviewExcursions]
+  /// is currently asking about — drawn as one continuous doubled-back line
+  /// (`splitOutAndBack: false`; the point here is to make the retrace
+  /// obviously stand out, not to disambiguate its two legs) so the walker
+  /// can actually see, on the map, what "~15m detour" is talking about
+  /// instead of having to guess from a plain-text description.
+  RouteLayer? _excursionHighlight;
+
   Future<void> _onStyleLoaded() async {
     final c = _c;
     if (c == null) return;
     _route = RouteLayer(c);
     await _route!.ensure();
+    _excursionHighlight =
+        RouteLayer(c, id: 'excursionHighlight', splitOutAndBack: false);
+    await _excursionHighlight!.ensure();
     // A resumed recording already has a path — draw it immediately instead
     // of waiting for the next GPS fix to trigger the first draw.
     if (_path.length >= 2) await _route!.setRoute(_path, '#1565C0');
+  }
+
+  /// Centres/zooms the camera on [e]'s turnaround and highlights its full
+  /// out-and-back span on the map in a bright colour distinct from the
+  /// route's normal blue — called before/while asking whether to keep or
+  /// remove it, and again if the walker taps "Show on map" for a specific
+  /// excursion in a multi-detour review.
+  Future<void> _focusExcursion(Excursion e, List<LatLng> path) async {
+    await _c?.animateCamera(
+        CameraUpdate.newLatLngZoom(path[e.turnIndex], 18));
+    await _excursionHighlight?.setRoute(
+        path.sublist(e.entryIndex, e.exitIndex + 1), '#FF6D00');
   }
 
   Future<void> _stop() async {
@@ -461,12 +484,14 @@ class _RecordTrailScreenState extends State<RecordTrailScreen> {
     final toRemove = <Excursion>{};
     if (excursions.length == 1) {
       final e = excursions.first;
+      await _focusExcursion(e, path);
+      if (!mounted) return path;
       final remove = await showDialog<bool>(
         context: context,
         builder: (ctx) => AlertDialog(
           content: Text("Looks like you went off the trail for about "
-              '${e.oneWayMeters.round()}m and came back — keep this as part '
-              'of the route, or remove it?'),
+              '${e.oneWayMeters.round()}m and came back (highlighted on the '
+              'map) — keep this as part of the route, or remove it?'),
           actions: [
             TextButton(
                 onPressed: () => Navigator.pop(ctx, false),
@@ -479,6 +504,7 @@ class _RecordTrailScreenState extends State<RecordTrailScreen> {
       );
       if (remove == true) toRemove.add(e);
     } else {
+      await _focusExcursion(excursions.first, path);
       if (!mounted) return path;
       final choices = {for (final e in excursions) e: false}; // false = keep
       await showModalBottomSheet<void>(
@@ -492,17 +518,25 @@ class _RecordTrailScreenState extends State<RecordTrailScreen> {
                 const Padding(
                   padding: EdgeInsets.all(16),
                   child: Text(
-                      "You went off the trail and came back in a few spots — "
-                      'keep each as part of the route, or remove it?'),
+                      "You went off the trail and came back in a few spots "
+                      '(each highlighted on the map when selected) — keep '
+                      'each as part of the route, or remove it?'),
                 ),
                 for (final e in excursions)
                   SwitchListTile(
+                    secondary: IconButton(
+                      tooltip: 'Show on map',
+                      icon: const Icon(Icons.center_focus_strong),
+                      onPressed: () => _focusExcursion(e, path),
+                    ),
                     title: Text('~${e.oneWayMeters.round()}m detour'),
                     subtitle:
                         Text(choices[e]! ? 'Will be removed' : 'Will be kept'),
                     value: !choices[e]!,
-                    onChanged: (keep) =>
-                        setSheetState(() => choices[e] = !keep),
+                    onChanged: (keep) {
+                      setSheetState(() => choices[e] = !keep);
+                      _focusExcursion(e, path);
+                    },
                   ),
                 Padding(
                   padding: const EdgeInsets.all(12),
@@ -524,6 +558,7 @@ class _RecordTrailScreenState extends State<RecordTrailScreen> {
       }
     }
 
+    await _excursionHighlight?.setRoute(const [], '#FF6D00');
     if (toRemove.isEmpty) return path;
 
     // Splice out each removed excursion, highest entryIndex first so
