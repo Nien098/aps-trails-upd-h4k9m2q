@@ -937,26 +937,49 @@ class _Graph {
   /// happens (the author really did move onto another path), but large
   /// enough that two trails crossing or running close together don't cause
   /// every other point to flip between them. Used by [snapStroke].
+  ///
+  /// One asymmetric exception: a walker is presumed to be on a sidewalk/
+  /// trail, not literally in the road, so staying locked onto a *road* edge
+  /// needs a stricter bar — any sidewalk/trail within the normal hysteresis
+  /// margin wins, even though it wouldn't count as "meaningfully closer" by
+  /// the plain rule below. Without this, one brief moment nearer the road
+  /// than the sidewalk (e.g. cutting through a parking lot, or a gap in
+  /// sidewalk data right at a corner) locks the *entire rest* of the walk
+  /// onto the road: sidewalks routinely run only 2-5m from their road the
+  /// whole way, well under the 8m margin that would otherwise trigger a
+  /// switch back — confirmed as a real, reported failure, not a
+  /// hypothetical (a recorded sidewalk walk snapping onto the road for a
+  /// long straight stretch after passing a parking lot entrance). Staying
+  /// on a non-road edge keeps the plain symmetric rule — this doesn't make
+  /// it easier to flip between two similarly-classified nearby trails.
   ({LatLng point, double meters, _Seg seg})? _nearestSegSticky(
     LatLng p,
     _Seg? preferred, {
     double hysteresisMeters = _stickyHysteresisMeters,
   }) {
     ({LatLng point, double meters, _Seg seg})? best;
+    ({LatLng point, double meters, _Seg seg})? bestNonRoad;
     ({LatLng point, double meters})? onPreferred;
     for (final seg in _segments) {
       final r = _nearestOnSegment(p, seg.a, seg.b);
       if (best == null || r.meters < best.meters) {
         best = (point: r.point, meters: r.meters, seg: seg);
       }
+      if (!seg.isRoad && (bestNonRoad == null || r.meters < bestNonRoad.meters)) {
+        bestNonRoad = (point: r.point, meters: r.meters, seg: seg);
+      }
       if (identical(seg, preferred)) {
         onPreferred = (point: r.point, meters: r.meters);
       }
     }
-    if (preferred != null &&
-        onPreferred != null &&
-        best != null &&
-        onPreferred.meters <= best.meters + hysteresisMeters) {
+    if (preferred == null || onPreferred == null || best == null) return best;
+
+    if (preferred.isRoad &&
+        bestNonRoad != null &&
+        bestNonRoad.meters <= onPreferred.meters + hysteresisMeters) {
+      return (point: bestNonRoad.point, meters: bestNonRoad.meters, seg: bestNonRoad.seg);
+    }
+    if (onPreferred.meters <= best.meters + hysteresisMeters) {
       return (point: onPreferred.point, meters: onPreferred.meters, seg: preferred);
     }
     return best;
