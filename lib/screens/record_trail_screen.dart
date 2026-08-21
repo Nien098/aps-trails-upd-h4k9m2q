@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_tts/flutter_tts.dart';
@@ -595,16 +596,27 @@ class _RecordTrailScreenState extends State<RecordTrailScreen> {
     );
   }
 
-  /// Removes GPS jitter (Douglas–Peucker), then nudges each simplified anchor
-  /// individually onto the nearest mapped trail/road, if one is close by.
-  /// Deliberately does NOT route between anchors — that used to hand the
-  /// path to the same shortest-path search auto-generation uses, and one
-  /// unmapped or gappy spot anywhere along the recording could send the
-  /// search off toward a completely unrelated nearby trail (e.g. cutting
-  /// through a park or parking lot), replacing an already-accurate recorded
-  /// segment with a router guess. A per-point local snap can only pull a
-  /// point a short, bounded distance toward what's actually mapped — it
-  /// can never invent a detour, so the recorded shape is always preserved.
+  /// Removes GPS jitter (Douglas–Peucker), then nudges the simplified anchors
+  /// onto the nearest mapped trail/road, if one is close by. Deliberately
+  /// does NOT route between anchors — that used to hand the path to the same
+  /// shortest-path search auto-generation uses, and one unmapped or gappy
+  /// spot anywhere along the recording could send the search off toward a
+  /// completely unrelated nearby trail (e.g. cutting through a park or
+  /// parking lot), replacing an already-accurate recorded segment with a
+  /// router guess. A per-point local snap can only pull a point a short,
+  /// bounded distance toward what's actually mapped — it can never invent a
+  /// detour, so the recorded shape is always preserved.
+  ///
+  /// Uses [TrailRouter.snapStroke], not independent per-point [TrailRouter.
+  /// snapPoint] calls — a real, confirmed bug (not hypothetical): snapping
+  /// each point independently can flip between two close/parallel mapped
+  /// features point to point (a sidewalk and the road running alongside it,
+  /// for example), producing a visible zig-zag even when the walk itself was
+  /// a straight line — exactly the failure mode [snapStroke]'s own doc
+  /// already describes and fixes (sticky bias toward whichever edge the
+  /// previous point matched). This also corrupted downstream excursion
+  /// detection: a snap-induced flip near a crosswalk was misread as a real
+  /// ~180° reversal, producing a phantom U-turn cue at a spot never walked.
   ///
   /// The input is now Kalman-smoothed (see [GpsKalmanFilter]) rather than
   /// raw GPS, so this 8m Douglas-Peucker tolerance is simplifying an
@@ -612,10 +624,10 @@ class _RecordTrailScreenState extends State<RecordTrailScreen> {
   /// it's solving a different problem (point-density compression) than the
   /// live filter does (noise removal).
   ///
-  /// Also collects real trail-network junctions near each anchor (reusing
-  /// the camera position already paid for below) so [_stop] can pass them to
-  /// [suggestCues] for "stay straight" cues at forks — this was previously
-  /// always empty, silently dropping that cue type for every recorded trail.
+  /// Also collects real trail-network junctions along the whole cleaned path
+  /// in one call (junctionsNear already checks every junction against the
+  /// full path, not just one point) so [_stop] can pass them to [suggestCues]
+  /// for "stay straight" cues at forks.
   Future<({List<LatLng> path, List<LatLng> junctions})> _cleanPath(List<LatLng> raw) async {
     final anchors = simplifyPath(raw, 8);
     final c = _c;
@@ -623,27 +635,33 @@ class _RecordTrailScreenState extends State<RecordTrailScreen> {
       return (path: anchors, junctions: const <LatLng>[]);
     }
     final router = TrailRouter(c);
-    final out = <LatLng>[];
-    final junctions = <LatLng>[];
+
+    // Bring the whole trail into view once — snapStroke builds a single
+    // graph over this bounding box up front, so (unlike the old per-point
+    // snapPoint loop) there's no need to keep re-panning the camera.
+    var minLat = anchors.first.latitude, maxLat = anchors.first.latitude;
+    var minLon = anchors.first.longitude, maxLon = anchors.first.longitude;
     for (final a in anchors) {
-      // Bring the point into view so the trail/road network around it is
-      // rendered and queryable (the router only sees on-screen features).
-      const pad = 0.0015;
-      await c.moveCamera(CameraUpdate.newLatLngBounds(LatLngBounds(
-        southwest: LatLng(a.latitude - pad, a.longitude - pad),
-        northeast: LatLng(a.latitude + pad, a.longitude + pad),
-      )));
-      await Future.delayed(const Duration(milliseconds: 120));
-      final snapped = await router.snapPoint(a);
-      if (out.isEmpty || metersBetween(out.last, snapped) >= 3) {
-        out.add(snapped);
-      }
-      // Costs a second graph build per anchor (snapPoint above already did
-      // one) — acceptable since anchor count here is post-simplification
-      // (a handful to a few dozen points), and this all happens during the
-      // "Cleaning up the trail…" spinner, not live during the walk.
-      junctions.addAll(await router.junctionsNear([a], await router.visibleViewportRect()));
+      minLat = math.min(minLat, a.latitude);
+      maxLat = math.max(maxLat, a.latitude);
+      minLon = math.min(minLon, a.longitude);
+      maxLon = math.max(maxLon, a.longitude);
     }
+    const pad = 0.0015;
+    await c.moveCamera(CameraUpdate.newLatLngBounds(LatLngBounds(
+      southwest: LatLng(minLat - pad, minLon - pad),
+      northeast: LatLng(maxLat + pad, maxLon + pad),
+    )));
+    await Future.delayed(const Duration(milliseconds: 200));
+
+    final snapped = await router.snapStroke(anchors, maxMeters: 30);
+    final out = <LatLng>[];
+    for (final s in snapped) {
+      if (out.isEmpty || metersBetween(out.last, s) >= 3) out.add(s);
+    }
+
+    final junctions =
+        await router.junctionsNear(out, await router.visibleViewportRect());
     return (path: out.length >= 2 ? out : anchors, junctions: junctions);
   }
 
