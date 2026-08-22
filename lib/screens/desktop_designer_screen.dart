@@ -1,4 +1,4 @@
-import 'dart:async' show unawaited;
+import 'dart:async' show Timer, unawaited;
 import 'dart:math' show Point, exp, max, min, sqrt;
 
 import 'package:flutter/gestures.dart';
@@ -276,6 +276,12 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     PointerProbe.ensureStarted();
   }
 
+  @override
+  void dispose() {
+    _prefetchDebounce?.cancel();
+    super.dispose();
+  }
+
   void _onMapCreated(MapLibreMapController c) => _c = c;
 
   Future<void> _onStyleLoaded() async {
@@ -293,22 +299,39 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     _prefetchRouteGraph();
   }
 
+  /// Debounce for [_prefetchRouteGraph] — a rapid burst of mouse-wheel
+  /// zoom ticks fires MapLibre's `onCameraIdle` once per tick as each
+  /// zoom-in/zoom-out animation settles, not once per gesture. Confirmed
+  /// live via the debug panel (2026-08-22): an undebounced version called
+  /// `getVisibleRegion()`/`waysInBounds()` well over a hundred times in
+  /// under two seconds during one scroll-wheel zoom burst — each call
+  /// individually cheap once cached, but the sheer volume of platform-
+  /// channel round-trips and map lookups is real, wasteful churn that
+  /// could itself contribute to jank on a fresh (not-yet-cached) area,
+  /// working against the whole point of this prefetch. Only the *last*
+  /// idle event in a burst actually triggers a fetch, ~400ms after
+  /// activity stops.
+  Timer? _prefetchDebounce;
+
   /// Fire-and-forget: warms [RouteGraphStore]'s per-cell cache for whatever's
   /// currently visible, so a real click/drag a moment later usually finds
   /// its cells already fetched instead of paying that network round-trip
   /// itself. Wired to both the initial style-load and the map's
-  /// `onCameraIdle` (fires after every pan/zoom settles) — the same idea as
-  /// mobile always having its whole bundled region already on disk, just
-  /// warmed just-in-time instead of bundled ahead of time. Never awaited by
-  /// any caller and swallows its own errors: a failed/slow prefetch must
-  /// never block or visibly affect anything, it can only help.
+  /// `onCameraIdle` — the same idea as mobile always having its whole
+  /// bundled region already on disk, just warmed just-in-time instead of
+  /// bundled ahead of time. Never awaited by any caller and swallows its
+  /// own errors: a failed/slow prefetch must never block or visibly affect
+  /// anything, it can only help.
   void _prefetchRouteGraph() {
-    final c = _c;
-    if (c == null) return;
-    unawaited(c.getVisibleRegion().then(
-      (bounds) => RouteGraphStore.instance.prefetch(bounds),
-      onError: (_) {},
-    ));
+    _prefetchDebounce?.cancel();
+    _prefetchDebounce = Timer(const Duration(milliseconds: 400), () {
+      final c = _c;
+      if (c == null) return;
+      unawaited(c.getVisibleRegion().then(
+        (bounds) => RouteGraphStore.instance.prefetch(bounds),
+        onError: (_) {},
+      ));
+    });
   }
 
   /// Flattens [_segments] into the full route polyline — identical to
