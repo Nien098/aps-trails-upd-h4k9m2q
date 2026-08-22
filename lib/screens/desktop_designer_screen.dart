@@ -85,15 +85,18 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
   bool _busy = false;
   String? _status;
 
-  /// True while a cue-editor/cue-list dialog is open — guards [_onMapClick]
+  /// True while a cue-editor/cue-list overlay is open — guards [_onMapClick]
   /// against a confirmed Flutter-Web platform-view issue: clicks meant for
   /// a modal (including its own Save/Cancel buttons) were also reaching
   /// MapLibre's canvas underneath, and with "Add cue" mode still active
-  /// that immediately reopened another editor, making the dialog look
-  /// permanently stuck. `showDialog`'s barrier (see [showCueEditor]'s
-  /// `asDialog`) fixes this on its own in testing, but this flag is kept as
-  /// a second, unconditional guard — belt and suspenders against the same
-  /// class of platform-view click-through for any future dialog added here.
+  /// that immediately reopened another editor, making it look permanently
+  /// stuck. The real fix was switching those overlays from a translucent
+  /// `Dialog`/`showModalBottomSheet` to a full opaque `MaterialPageRoute`
+  /// (see [showCueEditor]'s doc — a `Dialog`'s barrier alone did *not* stop
+  /// this, confirmed live, even though it's Flutter's normal modal-barrier
+  /// mechanism), but this flag is kept as a second, unconditional guard —
+  /// belt and suspenders against the same class of platform-view
+  /// click-through for any future overlay added here.
   bool _modalOpen = false;
 
   Future<T?> _showModal<T>(Future<T?> Function() show) async {
@@ -371,47 +374,60 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
   }
 
   /// Lists every cue with an Edit action — the desktop stand-in for tapping
-  /// an on-map cue marker directly (see the class doc).
+  /// an on-map cue marker directly (see the class doc). Pushed as a full
+  /// opaque route, not `showDialog` — see `showCueEditor`'s doc for why a
+  /// translucent overlay route doesn't reliably block clicks from reaching
+  /// MapLibre's platform view underneath on Flutter Web.
   Future<void> _showCueList() async {
     final sorted = List<Cue>.of(_trail.cues)
       ..sort((a, b) => a.order.compareTo(b.order));
-    await _showModal(() => showDialog<void>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Cues'),
-        content: SizedBox(
-          width: 420,
-          child: sorted.isEmpty
-              ? const Padding(
-                  padding: EdgeInsets.symmetric(vertical: 12),
-                  child: Text('No cues yet — use "Add cue" or "Suggest cues".'),
-                )
-              : ListView.builder(
-                  shrinkWrap: true,
-                  itemCount: sorted.length,
-                  itemBuilder: (ctx, i) {
-                    final cue = sorted[i];
-                    return ListTile(
-                      leading: CircleAvatar(child: Text('${i + 1}')),
-                      title: Text(cue.label),
-                      subtitle: Text(cue.type.label),
-                      trailing: IconButton(
-                        tooltip: 'Edit cue',
-                        icon: const Icon(Icons.edit_outlined),
-                        onPressed: () async {
-                          Navigator.pop(ctx);
-                          await _editCue(cue);
-                        },
-                      ),
-                    );
-                  },
+    await _showModal(() => Navigator.of(context).push<void>(
+          MaterialPageRoute<void>(
+            fullscreenDialog: true,
+            builder: (ctx) => ColoredBox(
+              color: Colors.black54,
+              child: Center(
+                child: AlertDialog(
+                  title: const Text('Cues'),
+                  content: SizedBox(
+                    width: 420,
+                    child: sorted.isEmpty
+                        ? const Padding(
+                            padding: EdgeInsets.symmetric(vertical: 12),
+                            child: Text(
+                                'No cues yet — use "Add cue" or "Suggest cues".'),
+                          )
+                        : ListView.builder(
+                            shrinkWrap: true,
+                            itemCount: sorted.length,
+                            itemBuilder: (ctx, i) {
+                              final cue = sorted[i];
+                              return ListTile(
+                                leading: CircleAvatar(child: Text('${i + 1}')),
+                                title: Text(cue.label),
+                                subtitle: Text(cue.type.label),
+                                trailing: IconButton(
+                                  tooltip: 'Edit cue',
+                                  icon: const Icon(Icons.edit_outlined),
+                                  onPressed: () async {
+                                    Navigator.pop(ctx);
+                                    await _editCue(cue);
+                                  },
+                                ),
+                              );
+                            },
+                          ),
+                  ),
+                  actions: [
+                    TextButton(
+                        onPressed: () => Navigator.pop(ctx),
+                        child: const Text('Close')),
+                  ],
                 ),
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Close')),
-        ],
-      ),
-    ));
+              ),
+            ),
+          ),
+        ));
   }
 
   Future<void> _redraw() async {

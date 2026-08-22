@@ -22,19 +22,26 @@ final Cue addAnotherCueSentinel = Cue(
   order: -2,
 );
 
-/// Shows the cue editor as a modal bottom sheet (mobile) or a fixed-size
-/// centred dialog (desktop, [asDialog]) — a full-window-width/height bottom
-/// sheet on a desktop browser tab is a relic of the phone layout, and more
-/// importantly `showModalBottomSheet`'s barrier was confirmed on-device to
-/// *not* block clicks from reaching MapLibre's platform-view canvas
-/// underneath on Flutter Web: every click meant for the sheet (including
-/// Save/Cancel) was also landing on the map, which, with "Add cue" mode
-/// still active, immediately reopened another editor, looking like the
-/// sheet was permanently stuck. `showDialog`'s barrier doesn't have this
-/// problem; desktop callers additionally guard their own click handler
-/// while any dialog is open (`DesktopDesignerScreen._modalOpen`) as a
-/// second, independent layer against the same class of platform-view
-/// click-through. Returns the edited cue, [deletedCueSentinel] if deleted,
+/// Shows the cue editor as a modal bottom sheet (mobile) or a full-screen
+/// opaque route with a centred card (desktop, [asDialog]) — a full-window-
+/// width/height bottom sheet on a desktop browser tab is a relic of the
+/// phone layout, but the more important reason for a full *route* rather
+/// than a `Dialog`/`showModalBottomSheet` overlay: on Flutter Web,
+/// MapLibre's map is a real platform view (an actual DOM element), and
+/// confirmed on-device that a translucent overlay route (`showDialog`'s
+/// default barrier, `showModalBottomSheet`) does *not* reliably stop clicks
+/// from reaching it underneath — every click meant for the sheet/dialog
+/// (including Save/Cancel) was also landing on the map, which, with "Add
+/// cue" mode still active, immediately reopened another editor, looking
+/// permanently stuck. A `MaterialPageRoute` is `opaque: true` by default,
+/// which is what actually triggers Flutter's engine-level "hide fully-
+/// obscured platform views" behaviour — a `Dialog`'s barrier is visually
+/// translucent and isn't treated as obscuring for that purpose, so the map
+/// stayed both visible *and* clickable underneath it regardless of which
+/// overlay widget was used. Desktop callers additionally guard their own
+/// click handler while any dialog/route is open
+/// (`DesktopDesignerScreen._modalOpen`) as a second, independent layer.
+/// Returns the edited cue, [deletedCueSentinel] if deleted,
 /// [addAnotherCueSentinel] if the user chose to stack another cue here
 /// (both only possible when [existing] is given), or null if cancelled.
 ///
@@ -68,12 +75,25 @@ Future<Cue?> showCueEditor(
       );
 
   if (asDialog) {
-    return showDialog<Cue>(
-      context: context,
-      builder: (ctx) => Dialog(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 480, maxHeight: 640),
-          child: sheet(ctx),
+    return Navigator.of(context).push<Cue>(
+      MaterialPageRoute<Cue>(
+        fullscreenDialog: true,
+        // opaque: true (the default) is load-bearing here — see the doc
+        // above on why a translucent overlay wasn't enough to stop clicks
+        // reaching MapLibre's platform view underneath.
+        builder: (ctx) => ColoredBox(
+          color: Colors.black54,
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 480, maxHeight: 640),
+              child: Material(
+                borderRadius: BorderRadius.circular(12),
+                elevation: 8,
+                clipBehavior: Clip.antiAlias,
+                child: sheet(ctx),
+              ),
+            ),
+          ),
         ),
       ),
     );
