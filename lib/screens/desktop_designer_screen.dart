@@ -528,7 +528,11 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
       // disconnected and silently degrading to a straight-line "shortcut"
       // that visibly cuts across terrain.
       final rect = _followTrails ? await router.visibleViewportRect() : null;
+      final beforeSnap = pos;
       if (_followTrails) pos = await router.snapPoint(pos, rect: rect);
+      DebugLog.instance.log('_commitAnchorPosition: snapPoint moved '
+          '${metersBetween(beforeSnap, pos).toStringAsFixed(1)}m '
+          '(dropped at $beforeSnap, snapped to $pos)');
       var noRouteFound = false;
       final anchors = _trail.anchors;
       anchors[idx] = pos;
@@ -537,6 +541,9 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
         if (_followTrails) {
           final seg = await router.between(prev, pos, rect: rect);
           if (seg.length <= 2) noRouteFound = true;
+          DebugLog.instance.log('_commitAnchorPosition: between(prev, pos) '
+              '-> ${seg.length} points'
+              '${seg.length <= 2 ? " (NO ROUTE FOUND, straight fallback)" : ""}');
           _segments[idx] = seg;
         } else {
           _segments[idx] = [prev, pos];
@@ -549,6 +556,9 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
         if (_followTrails) {
           final seg = await router.between(pos, next, rect: rect);
           if (seg.length <= 2) noRouteFound = true;
+          DebugLog.instance.log('_commitAnchorPosition: between(pos, next) '
+              '-> ${seg.length} points'
+              '${seg.length <= 2 ? " (NO ROUTE FOUND, straight fallback)" : ""}');
           _segments[idx + 1] = seg;
         } else {
           _segments[idx + 1] = [pos, next];
@@ -1863,8 +1873,24 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
                 onCameraIdle: _prefetchRouteGraph,
                 compassEnabled: true,
               ),
+              // Geometrically excludes the debug panel's own rectangle
+              // (right:16/top:16/bottom:16/width:420 below) rather than
+              // relying on Flutter's Stack-order hit-testing to keep this
+              // full-screen `Listener` from also seeing clicks meant for the
+              // panel's buttons. A plain `Listener` doesn't participate in
+              // the gesture-arena exclusivity a `GestureDetector`/`IconButton`
+              // does — it can receive the *same* raw pointer event as a
+              // widget drawn on top of it, confirmed live (2026-08-22) as
+              // the cause of clicks on the panel's copy/clear/close buttons
+              // also reaching the draw/adjust tool underneath. Making the
+              // two widgets not overlap at all, geometrically, sidesteps the
+              // ambiguity entirely rather than fighting hit-test ordering.
               if (_tool == _Tool.dragDraw || _tool == _Tool.lineAdjust)
-                Positioned.fill(
+                Positioned(
+                  left: 0,
+                  top: 0,
+                  bottom: 0,
+                  right: _debugPanelOpen ? 452 : 0,
                   child: Listener(
                     behavior: HitTestBehavior.opaque,
                     onPointerSignal: _onOverlayWheel,
