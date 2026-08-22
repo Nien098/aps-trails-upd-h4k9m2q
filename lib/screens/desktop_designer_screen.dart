@@ -529,7 +529,22 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
       // that visibly cuts across terrain.
       final rect = _followTrails ? await router.visibleViewportRect() : null;
       final beforeSnap = pos;
-      if (_followTrails) pos = await router.snapPoint(pos, rect: rect);
+      if (_followTrails) {
+        pos = await router.snapPoint(pos, rect: rect);
+        if (metersBetween(beforeSnap, pos) < 0.01) {
+          // MapLibre GL JS's queryRenderedFeaturesInRect only sees tiles
+          // that have actually finished rendering *right now* — confirmed
+          // live (2026-08-22, via the debug panel) that the exact same rect,
+          // queried moments apart within one commit, found 0 features here
+          // and then 3 features in the between() calls that naturally ran
+          // ~500ms later (while this method's own offline-fetch timeout was
+          // pending) — a real rendering race on a just-settled camera, not
+          // a genuine absence of data. One short retry gives the map the
+          // same breathing room between() was accidentally getting.
+          await Future.delayed(const Duration(milliseconds: 400));
+          pos = await router.snapPoint(pos, rect: rect);
+        }
+      }
       DebugLog.instance.log('_commitAnchorPosition: snapPoint moved '
           '${metersBetween(beforeSnap, pos).toStringAsFixed(1)}m '
           '(dropped at $beforeSnap, snapped to $pos)');
