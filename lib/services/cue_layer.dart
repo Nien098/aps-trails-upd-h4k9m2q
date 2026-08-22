@@ -1,7 +1,7 @@
 import 'package:maplibre_gl/maplibre_gl.dart';
 
 /// Renders trail cue markers (numbered circle + text label) via a GeoJSON
-/// source backing two data-driven style layers — fully torn down and
+/// source backing several data-driven style layers — fully torn down and
 /// rebuilt from scratch on every redraw (see [setMarkers]).
 ///
 /// This replaces an earlier version that used the plugin's high-level
@@ -19,7 +19,7 @@ import 'package:maplibre_gl/maplibre_gl.dart';
 /// rendered the very first time, regardless of how the underlying data
 /// changed afterwards, even while the circle layer's colour visibly updated
 /// correctly on the very same redraw. Only fully recreating the source and
-/// both layers together has reliably shown correct text on-device.
+/// every layer together has reliably shown correct text on-device.
 class CueLayer {
   CueLayer(this.controller, {String id = 'cues'})
       : _sourceId = id,
@@ -39,24 +39,46 @@ class CueLayer {
     'features': <dynamic>[],
   };
 
-  SymbolLayerProperties get _symbolLayerProperties => SymbolLayerProperties(
+  /// How many stacked lines under one merged marker get their own distinct
+  /// vertical offset — comfortably more than any real-world junction is
+  /// likely to merge (see [CueMarker.lineIndex]'s doc for why this many
+  /// layers, one per line, is the fix rather than a single data-driven
+  /// offset).
+  static const _maxStackLines = 8;
+
+  String _symbolLayerIdFor(int line) => '${_symbolLayerId}_$line';
+
+  SymbolLayerProperties _symbolLayerPropertiesFor(int line) =>
+      SymbolLayerProperties(
         textField: ['get', 'text'],
         textSize: 15,
         textColor: ['get', 'textColor'],
         textHaloColor: '#ffffff',
         textHaloWidth: 2,
         textAnchor: 'top',
-        // A *fixed* offset, deliberately not data-driven: an earlier version
-        // read a per-feature array property here (['get', 'textOffset']) so
-        // each line of a stacked marker could sit at a different height, but
-        // that made the whole text layer fail to render anything at all —
-        // text-offset apparently isn't supported as a data expression on
-        // this plugin/native-SDK combination, and the failure is silent
-        // (no Dart-catchable exception, nothing in logcat). Per-line spacing
-        // is now done by nudging each line's own point geometry instead (see
-        // [CueMarker.position] in [GuideScreen._drawCues]) — geometry is
-        // definitely supported per-feature, sidestepping the whole question.
-        textOffset: [0, 1.2],
+        // A *fixed* offset (ems, not geographic) — MapLibre applies this in
+        // screen space after projection, so it stays a constant number of
+        // pixels regardless of zoom. This used to be the same [0, 1.2] for
+        // every line, with per-line vertical separation done instead by
+        // nudging each line's own point *geometry* a little further from
+        // the real spot (real-world metres, converted from a per-pixel
+        // budget at redraw time). That geographic approach is fundamentally
+        // zoom-dependent — a fixed real-world distance necessarily looks
+        // larger zoomed in and smaller zoomed out, confirmed live
+        // (2026-08-22): stacked cue text squished together when zoomed out
+        // and spread apart when zoomed in, no matter how the metre gap was
+        // computed. The actual fix is this: every line of a stack now sits
+        // at the *exact same* real position, and a *separate style layer
+        // per line index* (see [_maxStackLines]/[CueMarker.lineIndex]) each
+        // carries its own fixed, ever-larger ems offset, filtered to only
+        // that line's features. `textOffset` can't be a *data-driven*
+        // per-feature expression on this plugin/native-SDK combination (an
+        // earlier attempt at that made the whole text layer silently
+        // render nothing, no Dart-catchable exception, nothing in
+        // logcat) — but a fixed offset per *layer* works fine, so one layer
+        // per possible stack line sidesteps that limitation entirely while
+        // staying genuinely zoom-independent.
+        textOffset: [0, 1.2 + line * 1.2],
         textAllowOverlap: true,
         textIgnorePlacement: true,
       );
@@ -83,13 +105,20 @@ class CueLayer {
       enableInteraction: false,
       belowLayerId: _belowLayerId,
     );
-    await controller.addSymbolLayer(
-      _sourceId,
-      _symbolLayerId,
-      _symbolLayerProperties,
-      enableInteraction: false,
-      belowLayerId: _belowLayerId,
-    );
+    for (var line = 0; line < _maxStackLines; line++) {
+      await controller.addSymbolLayer(
+        _sourceId,
+        _symbolLayerIdFor(line),
+        _symbolLayerPropertiesFor(line),
+        filter: [
+          '==',
+          ['get', 'lineIndex'],
+          line,
+        ],
+        enableInteraction: false,
+        belowLayerId: _belowLayerId,
+      );
+    }
   }
 
   /// Replaces every marker. [markers] is a flat list of already-computed
@@ -97,8 +126,8 @@ class CueLayer {
   /// caller ([GuideScreen._drawCues]); this class only owns getting that
   /// data onto the map reliably.
   ///
-  /// Every redraw fully tears down and recreates the source *and both
-  /// layers* rather than updating them in place — on-device testing showed
+  /// Every redraw fully tears down and recreates the source *and every
+  /// layer* rather than updating them in place — on-device testing showed
   /// that in-place updates (`setGeoJsonSource` alone, and later even
   /// removing/re-adding just the text layer while leaving the source and
   /// circle layer in place) reliably leave the text stuck showing whatever
@@ -130,11 +159,14 @@ class CueLayer {
               'strokeWidth': m.strokeWidth,
               'text': m.text,
               'textColor': m.textColor,
+              'lineIndex': m.lineIndex,
             },
           },
       ],
     };
-    await controller.removeLayer(_symbolLayerId);
+    for (var line = 0; line < _maxStackLines; line++) {
+      await controller.removeLayer(_symbolLayerIdFor(line));
+    }
     await controller.removeLayer(_circleLayerId);
     await controller.removeSource(_sourceId);
     await _create(geojson);
@@ -147,10 +179,7 @@ class CueLayer {
 }
 
 /// One rendered pin: a circle (colour/size) plus its text label, both driven
-/// from the same data — see [CueLayer]. For a stacked group's 2nd+ line,
-/// [position] should already be nudged slightly off the real cue position
-/// (see [GuideScreen._drawCues]) so the lines don't fully overlap — the
-/// *real* circle (radius > 0) always uses the true, un-nudged position.
+/// from the same data — see [CueLayer].
 class CueMarker {
   const CueMarker({
     required this.position,
@@ -159,6 +188,7 @@ class CueMarker {
     required this.strokeWidth,
     required this.text,
     required this.textColor,
+    this.lineIndex = 0,
   });
 
   final LatLng position;
@@ -167,4 +197,16 @@ class CueMarker {
   final double strokeWidth;
   final String text;
   final String textColor;
+
+  /// Which stacked text line this marker is, within a group sharing one
+  /// spot — 0 for a solo marker or a stack's primary (real-circle) line,
+  /// 1/2/3/... for each additional line merged at the same point. Every
+  /// line of a stack now uses the exact same [position] (no geographic
+  /// nudging); [CueLayer] renders each `lineIndex` through its own style
+  /// layer with a distinct, genuinely zoom-independent screen-space text
+  /// offset instead. Capped at [CueLayer._maxStackLines] — a caller with
+  /// more simultaneous lines than that (unrealistic in practice) would see
+  /// the overflow lines render on top of the last supported offset rather
+  /// than crash.
+  final int lineIndex;
 }
