@@ -5,6 +5,7 @@ import 'dart:ui' show Rect;
 import 'package:maplibre_gl/maplibre_gl.dart';
 
 import 'geo.dart';
+import 'js_interop_norm.dart';
 import 'route_graph_store.dart';
 import 'settings.dart';
 
@@ -617,13 +618,14 @@ class TrailRouter {
     for (final f in raw) {
       final feature = f is String ? jsonDecode(f) : f;
       if (feature is! Map) continue;
-      final props =
-          (feature['properties'] as Map?)?.cast<String, dynamic>() ?? const {};
+      final props = (normalizeJs(feature['properties']) as Map?)
+              ?.cast<String, dynamic>() ??
+          const {};
       if (include != null && !include(props)) continue;
       final geom = feature['geometry'];
       if (geom is! Map) continue;
       final type = geom['type'];
-      final coords = geom['coordinates'];
+      final coords = normalizeJs(geom['coordinates']);
       final isRoad = _isRoad(props);
       if (type == 'LineString') {
         graph.addLine(coords, isRoad: isRoad);
