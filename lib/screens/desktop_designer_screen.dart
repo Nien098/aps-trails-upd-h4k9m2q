@@ -52,9 +52,24 @@ import '../widgets/opaque_dialog.dart';
 /// ([_Tool.drawBoundary]) instead of mobile's drag-lasso
 /// (`_onBoundaryPanStart`/etc.) — clicking each corner and hitting "Finish
 /// boundary" is the natural mouse equivalent of drag-lassoing an area with a
-/// finger, and avoids needing the same raw-pointer-drag capture
-/// infrastructure mobile's drawing tools use (`_DrawGestureSurface`), which
-/// this screen doesn't have.
+/// finger, and doesn't need a live-toggled pointer-drag-capture overlay the
+/// way [_Tool.dragDraw] (below) does.
+///
+/// [_Tool.dragDraw] (freehand trace) *does* capture a raw mouse drag —
+/// mirroring `AuthorScreen._onStrokePanStart`/`Update`/`End` closely — but
+/// gets there differently: mobile's `_DrawGestureSurface` overlays the map
+/// and relies on the overlay winning the gesture arena over whatever's
+/// underneath while native map gestures stay live. That's the same shape
+/// of "overlay above the map" trick that turned out to be unreliable for
+/// dialogs on Flutter Web (see [showOpaqueDialog]'s doc) — MapLibre's map
+/// is a real platform view there, not an ordinary widget. Rather than
+/// build on an unverified assumption a second time, [_Tool.dragDraw]
+/// disables the map's own dragging at the *platform* level instead
+/// (`MapLibreMap.dragEnabled`, a real, source-verified constructor flag —
+/// see [_lastCamera]'s doc for why that means rebuilding the map widget on
+/// every toggle) and only then adds its capture overlay, so there's never
+/// a moment where both the map and the overlay are trying to own the same
+/// drag.
 ///
 /// Every overlay here (cue editor/list, rename, colour picker, confirmations,
 /// the generator dialog) goes through [showOpaqueDialog] rather than
@@ -70,7 +85,7 @@ class DesktopDesignerScreen extends StatefulWidget {
 
 /// Which click behaviour is active — mutually exclusive, like
 /// `AuthorScreen`'s drawing-mode flags.
-enum _Tool { draw, moveAnchor, deleteAnchor, addCue, drawBoundary }
+enum _Tool { draw, moveAnchor, deleteAnchor, addCue, drawBoundary, dragDraw }
 
 class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
   static const _initialCamera =
@@ -80,6 +95,28 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
   RouteLayer? _route;
   CueLayer? _points;
   BoundaryLayer? _boundary;
+
+  /// Live preview line for a freehand drag stroke ([_Tool.dragDraw]) — a
+  /// second [RouteLayer] (`splitOutAndBack: false`, no need for the
+  /// out-and-back dash/arrow treatment on a still-being-drawn preview),
+  /// mirroring `AuthorScreen._strokeLayer`.
+  RouteLayer? _strokeLayer;
+
+  /// The map's own camera setting can only be chosen when the platform
+  /// view is *created* (`MapLibreMap.dragEnabled`, confirmed no runtime
+  /// setter exists on the controller) — so entering/leaving
+  /// [_Tool.dragDraw] rebuilds the whole `MapLibreMap` widget with a
+  /// different `key` to force a real recreate with dragging on/off, rather
+  /// than fighting an unverified overlay-vs-platform-view interaction the
+  /// way `AuthorScreen._DrawGestureSurface` does on mobile (this project
+  /// has already hit two confirmed cases this session of a Flutter-Web
+  /// platform view *not* behaving like mobile expects around an overlay —
+  /// see `showOpaqueDialog`'s doc — so the guaranteed-correct rebuild was
+  /// chosen deliberately over the smoother-but-unverified alternative).
+  /// Kept in sync via `onCameraIdle` so the rebuilt map opens exactly
+  /// where the old one left off instead of jumping back to
+  /// [_initialCamera].
+  CameraPosition? _lastCamera;
   Trail _trail = Trail(name: 'New trail', regionId: 'web-design');
 
   /// Per-anchor-hop coordinate arrays, one entry per anchor, aligned by
@@ -117,6 +154,29 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
   final List<LatLng> _boundaryPoints = [];
 
   bool get _hasBoundary => _boundaryPoints.length >= 3;
+
+  /// Screen-space drag-in-progress trace for [_Tool.dragDraw] — mirrors
+  /// `AuthorScreen._strokePoints`/`_onStrokePanStart`/`Update`/`End`.
+  final List<Offset> _strokePoints = [];
+  List<LatLng> _strokePreview = [];
+  bool _convertingStrokePoint = false;
+  bool _committingStroke = false;
+  int _previewGeneration = 0;
+
+  static const _strokePreviewColor = '#FF6D00';
+
+  /// Minimum on-screen distance (px) between accepted drag points, and a
+  /// hard cap on how many can accumulate — keeps a slow/jittery drag from
+  /// ballooning the point count. Same values as
+  /// `AuthorScreen._dragPointSpacing`/`_dragPointCap`.
+  static const _dragPointSpacing = 6.0;
+  static const _dragPointCap = 150;
+
+  /// Real-anchor spacing (m) along a committed drag-draw stroke — see
+  /// `AuthorScreen._strokeAnchorIntervalMeters`'s doc for why real,
+  /// evenly-spaced anchors matter (a future line-adjust tool needs genuine
+  /// bend points, not just the stroke's two endpoints).
+  static const _strokeAnchorIntervalMeters = 25.0;
 
   bool _busy = false;
   String? _status;
@@ -162,8 +222,12 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     await _points!.ensure();
     _boundary = BoundaryLayer(c);
     await _boundary!.ensure();
+    _strokeLayer = RouteLayer(c, id: 'strokePreview', splitOutAndBack: false);
+    await _strokeLayer!.ensure();
     await _redraw();
   }
+
+  void _onCameraIdle() => _lastCamera = _c?.cameraPosition;
 
   /// Flattens [_segments] into the full route polyline — identical to
   /// `AuthorScreen._composePath`.
@@ -282,6 +346,13 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
       case _Tool.drawBoundary:
         setState(() => _boundaryPoints.add(coords));
         await _boundary?.setPolygon(_boundaryPoints);
+      case _Tool.dragDraw:
+        // No-op: drawing happens via the full-screen GestureDetector
+        // overlay's pan callbacks while this tool is active, not map
+        // clicks — the overlay's HitTestBehavior.opaque means this
+        // callback shouldn't even fire, but the switch must stay
+        // exhaustive regardless.
+        break;
     }
   }
 
@@ -352,6 +423,113 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
       await _redraw();
     } finally {
       if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  void _onStrokePanStart(Offset p) {
+    setState(() {
+      _previewGeneration++;
+      _strokePoints
+        ..clear()
+        ..add(p);
+      _strokePreview = [];
+    });
+  }
+
+  void _onStrokePanUpdate(Offset p) {
+    if (_strokePoints.isNotEmpty &&
+        (_strokePoints.length >= _dragPointCap ||
+            (p - _strokePoints.last).distance < _dragPointSpacing)) {
+      return;
+    }
+    setState(() => _strokePoints.add(p));
+    _pushStrokePreview(p);
+  }
+
+  /// Best-effort live preview of the raw (unsnapped) drag — self-throttles
+  /// (skips a point if a previous conversion is still in flight) rather
+  /// than queueing, same as `AuthorScreen._pushStrokePreview`.
+  Future<void> _pushStrokePreview(Offset p) async {
+    final c = _c;
+    if (c == null || _convertingStrokePoint || !mounted) return;
+    final gen = _previewGeneration;
+    _convertingStrokePoint = true;
+    try {
+      final dpr = MediaQuery.of(context).devicePixelRatio;
+      final latlng = await c.toLatLng(Point(p.dx * dpr, p.dy * dpr));
+      if (!mounted || _tool != _Tool.dragDraw || gen != _previewGeneration) return;
+      _strokePreview.add(latlng);
+      if (_strokePreview.length >= 2) {
+        await _strokeLayer?.setRoute(_strokePreview, _strokePreviewColor);
+      }
+    } finally {
+      _convertingStrokePoint = false;
+    }
+  }
+
+  /// Converts the finished drag into map points, then snaps the whole
+  /// stroke onto the trail/road network as one pass — identical logic to
+  /// `AuthorScreen._onStrokePanEnd` (see its doc for why `snapStroke`, not
+  /// a per-point `snapPoint` loop, and why real anchors are dropped every
+  /// [_strokeAnchorIntervalMeters] along it instead of just at the ends).
+  Future<void> _onStrokePanEnd() async {
+    final c = _c;
+    final points = List<Offset>.of(_strokePoints);
+    setState(() {
+      _previewGeneration++;
+      _strokePoints.clear();
+      _strokePreview = [];
+    });
+    await _strokeLayer?.setRoute(const [], _strokePreviewColor);
+    if (!mounted || c == null || points.length < 2 || _committingStroke) return;
+    final minX = points.map((p) => p.dx).reduce(min);
+    final maxX = points.map((p) => p.dx).reduce(max);
+    final minY = points.map((p) => p.dy).reduce(min);
+    final maxY = points.map((p) => p.dy).reduce(max);
+    if (maxX - minX < 12 && maxY - minY < 12) return;
+
+    setState(() => _committingStroke = true);
+    try {
+      final dpr = MediaQuery.of(context).devicePixelRatio;
+      final raw = await Future.wait(
+          points.map((p) => c.toLatLng(Point(p.dx * dpr, p.dy * dpr))));
+      final simplified = simplifyPath(raw, 2.5);
+      if (simplified.length < 2) return;
+      final rawSnapped =
+          _followTrails ? await TrailRouter(c).snapStroke(simplified, maxMeters: 50) : simplified;
+      final snapped = <LatLng>[];
+      for (final s in rawSnapped) {
+        if (snapped.isEmpty || metersBetween(snapped.last, s) >= 3) {
+          snapped.add(s);
+        }
+      }
+      if (snapped.length < 2 || !mounted) return;
+      _pushUndo();
+      setState(() {
+        if (_trail.anchors.isEmpty) {
+          _trail.anchors.add(snapped.first);
+          _segments.add([snapped.first]);
+        } else if (metersBetween(_trail.anchors.last, snapped.first) > 3) {
+          _trail.anchors.add(snapped.first);
+          _segments.add([_trail.anchors[_trail.anchors.length - 2], snapped.first]);
+        }
+        var last = _trail.anchors.last;
+        var sinceAnchor = <LatLng>[last];
+        for (var i = 1; i < snapped.length; i++) {
+          sinceAnchor.add(snapped[i]);
+          final isLast = i == snapped.length - 1;
+          if (isLast || pathLength(sinceAnchor) >= _strokeAnchorIntervalMeters) {
+            _trail.anchors.add(snapped[i]);
+            _segments.add(sinceAnchor);
+            last = snapped[i];
+            sinceAnchor = [last];
+          }
+        }
+        _trail.path = _composePath();
+      });
+      await _redraw();
+    } finally {
+      if (mounted) setState(() => _committingStroke = false);
     }
   }
 
@@ -894,6 +1072,7 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
         _Tool.addCue => 'Click the map to place a cue there.',
         _Tool.drawBoundary =>
           'Click each corner of the area, then "Finish boundary" (${_boundaryPoints.length} so far).',
+        _Tool.dragDraw => 'Click and drag to trace a trail freehand.',
       };
 
   @override
@@ -993,6 +1172,10 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
                   value: _Tool.drawBoundary,
                   icon: Icon(Icons.crop_free),
                   label: Text('Boundary')),
+              ButtonSegment(
+                  value: _Tool.dragDraw,
+                  icon: Icon(Icons.gesture),
+                  label: Text('Freehand')),
             ],
             selected: {_tool},
             onSelectionChanged: (s) => setState(() {
@@ -1027,13 +1210,29 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
           return Stack(
             children: [
               MapLibreMap(
+                // Forces a full recreate (with dragging on/off) whenever
+                // entering/leaving the freehand-draw tool — see
+                // `_lastCamera`'s doc for why that's the deliberately
+                // chosen mechanism here, not a live-toggled overlay.
+                key: ValueKey(_tool == _Tool.dragDraw),
                 styleString: snap.data!,
-                initialCameraPosition: _initialCamera,
+                initialCameraPosition: _lastCamera ?? _initialCamera,
+                dragEnabled: _tool != _Tool.dragDraw,
                 onMapCreated: _onMapCreated,
                 onStyleLoadedCallback: _onStyleLoaded,
                 onMapClick: _onMapClick,
+                onCameraIdle: _onCameraIdle,
                 compassEnabled: true,
               ),
+              if (_tool == _Tool.dragDraw)
+                Positioned.fill(
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onPanStart: (d) => _onStrokePanStart(d.localPosition),
+                    onPanUpdate: (d) => _onStrokePanUpdate(d.localPosition),
+                    onPanEnd: (_) => _onStrokePanEnd(),
+                  ),
+                ),
               Positioned(
                 left: 16,
                 bottom: 16,
