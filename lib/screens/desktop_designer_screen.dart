@@ -2,6 +2,7 @@ import 'dart:math' show Point, exp, max, min, sqrt;
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:maplibre_gl/maplibre_gl.dart';
 
 import '../cue_style.dart';
@@ -514,6 +515,74 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
         event.scrollDelta.dy < 0 ? CameraUpdate.zoomIn() : CameraUpdate.zoomOut());
   }
 
+  /// True for the duration of a gesture that started as a camera-pan
+  /// override (middle-mouse button, or Shift/Ctrl held) rather than a
+  /// draw/adjust drag — decided once at [_onOverlayPointerDown] and held
+  /// for the rest of that gesture, so switching modifier keys mid-drag
+  /// can't flip behaviour underneath the user's finger.
+  bool _overlayPanningCamera = false;
+  Offset? _overlayPanLast;
+
+  /// Replaces a plain `GestureDetector` for the drag-tool overlay so a
+  /// gesture can be routed to camera-pan instead of drawing *before* it
+  /// starts, based on which mouse button or modifier key was down at
+  /// pointer-down — a `GestureDetector`'s pan callbacks don't expose either
+  /// of those. Lets the user pan the map with the middle mouse button, or
+  /// by holding Shift/Ctrl, without having to switch the tool off and back
+  /// on just to reposition the view mid-edit.
+  void _onOverlayPointerDown(PointerDownEvent e) {
+    final panOverride = e.buttons == kMiddleMouseButton ||
+        HardwareKeyboard.instance.isShiftPressed ||
+        HardwareKeyboard.instance.isControlPressed;
+    _overlayPanningCamera = panOverride;
+    if (panOverride) {
+      _overlayPanLast = e.localPosition;
+      return;
+    }
+    if (_tool == _Tool.dragDraw) {
+      _onStrokePanStart(e.localPosition);
+    } else {
+      _onAdjustPanStart(e.localPosition);
+    }
+  }
+
+  void _onOverlayPointerMove(PointerMoveEvent e) {
+    if (_overlayPanningCamera) {
+      final last = _overlayPanLast;
+      if (last != null) {
+        final delta = e.localPosition - last;
+        _c?.moveCamera(CameraUpdate.scrollBy(delta.dx, delta.dy));
+      }
+      _overlayPanLast = e.localPosition;
+      return;
+    }
+    if (_tool == _Tool.dragDraw) {
+      _onStrokePanUpdate(e.localPosition);
+    } else {
+      _onAdjustPanUpdate(e.localPosition);
+    }
+  }
+
+  void _onOverlayPointerUp(PointerUpEvent e) {
+    if (_overlayPanningCamera) {
+      _overlayPanningCamera = false;
+      _overlayPanLast = null;
+      return;
+    }
+    if (_tool == _Tool.dragDraw) {
+      _onStrokePanEnd();
+    } else {
+      _onAdjustPanEnd();
+    }
+  }
+
+  void _onOverlayPointerCancel(PointerCancelEvent e) {
+    if (_overlayPanningCamera) {
+      _overlayPanningCamera = false;
+      _overlayPanLast = null;
+    }
+  }
+
   void _onStrokePanStart(Offset p) {
     final mapped = _mapPoint(p);
     setState(() {
@@ -903,7 +972,15 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     if (segIdx == null || original == null || grabIdx == null || grabOriginal == null) {
       return;
     }
-    final deformed = _deformSegment(original, grabIdx, grabOriginal, newPos);
+    // Snap the drop point onto the nearest trail/road edge before bending
+    // toward it — the same improvement [_commitAnchorPosition] got, applied
+    // here too: without it, a mid-line grab-and-bend was purely geometric
+    // (matching `AuthorScreen`'s deliberately non-snapping wire-bend) and
+    // never actually pulled the line onto nearby trail data, only wherever
+    // the mouse released.
+    final snapped =
+        _followTrails ? await TrailRouter(c).snapPoint(newPos) : newPos;
+    final deformed = _deformSegment(original, grabIdx, grabOriginal, snapped);
     setState(() {
       _segments[segIdx] = deformed;
       _trail.path = _composePath();
@@ -1494,9 +1571,11 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
         _Tool.addCue => 'Click the map to place a cue there.',
         _Tool.drawBoundary =>
           'Click each corner of the area, then "Finish boundary" (${_boundaryPoints.length} so far).',
-        _Tool.dragDraw => 'Click and drag to trace a trail freehand.',
+        _Tool.dragDraw => 'Click and drag to trace a trail freehand. '
+            'Middle-click-drag, or hold Shift/Ctrl and drag, to pan the map instead.',
         _Tool.lineAdjust =>
-          'Drag a point on the line to bend it, or drag a marked point to move it.',
+          'Drag a point on the line to bend it, or drag a marked point to move it. '
+              'Middle-click-drag, or hold Shift/Ctrl and drag, to pan the map instead.',
       };
 
   @override
@@ -1658,18 +1737,10 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
                   child: Listener(
                     behavior: HitTestBehavior.opaque,
                     onPointerSignal: _onOverlayWheel,
-                    child: GestureDetector(
-                      behavior: HitTestBehavior.opaque,
-                      onPanStart: (d) => _tool == _Tool.dragDraw
-                          ? _onStrokePanStart(d.localPosition)
-                          : _onAdjustPanStart(d.localPosition),
-                      onPanUpdate: (d) => _tool == _Tool.dragDraw
-                          ? _onStrokePanUpdate(d.localPosition)
-                          : _onAdjustPanUpdate(d.localPosition),
-                      onPanEnd: (_) => _tool == _Tool.dragDraw
-                          ? _onStrokePanEnd()
-                          : _onAdjustPanEnd(),
-                    ),
+                    onPointerDown: _onOverlayPointerDown,
+                    onPointerMove: _onOverlayPointerMove,
+                    onPointerUp: _onOverlayPointerUp,
+                    onPointerCancel: _onOverlayPointerCancel,
                   ),
                 ),
               Positioned(
