@@ -1235,6 +1235,26 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
         groups.add([cue]);
       }
     }
+
+    // How far apart (in real-world metres) each stacked line's text sits —
+    // converted from a fixed *screen-pixel* gap via the current zoom's
+    // metres-per-pixel, not a flat metre value. A flat metre value (what
+    // this originally used, and what `GuideScreen._drawCues` still uses,
+    // fine there since a walk stays at one close, fairly consistent zoom)
+    // shrinks to sub-pixel and garbles every line into unreadable
+    // overlapping text the moment the desktop designer is zoomed out to
+    // see a whole route — confirmed live (2026-08-22): 3 merged cues at a
+    // city-wide zoom rendered as illegible overlapping text even though
+    // the merge itself (one circle, not separate dots) was already
+    // correct by that point.
+    const desiredLinePixelGap = 16.0;
+    var metersPerLine = 3.5;
+    final c = _c;
+    if (c != null && groups.any((g) => g.length > 1)) {
+      final lat = c.cameraPosition?.target.latitude ?? _initialCamera.target.latitude;
+      metersPerLine = await c.getMetersPerPixelAtLatitude(lat) * desiredLinePixelGap;
+    }
+
     for (final group in groups) {
       final stacked = group.length > 1;
       if (stacked) {
@@ -1253,12 +1273,21 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
         const metersPerDegLat = 111320.0;
         final linePos = i == 0
             ? pos
-            : LatLng(pos.latitude - (i * 3.5) / metersPerDegLat, pos.longitude);
+            : LatLng(pos.latitude - (i * metersPerLine) / metersPerDegLat, pos.longitude);
+        // Every group member past the first is meant to be a text-only line
+        // (radius 0) — but on this map/style combination, a *stroked*
+        // circle of radius 0 still paints a small solid dot the size of the
+        // stroke width instead of nothing at all (confirmed live: this was
+        // the real cause of "extra dots" appearing below a merged cue
+        // marker, not a grouping failure — the group itself was already
+        // merging correctly). Zeroing strokeWidth for i>0 too, not just
+        // radius, is what actually makes it invisible.
+        final isPrimary = i == 0;
         markers.add(CueMarker(
           position: linePos,
-          radius: i == 0 ? (stacked ? 13 : 11) : 0,
+          radius: isPrimary ? (stacked ? 13 : 11) : 0,
           color: color,
-          strokeWidth: stacked ? 4 : 3,
+          strokeWidth: isPrimary ? (stacked ? 4 : 3) : 0,
           text: '${rank[cue] ?? "–"}. ${cue.label}',
           textColor: '#1A1A1A',
         ));
