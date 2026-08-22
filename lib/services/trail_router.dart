@@ -4,6 +4,7 @@ import 'dart:ui' show Rect;
 
 import 'package:maplibre_gl/maplibre_gl.dart';
 
+import 'debug_log.dart';
 import 'geo.dart';
 import 'js_interop_norm.dart';
 import 'route_graph_store.dart';
@@ -617,9 +618,11 @@ class TrailRouter {
     Surface surface = Surface.mixed,
     LatLngBounds? geoBounds,
   }) async {
+    final sw = DebugLog.instance.enabled ? (Stopwatch()..start()) : null;
     final graph = _Graph();
     await _addFeaturesToGraph(graph, rect,
         include: _includeFor(surface), geoBounds: geoBounds, surface: surface);
+    final afterFeatures = sw?.elapsedMilliseconds;
     // A single real-world trail can arrive as several separate LineString
     // features (e.g. split around a line-label's placement point, or by tile
     // clipping) whose "shared" endpoint differs by a few metres between
@@ -629,12 +632,20 @@ class TrailRouter {
     // under the trail's name label). Merge close-enough fragment endpoints
     // so the trail reads as one continuous edge again.
     graph._mergeNearbyNodes(_mergeToleranceMeters);
+    final afterMerge = sw?.elapsedMilliseconds;
     // Two edges that visibly cross on the map (a trail crossing a road,
     // most commonly) are otherwise invisible to the router as a connection
     // point unless the source data happens to place a real shared vertex
     // exactly there — see [_Graph._splitCrossings]'s doc for why this
     // matters and why it's safe.
     graph._splitCrossings();
+    if (sw != null) {
+      final mergeMs = afterMerge! - afterFeatures!;
+      final crossMs = sw.elapsedMilliseconds - afterMerge;
+      DebugLog.instance.log('_buildGraph: ${graph.nodes.length} nodes, '
+          '${sw.elapsedMilliseconds}ms total (features ${afterFeatures}ms, '
+          'mergeNearbyNodes ${mergeMs}ms, splitCrossings ${crossMs}ms)');
+    }
     return graph;
   }
 
@@ -682,8 +693,10 @@ class TrailRouter {
     LatLngBounds? geoBounds,
     Surface surface = Surface.mixed,
   }) async {
+    final swRender = DebugLog.instance.enabled ? (Stopwatch()..start()) : null;
     final raw =
         await controller.queryRenderedFeaturesInRect(rect, _roadSourceLayers, null);
+    final renderMs = swRender?.elapsedMilliseconds;
     for (final f in raw) {
       final feature = f is String ? jsonDecode(f) : f;
       if (feature is! Map) continue;
@@ -712,10 +725,31 @@ class TrailRouter {
     // correctness (multiple rounds of real-device fixes) isn't at risk —
     // offline ways just add more candidate edges before Dijkstra runs.
     if (geoBounds != null) {
-      final ways = await RouteGraphStore.instance.waysInBounds(geoBounds);
+      final swOffline = DebugLog.instance.enabled ? (Stopwatch()..start()) : null;
+      // Capped at a short timeout — on web, waysInBounds can mean a real
+      // live Overpass fetch (see RouteGraphStore's web doc), and a dense
+      // urban area's query has been measured taking 4+ seconds. Never worth
+      // blocking an interactive click that long: the underlying fetch keeps
+      // running and populates RouteGraphStore's own cache regardless of
+      // this timeout, so it's ready for the *next* action in the same area
+      // even when this one proceeds without it. Confirmed via the desktop
+      // designer's debug panel (2026-08-22) that a slow live fetch — not
+      // the render query or the graph post-processing below, both
+      // consistently sub-millisecond — was the actual dominant cost behind
+      // a reported "clicking to draw takes a couple of seconds" regression.
+      // Harmless on mobile too: its `waysInBounds` is a local SQLite lookup
+      // that never comes close to this timeout.
+      final ways = await RouteGraphStore.instance
+          .waysInBounds(geoBounds)
+          .timeout(const Duration(milliseconds: 500), onTimeout: () => const []);
       for (final w in ways) {
         if (!_includeOfflineKind(w.kind, surface)) continue;
         graph.addLatLngChain(w.coords, isRoad: w.kind == 'road');
+      }
+      if (swOffline != null) {
+        DebugLog.instance.log('_addFeaturesToGraph: rendered ${raw.length} '
+            'features in ${renderMs}ms; offline ${ways.length} ways in '
+            '${swOffline.elapsedMilliseconds}ms (bounds=$geoBounds)');
       }
     }
   }

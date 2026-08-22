@@ -1,3 +1,4 @@
+import 'dart:async' show unawaited;
 import 'dart:math' show Point, exp, max, min, sqrt;
 
 import 'package:flutter/gestures.dart';
@@ -10,9 +11,11 @@ import '../models/trail.dart';
 import '../services/boundary_layer.dart';
 import '../services/cue_gen.dart';
 import '../services/cue_layer.dart';
+import '../services/debug_log.dart';
 import '../services/geo.dart';
 import '../services/map_drag_lock.dart';
 import '../services/pointer_probe.dart';
+import '../services/route_graph_store.dart';
 import '../services/route_layer.dart';
 import '../services/settings.dart';
 import '../services/trail_router.dart';
@@ -134,6 +137,12 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
   /// snaps onto the nearest trail/road currently rendered and routes along
   /// real geometry; when off, points connect with a raw straight line.
   bool _followTrails = true;
+
+  /// Whether the diagnostics panel (see the bug-icon toolbar button) is
+  /// open. Toggling this also flips [DebugLog.enabled] — logging only runs
+  /// while someone's actually watching, so it costs nothing the rest of the
+  /// time.
+  bool _debugPanelOpen = false;
 
   /// Anchor index picked in [_Tool.moveAnchor] mode, awaiting the click that
   /// places it — a simple click-then-click flow (mirrors the older tap-to-
@@ -281,6 +290,25 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     _strokeLayer = RouteLayer(c, id: 'strokePreview', splitOutAndBack: false);
     await _strokeLayer!.ensure();
     await _redraw();
+    _prefetchRouteGraph();
+  }
+
+  /// Fire-and-forget: warms [RouteGraphStore]'s per-cell cache for whatever's
+  /// currently visible, so a real click/drag a moment later usually finds
+  /// its cells already fetched instead of paying that network round-trip
+  /// itself. Wired to both the initial style-load and the map's
+  /// `onCameraIdle` (fires after every pan/zoom settles) — the same idea as
+  /// mobile always having its whole bundled region already on disk, just
+  /// warmed just-in-time instead of bundled ahead of time. Never awaited by
+  /// any caller and swallows its own errors: a failed/slow prefetch must
+  /// never block or visibly affect anything, it can only help.
+  void _prefetchRouteGraph() {
+    final c = _c;
+    if (c == null) return;
+    unawaited(c.getVisibleRegion().then(
+      (bounds) => RouteGraphStore.instance.prefetch(bounds),
+      onError: (_) {},
+    ));
   }
 
   /// Flattens [_segments] into the full route polyline — identical to
@@ -1779,6 +1807,16 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
             selected: _followTrails,
             onSelected: (v) => setState(() => _followTrails = v),
           ),
+          const SizedBox(width: 8),
+          IconButton(
+            icon: const Icon(Icons.bug_report_outlined),
+            tooltip: 'Diagnostics log',
+            isSelected: _debugPanelOpen,
+            onPressed: () => setState(() {
+              _debugPanelOpen = !_debugPanelOpen;
+              DebugLog.instance.enabled = _debugPanelOpen;
+            }),
+          ),
           const SizedBox(width: 16),
         ],
       ),
@@ -1799,6 +1837,7 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
                 onMapCreated: _onMapCreated,
                 onStyleLoadedCallback: _onStyleLoaded,
                 onMapClick: _onMapClick,
+                onCameraIdle: _prefetchRouteGraph,
                 compassEnabled: true,
               ),
               if (_tool == _Tool.dragDraw || _tool == _Tool.lineAdjust)
@@ -1832,9 +1871,116 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
                   ),
                 ),
               ),
+              if (_debugPanelOpen)
+                Positioned(
+                  right: 16,
+                  top: 16,
+                  bottom: 16,
+                  width: 420,
+                  child: _DebugPanel(onClose: () => setState(() {
+                    _debugPanelOpen = false;
+                    DebugLog.instance.enabled = false;
+                  })),
+                ),
             ],
           );
         },
+      ),
+    );
+  }
+}
+
+/// Live-scrolling diagnostics panel — see [DebugLog]. Not a route/dialog (no
+/// `showOpaqueDialog`/`showDialog` involved), just an ordinary opaque widget
+/// placed directly in the map screen's own `Stack`, so it doesn't have (or
+/// need to guard against) the translucent-barrier click-bleed-through issue
+/// documented for this screen's actual dialogs. "Copy" is the intended
+/// hand-off path: paste the result straight into chat.
+class _DebugPanel extends StatefulWidget {
+  const _DebugPanel({required this.onClose});
+  final VoidCallback onClose;
+
+  @override
+  State<_DebugPanel> createState() => _DebugPanelState();
+}
+
+class _DebugPanelState extends State<_DebugPanel> {
+  final _scroll = ScrollController();
+
+  void _scrollToEnd() {
+    if (!_scroll.hasClients) return;
+    _scroll.jumpTo(_scroll.position.maxScrollExtent);
+  }
+
+  @override
+  void dispose() {
+    _scroll.dispose();
+    super.dispose();
+  }
+
+  Future<void> _copy() async {
+    await Clipboard.setData(ClipboardData(text: DebugLog.instance.text));
+    if (mounted) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('Debug log copied')));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      elevation: 8,
+      child: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 8, 4, 8),
+            child: Row(
+              children: [
+                const Expanded(
+                    child: Text('Diagnostics log',
+                        style: TextStyle(fontWeight: FontWeight.bold))),
+                IconButton(
+                    icon: const Icon(Icons.copy, size: 18),
+                    tooltip: 'Copy log',
+                    onPressed: _copy),
+                IconButton(
+                    icon: const Icon(Icons.delete_outline, size: 18),
+                    tooltip: 'Clear log',
+                    onPressed: () => DebugLog.instance.clear()),
+                IconButton(
+                    icon: const Icon(Icons.close, size: 18),
+                    tooltip: 'Close',
+                    onPressed: widget.onClose),
+              ],
+            ),
+          ),
+          const Divider(height: 1),
+          Expanded(
+            child: ListenableBuilder(
+              listenable: DebugLog.instance.version,
+              builder: (context, _) {
+                WidgetsBinding.instance
+                    .addPostFrameCallback((_) => _scrollToEnd());
+                final lines = DebugLog.instance.lines;
+                return Scrollbar(
+                  controller: _scroll,
+                  child: SelectionArea(
+                    child: ListView.builder(
+                      controller: _scroll,
+                      padding: const EdgeInsets.all(8),
+                      itemCount: lines.length,
+                      itemBuilder: (context, i) => Text(
+                        lines[i],
+                        style: const TextStyle(
+                            fontFamily: 'monospace', fontSize: 11),
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
       ),
     );
   }

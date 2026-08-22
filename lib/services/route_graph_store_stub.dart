@@ -4,6 +4,8 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:maplibre_gl/maplibre_gl.dart';
 
+import 'debug_log.dart';
+
 /// A road/trail/sidewalk way's geometry — see `route_graph_store.dart`'s
 /// conditional export. [kind] mirrors `TrailRouter._isRoad`/`_isTrail`/
 /// `_isSidewalk`'s classification.
@@ -53,13 +55,22 @@ class RouteGraphStore {
   final Map<String, List<RouteWay>> _cache = {};
   final Map<String, Future<List<RouteWay>>> _inFlight = {};
 
+  /// Fetches every cell overlapping [bounds] **in parallel**, not one at a
+  /// time — a single click/drag's padded query area can span 2-4 cells (see
+  /// [_cellDeg]), and a sequential `for` loop here made each of those pay
+  /// its own full Overpass round-trip back-to-back, directly causing a real
+  /// reported "click-to-draw takes a couple of seconds now" regression
+  /// (confirmed once cache/`_inFlight` sharing meant a *cached* cell already
+  /// returned instantly — the slowdown was specifically proportional to how
+  /// many cells a query touched, not a per-call fixed cost). `Future.wait`
+  /// fixes this: cells sharing a fetch (via [_inFlight]) or already cached
+  /// resolve immediately, and any genuinely new cells fetch concurrently, so
+  /// total latency is roughly the *slowest single cell*, not the sum of all
+  /// of them.
   Future<List<RouteWay>> waysInBounds(LatLngBounds bounds) async {
     final cells = _cellsFor(bounds);
-    final results = <RouteWay>[];
-    for (final cell in cells) {
-      results.addAll(await _waysForCell(cell));
-    }
-    return results;
+    final perCell = await Future.wait(cells.map(_waysForCell));
+    return [for (final ways in perCell) ...ways];
   }
 
   List<({int lat, int lon})> _cellsFor(LatLngBounds b) {
@@ -76,25 +87,41 @@ class RouteGraphStore {
   Future<List<RouteWay>> _waysForCell(({int lat, int lon}) cell) {
     final key = '${cell.lat}:${cell.lon}';
     final cached = _cache[key];
-    if (cached != null) return Future.value(cached);
+    if (cached != null) {
+      DebugLog.instance.log('RouteGraphStore cell $key: cache hit '
+          '(${cached.length} ways)');
+      return Future.value(cached);
+    }
     final inFlight = _inFlight[key];
-    if (inFlight != null) return inFlight;
+    if (inFlight != null) {
+      DebugLog.instance.log('RouteGraphStore cell $key: joining in-flight fetch');
+      return inFlight;
+    }
 
     final south = cell.lat * _cellDeg;
     final north = south + _cellDeg;
     final west = cell.lon * _cellDeg;
     final east = west + _cellDeg;
+    final sw = DebugLog.instance.enabled ? (Stopwatch()..start()) : null;
     final future = _fetchCell(south, west, north, east).then((ways) {
       _cache[key] = ways;
       _inFlight.remove(key);
+      if (sw != null) {
+        DebugLog.instance.log('RouteGraphStore cell $key: fetched '
+            '${ways.length} ways in ${sw.elapsedMilliseconds}ms');
+      }
       return ways;
-    }).catchError((Object _) {
+    }).catchError((Object e) {
       // Deliberately NOT cached — a transient network hiccup shouldn't
       // permanently disable supplemental data for the rest of the editing
       // session, unlike a genuine empty-result cache hit above. The caller
       // (TrailRouter._addFeaturesToGraph) treats an empty list exactly like
       // "nothing offline found here", same as it always has.
       _inFlight.remove(key);
+      if (sw != null) {
+        DebugLog.instance.log('RouteGraphStore cell $key: failed after '
+            '${sw.elapsedMilliseconds}ms — $e');
+      }
       return <RouteWay>[];
     });
     _inFlight[key] = future;
@@ -137,13 +164,21 @@ class RouteGraphStore {
         'out tags geom;';
     for (var attempt = 0; attempt <= 1; attempt++) {
       try {
+        final swNet = DebugLog.instance.enabled ? (Stopwatch()..start()) : null;
         final resp = await http
             .post(Uri.parse('https://overpass-api.de/api/interpreter'),
                 body: {'data': query})
             .timeout(const Duration(seconds: 8));
+        final netMs = swNet?.elapsedMilliseconds;
         if (resp.statusCode != 200) continue;
+        final swParse = DebugLog.instance.enabled ? (Stopwatch()..start()) : null;
         final decoded = jsonDecode(resp.body);
         final raw = decoded is Map ? decoded['elements'] : null;
+        if (swParse != null) {
+          DebugLog.instance.log('RouteGraphStore fetch: network ${netMs}ms, '
+              '${resp.bodyBytes.length}B, jsonDecode '
+              '${swParse.elapsedMilliseconds}ms so far');
+        }
         if (raw is! List) continue;
         // Eagerly filter to real Maps rather than a lazy `.cast<Map>()` —
         // Overpass can return a malformed/non-Map element under load, and a
@@ -168,6 +203,11 @@ class RouteGraphStore {
           if (coords.length < 2) continue;
           ways.add((coords: coords, kind: kind));
         }
+        if (swParse != null) {
+          DebugLog.instance.log('RouteGraphStore fetch: parsed '
+              '${elements.length} elements into ${ways.length} ways, '
+              '${swParse.elapsedMilliseconds}ms total parse');
+        }
         return ways;
       } catch (_) {
         // fall through to retry/give up below
@@ -175,6 +215,15 @@ class RouteGraphStore {
     }
     return const [];
   }
+
+  /// Fire-and-forget cache warm-up for [bounds] — identical work to
+  /// [waysInBounds], just named for call sites (see
+  /// `desktop_designer_screen.dart`'s camera-idle hook) that only want the
+  /// relevant cells cached ahead of time and don't need the result
+  /// themselves. Cache/`_inFlight` sharing means a later real
+  /// [waysInBounds] call for the same area — the one an actual click is
+  /// waiting on — resolves instantly instead of paying this fetch itself.
+  Future<void> prefetch(LatLngBounds bounds) => waysInBounds(bounds).then((_) {});
 
   Future<void> addWays(String regionId, List<RouteWay> ways) async {
     throw UnsupportedError('RouteGraphStore.addWays is not available on web');
