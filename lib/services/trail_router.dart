@@ -170,8 +170,35 @@ class TrailRouter {
       graph._mergeNearbyNodes(_mergeToleranceMeters);
     }
 
-    // Snap the new anchor onto the nearest trail (Level A).
-    final snap = graph.nearestOnEdge(to);
+    // Snap the new anchor onto the nearest trail (Level A) — sticky toward
+    // whichever edge [from] (the previous anchor) already sits on, once
+    // there is a previous anchor to be sticky about. Every call here builds
+    // a brand new graph from scratch, so there's no persisted `_Seg` to
+    // carry forward the way [snapStroke] keeps one across the points of a
+    // single hand-drawn stroke — instead, `_nearestSeg(from)` recovers
+    // which of *this* graph's edges `from` is already sitting on (it should
+    // be almost exactly 0m away, since `from` was itself snapped there by
+    // an earlier connect() call). Without this, an independent one-shot
+    // nearest-edge search for every single click let consecutive anchors
+    // flip onto whichever nearby parallel feature happened to be a touch
+    // closer each time (an adjacent carriageway, a bus-lane centreline, a
+    // transit-stop point) — confirmed live (2026-08-22): a chain of clicks
+    // meant to trace one straight road instead zig-zagged onto unrelated
+    // nearby features, including one click landing on a bus stop's own
+    // short reference line rather than continuing along the street. The
+    // very first anchor of a trail has no `from` to be sticky about, so it
+    // keeps the plain one-shot [nearestOnEdge] search (with its own
+    // road-vs-trail bias) unchanged.
+    final fromNearest = from == null ? null : graph._nearestSeg(from);
+    final fromSeg =
+        fromNearest != null && fromNearest.meters <= 1.0 ? fromNearest.seg : null;
+    ({LatLng point, double meters})? snap;
+    if (fromSeg != null) {
+      final sticky = graph._nearestSegSticky(to, fromSeg);
+      snap = sticky == null ? null : (point: sticky.point, meters: sticky.meters);
+    } else {
+      snap = graph.nearestOnEdge(to);
+    }
     final end = (snap != null && snap.meters <= _snapMeters) ? snap.point : to;
 
     if (from == null) {
