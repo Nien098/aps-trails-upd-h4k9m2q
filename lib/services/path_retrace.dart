@@ -43,6 +43,65 @@ double _bearing(LatLng a, LatLng b) {
 /// reflects real geometry, not raw GPS jitter.
 double immediateTurnAngle(List<LatLng> path, int i) => turnAngle(path[i - 1], path[i], path[i + 1]);
 
+LatLng _lerp(LatLng a, LatLng b, double t) => LatLng(
+      a.latitude + (b.latitude - a.latitude) * t,
+      a.longitude + (b.longitude - a.longitude) * t,
+    );
+
+/// The point [distance] metres before `path[from]`, walking back toward
+/// index 0 and linearly interpolating between whichever two vertices
+/// straddle that distance — see [findExcursions] for why comparing at a
+/// matched *physical distance* (not matched vertex index) matters.
+LatLng _pointBefore(List<LatLng> path, List<double> cum, int from, double distance) {
+  final target = cum[from] - distance;
+  if (target <= 0) return path.first;
+  var j = from;
+  while (j > 0 && cum[j - 1] > target) {
+    j--;
+  }
+  if (j == 0) return path.first;
+  final segLen = cum[j] - cum[j - 1];
+  final t = segLen <= 0 ? 0.0 : (cum[j] - target) / segLen;
+  return _lerp(path[j], path[j - 1], t);
+}
+
+/// The point [distance] metres after `path[from]` — mirror of [_pointBefore].
+LatLng _pointAfter(List<LatLng> path, List<double> cum, int from, double distance) {
+  final target = cum[from] + distance;
+  if (target >= cum.last) return path.last;
+  var j = from;
+  while (j < path.length - 1 && cum[j + 1] < target) {
+    j++;
+  }
+  if (j == path.length - 1) return path.last;
+  final segLen = cum[j + 1] - cum[j];
+  final t = segLen <= 0 ? 0.0 : (target - cum[j]) / segLen;
+  return _lerp(path[j], path[j + 1], t);
+}
+
+/// The last vertex index whose cumulative distance is still >= `cum[from] -
+/// distance` — i.e. an existing vertex at or just past [distance] before
+/// [from], for slicing an excursion's outbound leg without needing a
+/// synthetic interpolated point in the actual returned path.
+int _indexBefore(List<double> cum, int from, double distance) {
+  final target = cum[from] - distance;
+  var j = from;
+  while (j > 0 && cum[j - 1] >= target) {
+    j--;
+  }
+  return j;
+}
+
+/// Mirror of [_indexBefore] for the return leg.
+int _indexAfter(List<double> cum, int from, double distance) {
+  final target = cum[from] + distance;
+  var j = from;
+  while (j < cum.length - 1 && cum[j + 1] <= target) {
+    j++;
+  }
+  return j;
+}
+
 /// A detected out-and-back excursion: the walker left the path at
 /// [entryIndex], reversed direction at [turnIndex], and the return leg
 /// mirrors the outbound leg back to [exitIndex] (spatially close to
@@ -90,26 +149,47 @@ List<Excursion> findExcursions(
     cum[i] = cum[i - 1] + metersBetween(path[i - 1], path[i]);
   }
 
+  const distanceStep = 2.0;
+
   final candidates = <Excursion>[];
   for (var i = 1; i < path.length - 1; i++) {
     if (immediateTurnAngle(path, i).abs() < uturnThresholdDeg) continue;
 
-    var k = 0;
-    while (i - (k + 1) >= 0 &&
-        i + (k + 1) < path.length &&
-        metersBetween(path[i - (k + 1)], path[i + (k + 1)]) <= mirrorToleranceMeters) {
-      k++;
+    // Walk outward from the reversal in fixed physical-distance steps,
+    // comparing an *interpolated* point at that same distance before and
+    // after the turn — not the raw vertex `mirrorToleranceMeters` steps
+    // away on each side. The original version compared `path[i-k]` against
+    // `path[i+k]` for a shared vertex-count `k`, which silently breaks the
+    // moment the outbound and return legs have different vertex density for
+    // the same physical ground — exactly what a routed (TrailRouter.
+    // connect()) out-and-back produces (Dijkstra can walk the same edges in
+    // a different order/fragmentation each direction). Confirmed live: a
+    // real out-and-back drawn in the desktop designer rendered as one
+    // un-split line, with the outbound and return passes' direction arrows
+    // landing almost on top of each other and visually merging into an X at
+    // every arrow position instead of getting the dashed/offset treatment.
+    // A GPS-recorded trail's near-uniform sampling made the old vertex-count
+    // check work well enough there, but that was luck, not something this
+    // function actually required — comparing at matched *distance* instead
+    // behaves the same for uniform-density paths and correctly handles
+    // uneven ones too.
+    final maxD = math.min(cum[i], cum.last - cum[i]);
+    var bestD = 0.0;
+    var d = distanceStep;
+    while (d <= maxD) {
+      final back = _pointBefore(path, cum, i, d);
+      final fwd = _pointAfter(path, cum, i, d);
+      if (metersBetween(back, fwd) > mirrorToleranceMeters) break;
+      bestD = d;
+      d += distanceStep;
     }
-    if (k == 0) continue;
+    if (bestD < minOneWayMeters) continue;
 
-    final entry = i - k;
-    final oneWay = cum[i] - cum[entry];
-    if (oneWay < minOneWayMeters) continue;
     candidates.add(Excursion(
-      entryIndex: entry,
+      entryIndex: _indexBefore(cum, i, bestD),
       turnIndex: i,
-      exitIndex: i + k,
-      oneWayMeters: oneWay,
+      exitIndex: _indexAfter(cum, i, bestD),
+      oneWayMeters: bestD,
     ));
   }
 
