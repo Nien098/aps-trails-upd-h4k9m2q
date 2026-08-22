@@ -1009,15 +1009,14 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     if (segIdx == null || original == null || grabIdx == null || grabOriginal == null) {
       return;
     }
-    // Snap the drop point onto the nearest trail/road edge before bending
-    // toward it — the same improvement [_commitAnchorPosition] got, applied
-    // here too: without it, a mid-line grab-and-bend was purely geometric
-    // (matching `AuthorScreen`'s deliberately non-snapping wire-bend) and
-    // never actually pulled the line onto nearby trail data, only wherever
-    // the mouse released.
-    final snapped =
-        _followTrails ? await TrailRouter(c).snapPoint(newPos) : newPos;
-    final deformed = _deformSegment(original, grabIdx, grabOriginal, snapped);
+    // Deliberately NOT snapped to the trail network — reverted back to pure
+    // geometric deformation to match `AuthorScreen._onAdjustPanEnd` exactly.
+    // An earlier iteration snapped the drop point onto the nearest edge
+    // before bending toward it, but live testing showed this made the
+    // wire-bend feel unpredictable (the deform origin could jump to wherever
+    // the snap landed rather than exactly where the mouse released) — the
+    // opposite of what mobile's proven, purely-geometric wire-bend delivers.
+    final deformed = _deformSegment(original, grabIdx, grabOriginal, newPos);
     setState(() {
       _segments[segIdx] = deformed;
       _trail.path = _composePath();

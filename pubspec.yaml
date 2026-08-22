@@ -49,6 +49,7 @@ dependencies:
   connectivity_plus: ^6.1.0
   sqlite3: ^3.5.1
   web: ^1.1.1
+  http: ^1.2.0
 dev_dependencies:
   flutter_test:
     sdk: flutter
