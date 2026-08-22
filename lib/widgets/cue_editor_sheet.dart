@@ -3,6 +3,7 @@ import 'package:maplibre_gl/maplibre_gl.dart';
 
 import '../cue_style.dart';
 import '../models/trail.dart';
+import 'opaque_dialog.dart';
 
 /// Returned by [showCueEditor] when the user deletes the cue being edited,
 /// distinct from `null` (cancelled) or a real [Cue] (saved).
@@ -75,28 +76,7 @@ Future<Cue?> showCueEditor(
       );
 
   if (asDialog) {
-    return Navigator.of(context).push<Cue>(
-      MaterialPageRoute<Cue>(
-        fullscreenDialog: true,
-        // opaque: true (the default) is load-bearing here — see the doc
-        // above on why a translucent overlay wasn't enough to stop clicks
-        // reaching MapLibre's platform view underneath.
-        builder: (ctx) => ColoredBox(
-          color: Colors.black54,
-          child: Center(
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 480, maxHeight: 640),
-              child: Material(
-                borderRadius: BorderRadius.circular(12),
-                elevation: 8,
-                clipBehavior: Clip.antiAlias,
-                child: sheet(ctx),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
+    return showOpaqueDialog<Cue>(context, maxHeight: 640, builder: sheet);
   }
 
   return showModalBottomSheet<Cue>(
