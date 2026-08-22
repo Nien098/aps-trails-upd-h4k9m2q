@@ -1,4 +1,4 @@
-import 'dart:math' show Point, min, max;
+import 'dart:math' show Point, exp, max, min, sqrt;
 
 import 'package:flutter/material.dart';
 import 'package:maplibre_gl/maplibre_gl.dart';
@@ -8,6 +8,7 @@ import '../services/boundary_layer.dart';
 import '../services/cue_gen.dart';
 import '../services/cue_layer.dart';
 import '../services/geo.dart';
+import '../services/map_drag_lock.dart';
 import '../services/route_layer.dart';
 import '../services/settings.dart';
 import '../services/trail_router.dart';
@@ -55,21 +56,26 @@ import '../widgets/opaque_dialog.dart';
 /// finger, and doesn't need a live-toggled pointer-drag-capture overlay the
 /// way [_Tool.dragDraw] (below) does.
 ///
-/// [_Tool.dragDraw] (freehand trace) *does* capture a raw mouse drag —
-/// mirroring `AuthorScreen._onStrokePanStart`/`Update`/`End` closely — but
-/// gets there differently: mobile's `_DrawGestureSurface` overlays the map
-/// and relies on the overlay winning the gesture arena over whatever's
-/// underneath while native map gestures stay live. That's the same shape
-/// of "overlay above the map" trick that turned out to be unreliable for
-/// dialogs on Flutter Web (see [showOpaqueDialog]'s doc) — MapLibre's map
-/// is a real platform view there, not an ordinary widget. Rather than
-/// build on an unverified assumption a second time, [_Tool.dragDraw]
-/// disables the map's own dragging at the *platform* level instead
-/// (`MapLibreMap.dragEnabled`, a real, source-verified constructor flag —
-/// see [_lastCamera]'s doc for why that means rebuilding the map widget on
-/// every toggle) and only then adds its capture overlay, so there's never
-/// a moment where both the map and the overlay are trying to own the same
-/// drag.
+/// [_Tool.dragDraw] (freehand trace) and [_Tool.lineAdjust] (grab-and-bend)
+/// both capture a raw mouse drag — mirroring `AuthorScreen`'s
+/// `_onStrokePanStart`/`Update`/`End` and `_onAdjustPanStart`/`Update`/`End`
+/// closely — via a `GestureDetector` overlay on top of the map. That alone
+/// isn't enough on Flutter Web, though: `MapLibreMap.dragEnabled` (the
+/// constructor flag that looked like the obvious way to disable the map's
+/// *own* camera-drag while a capture overlay is active) turns out to do
+/// nothing of the kind on web — reading `maplibre_gl_web`'s source showed it
+/// only gates listeners for *annotation* dragging, never `map.dragPan`, the
+/// actual interaction handler that pans the camera. Confirmed live: the map
+/// could still be grabbed and panned out from under the freehand tool even
+/// with `dragEnabled: false`. [setMapDragLocked] (see its doc) is the real
+/// fix — it sets `pointer-events: none` directly on MapLibre's own canvas
+/// element while either tool is active, so the browser never delivers the
+/// drag to the map's native handlers in the first place, leaving the
+/// overlay as the only thing that sees it. This replaced an earlier,
+/// incorrect approach that rebuilt the whole `MapLibreMap` widget (via a
+/// `key` tied to the tool) purely to re-run its constructor with a
+/// different `dragEnabled` — unnecessary now that the real lock doesn't
+/// need a fresh platform view at all.
 ///
 /// Every overlay here (cue editor/list, rename, colour picker, confirmations,
 /// the generator dialog) goes through [showOpaqueDialog] rather than
@@ -85,7 +91,15 @@ class DesktopDesignerScreen extends StatefulWidget {
 
 /// Which click behaviour is active — mutually exclusive, like
 /// `AuthorScreen`'s drawing-mode flags.
-enum _Tool { draw, moveAnchor, deleteAnchor, addCue, drawBoundary, dragDraw }
+enum _Tool {
+  draw,
+  moveAnchor,
+  deleteAnchor,
+  addCue,
+  drawBoundary,
+  dragDraw,
+  lineAdjust,
+}
 
 class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
   static const _initialCamera =
@@ -102,21 +116,6 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
   /// mirroring `AuthorScreen._strokeLayer`.
   RouteLayer? _strokeLayer;
 
-  /// The map's own camera setting can only be chosen when the platform
-  /// view is *created* (`MapLibreMap.dragEnabled`, confirmed no runtime
-  /// setter exists on the controller) — so entering/leaving
-  /// [_Tool.dragDraw] rebuilds the whole `MapLibreMap` widget with a
-  /// different `key` to force a real recreate with dragging on/off, rather
-  /// than fighting an unverified overlay-vs-platform-view interaction the
-  /// way `AuthorScreen._DrawGestureSurface` does on mobile (this project
-  /// has already hit two confirmed cases this session of a Flutter-Web
-  /// platform view *not* behaving like mobile expects around an overlay —
-  /// see `showOpaqueDialog`'s doc — so the guaranteed-correct rebuild was
-  /// chosen deliberately over the smoother-but-unverified alternative).
-  /// Kept in sync via `onCameraIdle` so the rebuilt map opens exactly
-  /// where the old one left off instead of jumping back to
-  /// [_initialCamera].
-  CameraPosition? _lastCamera;
   Trail _trail = Trail(name: 'New trail', regionId: 'web-design');
 
   /// Per-anchor-hop coordinate arrays, one entry per anchor, aligned by
@@ -174,9 +173,50 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
 
   /// Real-anchor spacing (m) along a committed drag-draw stroke — see
   /// `AuthorScreen._strokeAnchorIntervalMeters`'s doc for why real,
-  /// evenly-spaced anchors matter (a future line-adjust tool needs genuine
-  /// bend points, not just the stroke's two endpoints).
+  /// evenly-spaced anchors matter (real bend points for [_Tool.lineAdjust]
+  /// to grab, not just the stroke's two endpoints).
   static const _strokeAnchorIntervalMeters = 25.0;
+
+  /// Which segment/local-index of [_segments] is currently grabbed in
+  /// [_Tool.lineAdjust] mode, or null when nothing's being dragged — mirrors
+  /// `AuthorScreen._grabSegIdx`/`_grabLocalIdx`. Never an anchor (a
+  /// segment's first/last point): those set [_draggingAnchorIndex] instead,
+  /// checked first in [_onAdjustPanStart].
+  int? _grabSegIdx;
+  int? _grabLocalIdx;
+
+  /// Snapshot of `_segments[_grabSegIdx]` taken the moment it was grabbed,
+  /// and that vertex's pre-drag position — every preview/commit frame
+  /// deforms fresh from this, never from an already-deformed array, so a
+  /// wandering drag can't compound distortion. Mirrors
+  /// `AuthorScreen._grabOriginalSeg`/`_grabOriginalPoint`.
+  List<LatLng>? _grabOriginalSeg;
+  LatLng? _grabOriginalPoint;
+
+  /// Anchor index being free-dragged in [_Tool.lineAdjust] mode instead of
+  /// the mid-line grab-and-bend above — mirrors
+  /// `AuthorScreen._draggingAnchorIndex`.
+  int? _draggingAnchorIndex;
+
+  Offset? _lastAdjustOffset;
+  bool _convertingAdjustPoint = false;
+
+  /// How far a grab-and-bend edit reaches from the grabbed point, in metres
+  /// of original-path distance, and the Gaussian falloff sigma for how much
+  /// each point along that reach moves — identical tuning to
+  /// `AuthorScreen._influenceRadiusMeters`/`_falloffSigmaMeters` (see that
+  /// doc for the "0m→100%, ~5m→66%, ~15m→2%" fit this was tuned against).
+  static const _influenceRadiusMeters = 20.0;
+  static const _falloffSigmaMeters = 5.5;
+
+  double _falloffWeight(double distanceMeters) {
+    final d = distanceMeters;
+    return exp(-(d * d) / (2 * _falloffSigmaMeters * _falloffSigmaMeters));
+  }
+
+  /// Max real-world gap (m) [_densify] allows between consecutive points of
+  /// an editable segment — see that method's doc.
+  static const _maxEditVertexGapMeters = 8.0;
 
   bool _busy = false;
   String? _status;
@@ -226,8 +266,6 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     await _strokeLayer!.ensure();
     await _redraw();
   }
-
-  void _onCameraIdle() => _lastCamera = _c?.cameraPosition;
 
   /// Flattens [_segments] into the full route polyline — identical to
   /// `AuthorScreen._composePath`.
@@ -347,11 +385,11 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
         setState(() => _boundaryPoints.add(coords));
         await _boundary?.setPolygon(_boundaryPoints);
       case _Tool.dragDraw:
-        // No-op: drawing happens via the full-screen GestureDetector
-        // overlay's pan callbacks while this tool is active, not map
-        // clicks — the overlay's HitTestBehavior.opaque means this
-        // callback shouldn't even fire, but the switch must stay
-        // exhaustive regardless.
+      case _Tool.lineAdjust:
+        // No-op: both tools draw via the full-screen GestureDetector
+        // overlay's pan callbacks while active, not map clicks — the
+        // overlay's HitTestBehavior.opaque means this callback shouldn't
+        // even fire, but the switch must stay exhaustive regardless.
         break;
     }
   }
@@ -531,6 +569,290 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     } finally {
       if (mounted) setState(() => _committingStroke = false);
     }
+  }
+
+  /// Inserts straight-line-interpolated points along [seg] wherever two
+  /// consecutive points are more than [_maxEditVertexGapMeters] apart —
+  /// identical to `AuthorScreen._densify`. Without this, a stretch of real
+  /// trail data with few source vertices (a long straight OSM way) leaves
+  /// [_Tool.lineAdjust] nothing to grab there except a distant existing
+  /// vertex, forcing a correction to land away from the actual problem
+  /// spot — confirmed the hard way on mobile before this was added there.
+  /// Every inserted point sits exactly on the line between its two real
+  /// neighbours, so this never changes the segment's shape, only how
+  /// finely it can be grabbed.
+  List<LatLng> _densify(List<LatLng> seg) {
+    if (seg.length < 2) return seg;
+    final out = <LatLng>[seg.first];
+    for (var i = 1; i < seg.length; i++) {
+      final a = seg[i - 1], b = seg[i];
+      final gap = metersBetween(a, b);
+      final steps =
+          gap > _maxEditVertexGapMeters ? (gap / _maxEditVertexGapMeters).ceil() : 1;
+      for (var s = 1; s <= steps; s++) {
+        final t = s / steps;
+        out.add(LatLng(
+          a.latitude + (b.latitude - a.latitude) * t,
+          a.longitude + (b.longitude - a.longitude) * t,
+        ));
+      }
+    }
+    return out;
+  }
+
+  /// Deforms [original] (a snapshot of a segment taken at grab time) by
+  /// moving the vertex at [grabIndex] from [from] to [to], and moving its
+  /// neighbours on each side by the same displacement scaled down with
+  /// distance — like bending a flexible wire at one point. Identical to
+  /// `AuthorScreen._deformSegment`: always computes from [original], never
+  /// from an already-deformed array, so repeated calls during one drag
+  /// never compound distortion, and stops at each direction's first/last
+  /// index (the segment's own anchors) even if [_influenceRadiusMeters]
+  /// would otherwise reach further, so an anchor shared with the
+  /// neighbouring segment never moves here.
+  List<LatLng> _deformSegment(
+      List<LatLng> original, int grabIndex, LatLng from, LatLng to) {
+    final dLat = to.latitude - from.latitude;
+    final dLng = to.longitude - from.longitude;
+    final out = List<LatLng>.of(original);
+
+    var traveled = 0.0;
+    for (var i = grabIndex; i < original.length - 1; i++) {
+      if (i > grabIndex) traveled += metersBetween(original[i - 1], original[i]);
+      if (traveled > _influenceRadiusMeters) break;
+      final w = _falloffWeight(traveled);
+      out[i] =
+          LatLng(original[i].latitude + dLat * w, original[i].longitude + dLng * w);
+    }
+
+    traveled = 0.0;
+    for (var i = grabIndex - 1; i > 0; i--) {
+      traveled += metersBetween(original[i + 1], original[i]);
+      if (traveled > _influenceRadiusMeters) break;
+      final w = _falloffWeight(traveled);
+      out[i] =
+          LatLng(original[i].latitude + dLat * w, original[i].longitude + dLng * w);
+    }
+
+    return out;
+  }
+
+  /// Grabs the line for [_Tool.lineAdjust]: finds the nearest point lying ON
+  /// any segment's dense polyline (not just an existing vertex) within
+  /// reach of [p], splicing a new vertex in at that exact spot if it falls
+  /// strictly between two existing ones, so a drag can start truly anywhere
+  /// along the line. Mirrors `AuthorScreen._onAdjustPanStart`: anchors are
+  /// checked first (freely draggable here too, taking priority over the
+  /// mid-line search) and a hit too close to a segment's own anchor is
+  /// skipped, since that endpoint is shared with the neighbouring segment.
+  Future<void> _onAdjustPanStart(Offset p) async {
+    final c = _c;
+    if (c == null) return;
+    final gen = ++_previewGeneration;
+    final dpr = MediaQuery.of(context).devicePixelRatio;
+    final screenX = p.dx * dpr, screenY = p.dy * dpr;
+    final latlng = await c.toLatLng(Point(screenX, screenY));
+    if (!mounted || _tool != _Tool.lineAdjust || gen != _previewGeneration) return;
+
+    final anchors = _trail.anchors;
+    var bestAnchor = -1;
+    var bestAnchorPx = 34.0;
+    for (var i = 0; i < anchors.length; i++) {
+      final sp = await c.toScreenLocation(anchors[i]);
+      final dx = sp.x.toDouble() - screenX;
+      final dy = sp.y.toDouble() - screenY;
+      final px = sqrt(dx * dx + dy * dy);
+      if (px < bestAnchorPx) {
+        bestAnchorPx = px;
+        bestAnchor = i;
+      }
+    }
+    if (!mounted || _tool != _Tool.lineAdjust || gen != _previewGeneration) return;
+    if (bestAnchor >= 0) {
+      _pushUndo();
+      setState(() {
+        _grabSegIdx = null;
+        _grabLocalIdx = null;
+        _grabOriginalSeg = null;
+        _grabOriginalPoint = null;
+        _draggingAnchorIndex = bestAnchor;
+      });
+      return;
+    }
+
+    int? bestSeg, bestEdge;
+    LatLng? bestPoint;
+    var bestDist = 15.0;
+    for (var s = 0; s < _segments.length; s++) {
+      final seg = _densify(_segments[s]);
+      final hit = nearestPointOnPolyline(latlng, seg, maxMeters: bestDist);
+      if (hit == null) continue;
+      if (metersBetween(hit.point, seg.first) < 2 ||
+          metersBetween(hit.point, seg.last) < 2) {
+        continue;
+      }
+      _segments[s] = seg;
+      bestSeg = s;
+      bestEdge = hit.edgeIndex;
+      bestPoint = hit.point;
+      bestDist = hit.meters;
+    }
+
+    if (bestSeg == null || bestEdge == null || bestPoint == null) {
+      setState(() {
+        _grabSegIdx = null;
+        _grabLocalIdx = null;
+        _grabOriginalSeg = null;
+        _grabOriginalPoint = null;
+      });
+      return;
+    }
+
+    final winningSeg = bestSeg, edge = bestEdge, point = bestPoint;
+    _pushUndo();
+    setState(() {
+      final seg = _segments[winningSeg];
+      int grabIdx;
+      if (metersBetween(point, seg[edge]) < 0.5) {
+        grabIdx = edge;
+      } else if (metersBetween(point, seg[edge + 1]) < 0.5) {
+        grabIdx = edge + 1;
+      } else {
+        seg.insert(edge + 1, point);
+        grabIdx = edge + 1;
+      }
+      _grabSegIdx = winningSeg;
+      _grabLocalIdx = grabIdx;
+      _grabOriginalSeg = List.of(seg);
+      _grabOriginalPoint = seg[grabIdx];
+    });
+  }
+
+  void _onAdjustPanUpdate(Offset p) {
+    _lastAdjustOffset = p;
+    if (_draggingAnchorIndex != null) {
+      _pushAnchorDragPreview(p);
+    } else {
+      _pushAdjustPreview(p);
+    }
+  }
+
+  /// Live preview for a free-dragged anchor ([_draggingAnchorIndex]): a
+  /// cheap straight-line stretch to its immediate neighbours, not a live
+  /// re-route — matches how [_handleMoveAnchorClick]'s click-then-click flow
+  /// also only re-routes once, on commit. Mirrors
+  /// `AuthorScreen._pushAnchorDragPreview` (minus the live-moving marker
+  /// circle: this screen's anchor markers are plain non-interactive
+  /// GeoJSON, redrawn wholesale by [_redraw] on commit, same as every other
+  /// anchor edit here already does).
+  Future<void> _pushAnchorDragPreview(Offset p) async {
+    final c = _c;
+    final idx = _draggingAnchorIndex;
+    if (c == null || idx == null || _convertingAdjustPoint || !mounted) return;
+    final gen = _previewGeneration;
+    _convertingAdjustPoint = true;
+    try {
+      final dpr = MediaQuery.of(context).devicePixelRatio;
+      final latlng = await c.toLatLng(Point(p.dx * dpr, p.dy * dpr));
+      if (!mounted ||
+          _tool != _Tool.lineAdjust ||
+          _draggingAnchorIndex != idx ||
+          gen != _previewGeneration) {
+        return;
+      }
+      final anchors = _trail.anchors;
+      final preview = [
+        if (idx > 0) anchors[idx - 1],
+        latlng,
+        if (idx < anchors.length - 1) anchors[idx + 1],
+      ];
+      await _strokeLayer?.setRoute(preview, _strokePreviewColor);
+    } finally {
+      _convertingAdjustPoint = false;
+    }
+  }
+
+  /// Live preview of the wire-bend: deforms fresh from [_grabOriginalSeg]
+  /// toward the current drag position and pushes the whole result to
+  /// [_strokeLayer]. Pure on-screen geometry — no trail lookup happens
+  /// here, so nothing about the surrounding trail can be implied or
+  /// affected while dragging. Mirrors `AuthorScreen._pushAdjustPreview`.
+  Future<void> _pushAdjustPreview(Offset p) async {
+    final c = _c;
+    final segIdx = _grabSegIdx,
+        original = _grabOriginalSeg,
+        grabIdx = _grabLocalIdx,
+        grabOriginal = _grabOriginalPoint;
+    if (c == null ||
+        segIdx == null ||
+        original == null ||
+        grabIdx == null ||
+        grabOriginal == null ||
+        _convertingAdjustPoint ||
+        !mounted) {
+      return;
+    }
+    final gen = _previewGeneration;
+    _convertingAdjustPoint = true;
+    try {
+      final dpr = MediaQuery.of(context).devicePixelRatio;
+      final latlng = await c.toLatLng(Point(p.dx * dpr, p.dy * dpr));
+      if (!mounted ||
+          _tool != _Tool.lineAdjust ||
+          _grabSegIdx != segIdx ||
+          gen != _previewGeneration) {
+        return;
+      }
+      final deformed = _deformSegment(original, grabIdx, grabOriginal, latlng);
+      await _strokeLayer?.setRoute(deformed, _strokePreviewColor);
+    } finally {
+      _convertingAdjustPoint = false;
+    }
+  }
+
+  /// Commits the grab: deforms [_grabOriginalSeg] one final time toward the
+  /// drop position and writes the result into [_segments], or (for a
+  /// free-dragged anchor) re-routes via [_commitAnchorPosition] exactly
+  /// like the click-then-click move tool does. Mirrors
+  /// `AuthorScreen._onAdjustPanEnd`.
+  Future<void> _onAdjustPanEnd() async {
+    final c = _c;
+    final draggingAnchor = _draggingAnchorIndex;
+    final segIdx = _grabSegIdx,
+        original = _grabOriginalSeg,
+        grabIdx = _grabLocalIdx,
+        grabOriginal = _grabOriginalPoint;
+    final offset = _lastAdjustOffset;
+    setState(() {
+      _previewGeneration++;
+      _grabSegIdx = null;
+      _grabLocalIdx = null;
+      _grabOriginalSeg = null;
+      _grabOriginalPoint = null;
+      _draggingAnchorIndex = null;
+      _lastAdjustOffset = null;
+    });
+    await _strokeLayer?.setRoute(const [], _strokePreviewColor);
+    if (!mounted || c == null || offset == null) return;
+
+    final dpr = MediaQuery.of(context).devicePixelRatio;
+    final newPos = await c.toLatLng(Point(offset.dx * dpr, offset.dy * dpr));
+    if (!mounted) return;
+
+    if (draggingAnchor != null) {
+      await _commitAnchorPosition(draggingAnchor, newPos);
+      return;
+    }
+
+    if (segIdx == null || original == null || grabIdx == null || grabOriginal == null) {
+      return;
+    }
+    final deformed = _deformSegment(original, grabIdx, grabOriginal, newPos);
+    setState(() {
+      _segments[segIdx] = deformed;
+      _trail.path = _composePath();
+    });
+    await _redraw();
   }
 
   Future<void> _confirmDeleteAnchor(int i) async {
@@ -1073,6 +1395,8 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
         _Tool.drawBoundary =>
           'Click each corner of the area, then "Finish boundary" (${_boundaryPoints.length} so far).',
         _Tool.dragDraw => 'Click and drag to trace a trail freehand.',
+        _Tool.lineAdjust =>
+          'Drag a point on the line to bend it, or drag a marked point to move it.',
       };
 
   @override
@@ -1176,12 +1500,24 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
                   value: _Tool.dragDraw,
                   icon: Icon(Icons.gesture),
                   label: Text('Freehand')),
+              ButtonSegment(
+                  value: _Tool.lineAdjust,
+                  icon: Icon(Icons.polyline_outlined),
+                  label: Text('Adjust')),
             ],
             selected: {_tool},
-            onSelectionChanged: (s) => setState(() {
-              _tool = s.first;
-              _pendingMoveAnchorIndex = null;
-            }),
+            onSelectionChanged: (s) {
+              final next = s.first;
+              final wasCapturing =
+                  _tool == _Tool.dragDraw || _tool == _Tool.lineAdjust;
+              final willCapture =
+                  next == _Tool.dragDraw || next == _Tool.lineAdjust;
+              if (wasCapturing != willCapture) setMapDragLocked(willCapture);
+              setState(() {
+                _tool = next;
+                _pendingMoveAnchorIndex = null;
+              });
+            },
           ),
           if (_tool == _Tool.drawBoundary) ...[
             const SizedBox(width: 8),
@@ -1210,27 +1546,26 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
           return Stack(
             children: [
               MapLibreMap(
-                // Forces a full recreate (with dragging on/off) whenever
-                // entering/leaving the freehand-draw tool — see
-                // `_lastCamera`'s doc for why that's the deliberately
-                // chosen mechanism here, not a live-toggled overlay.
-                key: ValueKey(_tool == _Tool.dragDraw),
                 styleString: snap.data!,
-                initialCameraPosition: _lastCamera ?? _initialCamera,
-                dragEnabled: _tool != _Tool.dragDraw,
+                initialCameraPosition: _initialCamera,
                 onMapCreated: _onMapCreated,
                 onStyleLoadedCallback: _onStyleLoaded,
                 onMapClick: _onMapClick,
-                onCameraIdle: _onCameraIdle,
                 compassEnabled: true,
               ),
-              if (_tool == _Tool.dragDraw)
+              if (_tool == _Tool.dragDraw || _tool == _Tool.lineAdjust)
                 Positioned.fill(
                   child: GestureDetector(
                     behavior: HitTestBehavior.opaque,
-                    onPanStart: (d) => _onStrokePanStart(d.localPosition),
-                    onPanUpdate: (d) => _onStrokePanUpdate(d.localPosition),
-                    onPanEnd: (_) => _onStrokePanEnd(),
+                    onPanStart: (d) => _tool == _Tool.dragDraw
+                        ? _onStrokePanStart(d.localPosition)
+                        : _onAdjustPanStart(d.localPosition),
+                    onPanUpdate: (d) => _tool == _Tool.dragDraw
+                        ? _onStrokePanUpdate(d.localPosition)
+                        : _onAdjustPanUpdate(d.localPosition),
+                    onPanEnd: (_) => _tool == _Tool.dragDraw
+                        ? _onStrokePanEnd()
+                        : _onAdjustPanEnd(),
                   ),
                 ),
               Positioned(
