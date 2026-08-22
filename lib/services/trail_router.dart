@@ -605,6 +605,12 @@ class TrailRouter {
     // under the trail's name label). Merge close-enough fragment endpoints
     // so the trail reads as one continuous edge again.
     graph._mergeNearbyNodes(_mergeToleranceMeters);
+    // Two edges that visibly cross on the map (a trail crossing a road,
+    // most commonly) are otherwise invisible to the router as a connection
+    // point unless the source data happens to place a real shared vertex
+    // exactly there — see [_Graph._splitCrossings]'s doc for why this
+    // matters and why it's safe.
+    graph._splitCrossings();
     return graph;
   }
 
@@ -870,6 +876,145 @@ class _Graph {
     roadNodeKeys
       ..clear()
       ..addAll(newRoadNodeKeys);
+  }
+
+  /// Splits every pair of edges that geometrically cross at an interior
+  /// point — not already joined by a shared endpoint key — into two each,
+  /// meeting at a new shared node right at the crossing.
+  ///
+  /// Without this, a trail that visibly crosses a road (or another trail)
+  /// on the map is invisible to the router as a connection point unless
+  /// the source data happened to place a real shared vertex exactly
+  /// there — which most casual crossings (a park path crossing a
+  /// residential street, say) simply don't. Confirmed as the real cause
+  /// of routes falling back to an ugly straight line the moment the
+  /// intended path crossed so much as one road on the way to the next
+  /// anchor: the two sides of the crossing were genuinely disconnected
+  /// graph components, so pathfinding correctly found nothing to route
+  /// through, however short and visually obvious the real crossing trail
+  /// actually was.
+  ///
+  /// Deliberately geometry-based (an actual X-shaped crossing), not a
+  /// distance threshold the way [_mergeNearbyNodes] is — two roads merely
+  /// running close together in a dense grid, or a divided road's parallel
+  /// carriageways, never register here no matter how close they get,
+  /// since they don't actually cross. That keeps this safe from the exact
+  /// "merged unrelated nearby streets into a corrupted graph" regression
+  /// [_mergeNearbyNodes]'s own doc already warns about — this only ever
+  /// adds a connection where two lines truly intersect, never merges two
+  /// lines that merely pass near each other.
+  void _splitCrossings() {
+    final n = _segments.length;
+    // Segment index -> (parametric position along it, crossing point),
+    // collected before any mutation so every pair is checked against the
+    // *original* segment list, not a partially-rebuilt one.
+    final crossings = <int, List<(double, LatLng)>>{};
+    for (var i = 0; i < n; i++) {
+      final segI = _segments[i];
+      for (var j = i + 1; j < n; j++) {
+        final segJ = _segments[j];
+        if (segI.aKey == segJ.aKey ||
+            segI.aKey == segJ.bKey ||
+            segI.bKey == segJ.aKey ||
+            segI.bKey == segJ.bKey) {
+          continue; // already connected at a shared endpoint
+        }
+        if (!_bboxesOverlap(segI, segJ)) continue;
+        final hit = _properIntersection(segI.a, segI.b, segJ.a, segJ.b);
+        if (hit == null) continue;
+        (crossings[i] ??= []).add((hit.tOnFirst, hit.point));
+        (crossings[j] ??= []).add((hit.tOnSecond, hit.point));
+      }
+    }
+    if (crossings.isEmpty) return;
+
+    final replacements = <int, List<_Seg>>{};
+    for (final entry in crossings.entries) {
+      final seg = _segments[entry.key];
+      final pts = List.of(entry.value)..sort((a, b) => a.$1.compareTo(b.$1));
+      final chainKeys = <String>[seg.aKey];
+      final chainPts = <LatLng>[seg.a];
+      for (final (_, point) in pts) {
+        final k = _key(point.latitude, point.longitude);
+        if (k == chainKeys.last) continue;
+        nodes.putIfAbsent(k, () => point);
+        chainKeys.add(k);
+        chainPts.add(point);
+      }
+      if (chainKeys.last != seg.bKey) {
+        chainKeys.add(seg.bKey);
+        chainPts.add(seg.b);
+      }
+      // Remove the old single edge this segment used to be — it's being
+      // replaced by the chain of shorter pieces built below.
+      adj[seg.aKey]?.removeWhere((e) => e.to == seg.bKey);
+      adj[seg.bKey]?.removeWhere((e) => e.to == seg.aKey);
+      final pieces = <_Seg>[];
+      for (var k = 0; k < chainKeys.length - 1; k++) {
+        final aKey = chainKeys[k], bKey = chainKeys[k + 1];
+        final w = metersBetween(chainPts[k], chainPts[k + 1]);
+        (adj[aKey] ??= []).add(_Edge(bKey, w));
+        (adj[bKey] ??= []).add(_Edge(aKey, w));
+        pieces.add(_Seg(aKey, bKey, chainPts[k], chainPts[k + 1], seg.isRoad));
+        if (seg.isRoad) {
+          roadNodeKeys.add(aKey);
+          roadNodeKeys.add(bKey);
+        }
+      }
+      replacements[entry.key] = pieces;
+    }
+
+    final rebuilt = <_Seg>[];
+    for (var i = 0; i < n; i++) {
+      final pieces = replacements[i];
+      rebuilt.addAll(pieces ?? [_segments[i]]);
+    }
+    _segments
+      ..clear()
+      ..addAll(rebuilt);
+  }
+
+  static bool _bboxesOverlap(_Seg a, _Seg b) {
+    final aMinLat = math.min(a.a.latitude, a.b.latitude);
+    final aMaxLat = math.max(a.a.latitude, a.b.latitude);
+    final aMinLng = math.min(a.a.longitude, a.b.longitude);
+    final aMaxLng = math.max(a.a.longitude, a.b.longitude);
+    final bMinLat = math.min(b.a.latitude, b.b.latitude);
+    final bMaxLat = math.max(b.a.latitude, b.b.latitude);
+    final bMinLng = math.min(b.a.longitude, b.b.longitude);
+    final bMaxLng = math.max(b.a.longitude, b.b.longitude);
+    return aMinLat <= bMaxLat &&
+        aMaxLat >= bMinLat &&
+        aMinLng <= bMaxLng &&
+        aMaxLng >= bMinLng;
+  }
+
+  /// Standard 2D segment-segment intersection (flat lat/lng approximation
+  /// — accurate enough at trail/street scale) — returns the crossing
+  /// point and how far along each segment it falls (0 at `a`, 1 at `b`),
+  /// or null when the segments don't properly cross at an interior point:
+  /// they don't intersect at all, are parallel/collinear, or would only
+  /// meet at or right next to either segment's own endpoint (already
+  /// handled by the shared-key check or by [_mergeNearbyNodes]).
+  static ({double tOnFirst, double tOnSecond, LatLng point})?
+      _properIntersection(LatLng a1, LatLng a2, LatLng b1, LatLng b2) {
+    final x1 = a1.longitude, y1 = a1.latitude;
+    final x2 = a2.longitude, y2 = a2.latitude;
+    final x3 = b1.longitude, y3 = b1.latitude;
+    final x4 = b2.longitude, y4 = b2.latitude;
+    final d = (x4 - x3) * (y2 - y1) - (x2 - x1) * (y4 - y3);
+    if (d.abs() < 1e-12) return null;
+    final t = ((x4 - x3) * (y3 - y1) - (x3 - x1) * (y4 - y3)) / d;
+    final u = ((x2 - x1) * (y3 - y1) - (x3 - x1) * (y2 - y1)) / d;
+    const margin = 0.02;
+    if (t <= margin || t >= 1 - margin || u <= margin || u >= 1 - margin) {
+      return null;
+    }
+    return (
+      tOnFirst: t,
+      tOnSecond: u,
+      point: LatLng(y1 + t * (y2 - y1), x1 + t * (x2 - x1)),
+    );
   }
 
   /// Drops every node (and any edge/segment touching it) that falls outside
