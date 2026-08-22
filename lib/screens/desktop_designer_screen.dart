@@ -1260,55 +1260,48 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
   /// `GuideScreen._drawCues`'s stacked-cue nudging: offset the geometry
   /// itself, since a data-driven `text-offset` isn't reliably supported by
   /// this map/style combination (see `cue_layer.dart`'s own doc on that).
-  static const _stackLineMeters = 6.0;
   static const _stackClusterMeters = 3.0;
 
-  /// Real (unnudged) positions seen so far this redraw, parallel-indexed
-  /// with how many markers have already claimed each — reset per redraw.
+  /// Real (unmoved) positions seen so far this redraw — reset per redraw.
   final List<LatLng> _stackAnchors = [];
-  final List<int> _stackCounts = [];
 
-  /// Returns [pos] nudged north by however many earlier markers this redraw
-  /// already claimed a spot within [_stackClusterMeters] of it (0 for the
-  /// first marker at a given spot, i.e. unmoved). Used for *cue* markers
-  /// only — see [_registerStackPosition] for why anchors don't nudge.
-  LatLng _stackedPosition(LatLng pos) {
-    for (var i = 0; i < _stackAnchors.length; i++) {
-      if (metersBetween(_stackAnchors[i], pos) < _stackClusterMeters) {
-        final line = ++_stackCounts[i];
-        final dLat = (_stackLineMeters * line) / 111320.0;
-        return LatLng(pos.latitude + dLat, pos.longitude);
-      }
+  /// True if [pos] is within [_stackClusterMeters] of an already-claimed
+  /// marker position this redraw — signals that the caller's marker needs
+  /// [CueMarker.nudged]'s screen-space-only visual separation, never an
+  /// altered coordinate (see that field's doc for why a *real* geographic
+  /// nudge was wrong here: it's misleading at best, and a genuine accuracy
+  /// risk for a cue's real trigger point at worst). Also registers [pos] so
+  /// later markers checked against it collide too.
+  bool _needsNudge(LatLng pos) {
+    for (final claimed in _stackAnchors) {
+      if (metersBetween(claimed, pos) < _stackClusterMeters) return true;
     }
     _stackAnchors.add(pos);
-    _stackCounts.add(0);
-    return pos;
+    return false;
   }
 
   /// Registers [pos] as a claimed marker spot for this redraw's collision
-  /// bookkeeping (above) without nudging it — used for anchor markers,
-  /// which should never move off their real clicked position no matter how
-  /// close together several end up. Confirmed unwanted live (2026-08-22):
-  /// clicking near-identical spots repeatedly in Draw mode used to nudge
-  /// each new anchor into a vertical stack the same way overlapping cues
-  /// used to — but a cluster of anchors isn't a meaningful "feature" the
-  /// way a genuine multi-cue junction is; an anchor sitting almost on top
-  /// of another is just where it was actually placed, and hiding that by
-  /// moving it is more confusing than an overlapping dot. Still updates
-  /// the shared tracker so a *cue* landing on the same spot as this anchor
-  /// knows to nudge itself away from it.
+  /// bookkeeping (above) — used for anchor markers, which should never move
+  /// off their real clicked position no matter how close together several
+  /// end up. Confirmed unwanted live (2026-08-22): clicking near-identical
+  /// spots repeatedly in Draw mode used to nudge each new anchor into a
+  /// vertical stack the same way overlapping cues used to — but a cluster
+  /// of anchors isn't a meaningful "feature" the way a genuine multi-cue
+  /// junction is; an anchor sitting almost on top of another is just where
+  /// it was actually placed, and hiding that by moving it is more
+  /// confusing than an overlapping dot. Still updates the shared tracker so
+  /// a *cue* landing on the same spot as this anchor knows to nudge its
+  /// own marker (not its stored position) away from it.
   void _registerStackPosition(LatLng pos) {
     for (final claimed in _stackAnchors) {
       if (metersBetween(claimed, pos) < _stackClusterMeters) return;
     }
     _stackAnchors.add(pos);
-    _stackCounts.add(0);
   }
 
   Future<void> _redraw() async {
     await _route?.setRoute(_trail.path, _trail.color);
     _stackAnchors.clear();
-    _stackCounts.clear();
 
     final markers = <CueMarker>[];
     for (var i = 0; i < _trail.anchors.length; i++) {
@@ -1350,17 +1343,15 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
       if (stacked) {
         group.sort((a, b) => (rank[a] ?? 0).compareTo(rank[b] ?? 0));
       }
-      final pos = _stackedPosition(group.first.position);
+      // Real position, always — never altered. A cue landing at/near an
+      // anchor (the common "Start"/"Finish" case) only gets a
+      // screen-space-only marker nudge (see [CueMarker.nudged]), same as
+      // stacked lines only get a style-layer text offset, never a
+      // geographic one — a cue's stored coordinate is what actually fires
+      // during a walk, so it must stay exactly where it was placed.
+      final pos = group.first.position;
+      final nudged = _needsNudge(pos);
       final color = stacked ? stackedCueColorHex : cueColorHex(group.first.type);
-      // Every cue in the group sits at the *exact same* position — vertical
-      // separation between stacked lines is done by [CueLayer] itself, via
-      // one fixed-offset style layer per [CueMarker.lineIndex] (see that
-      // class's doc). A geographic nudge here (what this used to do)
-      // necessarily looks bigger zoomed in and smaller zoomed out, since
-      // it's a real-world distance — confirmed live (2026-08-22): stacked
-      // text squished together zoomed out and spread apart zoomed in, no
-      // matter how the metre gap was computed. The style-layer offset is
-      // genuinely zoom-independent instead.
       for (var i = 0; i < group.length; i++) {
         final cue = group[i];
         // Every group member past the first is meant to be a text-only line
@@ -1380,6 +1371,7 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
           text: '${rank[cue] ?? "–"}. ${cue.label}',
           textColor: '#1A1A1A',
           lineIndex: i,
+          nudged: nudged,
         ));
       }
     }
@@ -1941,10 +1933,33 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
                   top: 16,
                   bottom: 16,
                   width: 420,
-                  child: _DebugPanel(onClose: () => setState(() {
-                    _debugPanelOpen = false;
-                    DebugLog.instance.enabled = false;
-                  })),
+                  // Excluding this rect from the drag-tool overlay (above)
+                  // only stops *that* Flutter Listener from also seeing a
+                  // click — it does nothing for MapLibreMap itself, which is
+                  // a real native platform view (a genuine DOM canvas, not
+                  // something Flutter paints) that can still receive clicks
+                  // directly wherever Flutter's platform-view occlusion
+                  // doesn't fully cover it. Confirmed live (2026-08-22): the
+                  // panel's header row (icon buttons) let clicks reach the
+                  // map underneath — cursor even showed MapLibre's own hand
+                  // hover state — while the scrollable body happened not to.
+                  // Rather than chase exactly why occlusion differs between
+                  // the two, this reuses the same proven mechanism
+                  // `setMapDragLocked` already uses for the drag tools:
+                  // disable the real `<canvas>` element's `pointer-events`
+                  // at the DOM level for as long as the mouse is anywhere
+                  // over the panel, restoring whatever the *current tool*
+                  // wants on exit rather than unconditionally unlocking (so
+                  // this can't clobber Freehand/Adjust's own lock).
+                  child: MouseRegion(
+                    onEnter: (_) => setMapDragLocked(true),
+                    onExit: (_) => setMapDragLocked(
+                        _tool == _Tool.dragDraw || _tool == _Tool.lineAdjust),
+                    child: _DebugPanel(onClose: () => setState(() {
+                      _debugPanelOpen = false;
+                      DebugLog.instance.enabled = false;
+                    })),
+                  ),
                 ),
             ],
           );
