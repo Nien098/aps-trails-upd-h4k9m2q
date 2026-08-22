@@ -9,6 +9,7 @@ import '../services/cue_gen.dart';
 import '../services/cue_layer.dart';
 import '../services/geo.dart';
 import '../services/map_drag_lock.dart';
+import '../services/pointer_probe.dart';
 import '../services/route_layer.dart';
 import '../services/settings.dart';
 import '../services/trail_router.dart';
@@ -154,9 +155,12 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
 
   bool get _hasBoundary => _boundaryPoints.length >= 3;
 
-  /// Screen-space drag-in-progress trace for [_Tool.dragDraw] — mirrors
-  /// `AuthorScreen._strokePoints`/`_onStrokePanStart`/`Update`/`End`.
-  final List<Offset> _strokePoints = [];
+  /// Map-canvas-relative drag-in-progress trace for [_Tool.dragDraw] —
+  /// mirrors `AuthorScreen._strokePoints`/`_onStrokePanStart`/`Update`/`End`,
+  /// but stores real map-relative points (see [_mapPoint]/[PointerProbe])
+  /// captured at event time rather than Flutter `Offset`s to be converted
+  /// later.
+  final List<Point<double>> _strokePoints = [];
   List<LatLng> _strokePreview = [];
   bool _convertingStrokePoint = false;
   bool _committingStroke = false;
@@ -198,7 +202,10 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
   /// `AuthorScreen._draggingAnchorIndex`.
   int? _draggingAnchorIndex;
 
-  Offset? _lastAdjustOffset;
+  /// Real map-canvas-relative point (see [_mapPoint]) for the most recent
+  /// [_Tool.lineAdjust] drag update — captured at event time, not derived
+  /// later from a stale current pointer position.
+  Point<double>? _lastAdjustPoint;
   bool _convertingAdjustPoint = false;
 
   /// How far a grab-and-bend edit reaches from the grabbed point, in metres
@@ -250,6 +257,12 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
   /// established pattern.
   final List<_EditSnapshot> _undoStack = [];
   static const _maxUndo = 30;
+
+  @override
+  void initState() {
+    super.initState();
+    PointerProbe.ensureStarted();
+  }
 
   void _onMapCreated(MapLibreMapController c) => _c = c;
 
@@ -464,36 +477,57 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     }
   }
 
+  /// Real map-canvas-relative point for the pointer event underlying [p] —
+  /// see [PointerProbe]'s doc for why this, not Flutter's own [Offset], is
+  /// what must be fed to `toLatLng`/`toScreenLocation` on web. Falls back to
+  /// [p] itself if the probe hasn't found the canvas yet (shouldn't happen
+  /// mid-drag in practice, but never worth crashing over).
+  Point<double> _mapPoint(Offset p) {
+    final probe = PointerProbe.mapRelativePosition();
+    return probe == null ? Point(p.dx, p.dy) : Point(probe.x, probe.y);
+  }
+
   void _onStrokePanStart(Offset p) {
+    final mapped = _mapPoint(p);
     setState(() {
       _previewGeneration++;
       _strokePoints
         ..clear()
-        ..add(p);
+        ..add(mapped);
       _strokePreview = [];
     });
   }
 
   void _onStrokePanUpdate(Offset p) {
+    final mapped = _mapPoint(p);
     if (_strokePoints.isNotEmpty &&
         (_strokePoints.length >= _dragPointCap ||
-            (p - _strokePoints.last).distance < _dragPointSpacing)) {
+            _pointDistance(mapped, _strokePoints.last) < _dragPointSpacing)) {
       return;
     }
-    setState(() => _strokePoints.add(p));
-    _pushStrokePreview(p);
+    setState(() => _strokePoints.add(mapped));
+    _pushStrokePreview(mapped);
+  }
+
+  static double _pointDistance(Point<double> a, Point<double> b) {
+    final dx = a.x - b.x, dy = a.y - b.y;
+    return sqrt(dx * dx + dy * dy);
   }
 
   /// Best-effort live preview of the raw (unsnapped) drag — self-throttles
   /// (skips a point if a previous conversion is still in flight) rather
-  /// than queueing, same as `AuthorScreen._pushStrokePreview`.
-  Future<void> _pushStrokePreview(Offset p) async {
+  /// than queueing, same as `AuthorScreen._pushStrokePreview`. Takes an
+  /// already map-relative [p] (see [_mapPoint]) rather than converting
+  /// itself, so every point in [_strokePoints] is captured in that space at
+  /// the moment it happened, not re-derived later from a stale current
+  /// pointer position.
+  Future<void> _pushStrokePreview(Point<double> p) async {
     final c = _c;
     if (c == null || _convertingStrokePoint || !mounted) return;
     final gen = _previewGeneration;
     _convertingStrokePoint = true;
     try {
-      final latlng = await c.toLatLng(Point(p.dx, p.dy));
+      final latlng = await c.toLatLng(p);
       if (!mounted || _tool != _Tool.dragDraw || gen != _previewGeneration) return;
       _strokePreview.add(latlng);
       if (_strokePreview.length >= 2) {
@@ -511,7 +545,7 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
   /// [_strokeAnchorIntervalMeters] along it instead of just at the ends).
   Future<void> _onStrokePanEnd() async {
     final c = _c;
-    final points = List<Offset>.of(_strokePoints);
+    final points = List<Point<double>>.of(_strokePoints);
     setState(() {
       _previewGeneration++;
       _strokePoints.clear();
@@ -519,15 +553,15 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     });
     await _strokeLayer?.setRoute(const [], _strokePreviewColor);
     if (!mounted || c == null || points.length < 2 || _committingStroke) return;
-    final minX = points.map((p) => p.dx).reduce(min);
-    final maxX = points.map((p) => p.dx).reduce(max);
-    final minY = points.map((p) => p.dy).reduce(min);
-    final maxY = points.map((p) => p.dy).reduce(max);
+    final minX = points.map((p) => p.x).reduce(min);
+    final maxX = points.map((p) => p.x).reduce(max);
+    final minY = points.map((p) => p.y).reduce(min);
+    final maxY = points.map((p) => p.y).reduce(max);
     if (maxX - minX < 12 && maxY - minY < 12) return;
 
     setState(() => _committingStroke = true);
     try {
-      final raw = await Future.wait(points.map((p) => c.toLatLng(Point(p.dx, p.dy))));
+      final raw = await Future.wait(points.map((p) => c.toLatLng(p)));
       final simplified = simplifyPath(raw, 2.5);
       if (simplified.length < 2) return;
       final rawSnapped =
@@ -646,8 +680,9 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     final c = _c;
     if (c == null) return;
     final gen = ++_previewGeneration;
-    final screenX = p.dx, screenY = p.dy;
-    final latlng = await c.toLatLng(Point(screenX, screenY));
+    final mapped = _mapPoint(p);
+    final screenX = mapped.x, screenY = mapped.y;
+    final latlng = await c.toLatLng(mapped);
     if (!mounted || _tool != _Tool.lineAdjust || gen != _previewGeneration) return;
 
     final anchors = _trail.anchors;
@@ -725,11 +760,12 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
   }
 
   void _onAdjustPanUpdate(Offset p) {
-    _lastAdjustOffset = p;
+    final mapped = _mapPoint(p);
+    _lastAdjustPoint = mapped;
     if (_draggingAnchorIndex != null) {
-      _pushAnchorDragPreview(p);
+      _pushAnchorDragPreview(mapped);
     } else {
-      _pushAdjustPreview(p);
+      _pushAdjustPreview(mapped);
     }
   }
 
@@ -741,14 +777,14 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
   /// circle: this screen's anchor markers are plain non-interactive
   /// GeoJSON, redrawn wholesale by [_redraw] on commit, same as every other
   /// anchor edit here already does).
-  Future<void> _pushAnchorDragPreview(Offset p) async {
+  Future<void> _pushAnchorDragPreview(Point<double> p) async {
     final c = _c;
     final idx = _draggingAnchorIndex;
     if (c == null || idx == null || _convertingAdjustPoint || !mounted) return;
     final gen = _previewGeneration;
     _convertingAdjustPoint = true;
     try {
-      final latlng = await c.toLatLng(Point(p.dx, p.dy));
+      final latlng = await c.toLatLng(p);
       if (!mounted ||
           _tool != _Tool.lineAdjust ||
           _draggingAnchorIndex != idx ||
@@ -772,7 +808,7 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
   /// [_strokeLayer]. Pure on-screen geometry — no trail lookup happens
   /// here, so nothing about the surrounding trail can be implied or
   /// affected while dragging. Mirrors `AuthorScreen._pushAdjustPreview`.
-  Future<void> _pushAdjustPreview(Offset p) async {
+  Future<void> _pushAdjustPreview(Point<double> p) async {
     final c = _c;
     final segIdx = _grabSegIdx,
         original = _grabOriginalSeg,
@@ -790,7 +826,7 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     final gen = _previewGeneration;
     _convertingAdjustPoint = true;
     try {
-      final latlng = await c.toLatLng(Point(p.dx, p.dy));
+      final latlng = await c.toLatLng(p);
       if (!mounted ||
           _tool != _Tool.lineAdjust ||
           _grabSegIdx != segIdx ||
@@ -816,7 +852,7 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
         original = _grabOriginalSeg,
         grabIdx = _grabLocalIdx,
         grabOriginal = _grabOriginalPoint;
-    final offset = _lastAdjustOffset;
+    final point = _lastAdjustPoint;
     setState(() {
       _previewGeneration++;
       _grabSegIdx = null;
@@ -824,12 +860,12 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
       _grabOriginalSeg = null;
       _grabOriginalPoint = null;
       _draggingAnchorIndex = null;
-      _lastAdjustOffset = null;
+      _lastAdjustPoint = null;
     });
     await _strokeLayer?.setRoute(const [], _strokePreviewColor);
-    if (!mounted || c == null || offset == null) return;
+    if (!mounted || c == null || point == null) return;
 
-    final newPos = await c.toLatLng(Point(offset.dx, offset.dy));
+    final newPos = await c.toLatLng(point);
     if (!mounted) return;
 
     if (draggingAnchor != null) {
