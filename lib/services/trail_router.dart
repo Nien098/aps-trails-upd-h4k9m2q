@@ -538,8 +538,20 @@ class TrailRouter {
   /// Routes between two existing anchors WITHOUT re-snapping them (used when
   /// re-joining the trail after a middle anchor is deleted). Falls back to a
   /// straight segment when there's no connected trail.
-  Future<List<LatLng>> between(LatLng from, LatLng to) async {
-    final graph = await _buildGraph(await _rectAround(from, to),
+  ///
+  /// [rect] optionally overrides the default query rect (a tight box around
+  /// just [from]/[to] plus a modest pixel pad, [_rectAround]) — pass the
+  /// current [visibleViewportRect] when the real connecting trail might
+  /// bulge outside that tight box (e.g. re-routing after dragging one of two
+  /// widely-spaced anchors near a trail that loops around a park edge
+  /// between them): [_rectAround]'s pad is fixed in *screen* pixels, so at
+  /// typical desktop-designer zoom levels it can be far too small to capture
+  /// a real detour's geometry, causing [graph.route] to wrongly find no
+  /// connected path and fall back to an ugly straight cut across the gap
+  /// that looks like a fabricated shortcut, not a bug in the snap/route
+  /// logic itself.
+  Future<List<LatLng>> between(LatLng from, LatLng to, {Rect? rect}) async {
+    final graph = await _buildGraph(rect ?? await _rectAround(from, to),
         geoBounds: _geoBoundsAround(from, to));
     final line = graph.route(from, to);
     if (line == null) return [from, to];

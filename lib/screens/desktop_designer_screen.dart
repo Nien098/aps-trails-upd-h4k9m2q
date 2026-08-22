@@ -468,23 +468,49 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     if (c == null) return;
     setState(() => _busy = true);
     try {
-      if (_followTrails) pos = await TrailRouter(c).snapPoint(pos);
+      final router = TrailRouter(c);
+      // The whole visible viewport, not a tight box around just the two
+      // points being joined — [TrailRouter.between]'s doc explains why: a
+      // real connecting trail that loops or bulges out from the straight
+      // line between two widely-spaced anchors can fall entirely outside a
+      // tight query box, making a genuinely connected trail look
+      // disconnected and silently degrading to a straight-line "shortcut"
+      // that visibly cuts across terrain.
+      final rect = _followTrails ? await router.visibleViewportRect() : null;
+      if (_followTrails) pos = await router.snapPoint(pos, rect: rect);
+      var noRouteFound = false;
       final anchors = _trail.anchors;
       anchors[idx] = pos;
       if (idx > 0) {
         final prev = anchors[idx - 1];
-        _segments[idx] =
-            _followTrails ? await TrailRouter(c).between(prev, pos) : [prev, pos];
+        if (_followTrails) {
+          final seg = await router.between(prev, pos, rect: rect);
+          if (seg.length <= 2) noRouteFound = true;
+          _segments[idx] = seg;
+        } else {
+          _segments[idx] = [prev, pos];
+        }
       } else if (_segments.isNotEmpty) {
         _segments[0] = [pos];
       }
       if (idx < anchors.length - 1) {
         final next = anchors[idx + 1];
-        _segments[idx + 1] =
-            _followTrails ? await TrailRouter(c).between(pos, next) : [pos, next];
+        if (_followTrails) {
+          final seg = await router.between(pos, next, rect: rect);
+          if (seg.length <= 2) noRouteFound = true;
+          _segments[idx + 1] = seg;
+        } else {
+          _segments[idx + 1] = [pos, next];
+        }
       }
       setState(() => _trail.path = _composePath());
       await _redraw();
+      // Not proof there's genuinely no trail there (a very short real edge
+      // can also legitimately be 2 points) — but worth a heads-up rather
+      // than silently drawing what can look like a fabricated shortcut.
+      if (noRouteFound) {
+        _toast('No connected trail found here — drew a straight line instead');
+      }
     } finally {
       if (mounted) setState(() => _busy = false);
     }
