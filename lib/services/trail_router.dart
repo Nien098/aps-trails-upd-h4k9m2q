@@ -194,19 +194,22 @@ class TrailRouter {
     // one), so the segment nearest to `from` is almost always just a few
     // metres long — too short to safely stand in for "the direction this
     // road continues." Confirmed live (2026-08-22): with the default 8m
-    // hysteresis (fine for [snapStroke]'s point-to-point continuous drag,
-    // where consecutive points are already close together), a short
-    // preferred segment could still register as "close enough to stick
-    // with" for a *second* anchor clicked a genuine 5-10m away, snapping
-    // it back onto virtually the same spot as the first — anchors meant
-    // to advance along a trail collapsed into a visible vertical stack
-    // instead. A much tighter hysteresis, plus refusing to treat a
-    // too-short segment as a real direction hint at all, keeps this
-    // solving the original problem (an unrelated *parallel* feature a
-    // touch closer at the exact same spot) without also capturing a click
-    // that's simply moved a normal anchor-spacing distance further on.
+    // hysteresis, a short preferred segment could still register as
+    // "close enough to stick with" for a *second* anchor clicked a
+    // genuine 5-10m away, snapping it back onto virtually the same spot
+    // as the first — anchors meant to advance along a trail collapsed
+    // into a visible vertical stack instead. The fix is refusing to treat
+    // a too-short segment as a real direction hint at all, not shrinking
+    // the hysteresis distance itself — an earlier version of this fix
+    // *also* shrank the hysteresis to 2m, which stopped the stacking but
+    // (confirmed live, 2026-08-22) broke the original problem this was
+    // meant to solve again: a real, obvious trail just 4-6m off got
+    // rejected in favour of a closer-but-wrong straight fallback, since
+    // that's well within the *old* 8m margin but not the shrunken one.
+    // The minimum-length check alone already prevents the short-segment
+    // capture that caused the stacking, so the hysteresis distance itself
+    // is left at the same proven default [snapStroke] already uses.
     const minPreferredSegMeters = 5.0;
-    const connectHysteresisMeters = 2.0;
     final fromNearest = from == null ? null : graph._nearestSeg(from);
     final fromSeg = fromNearest != null &&
             fromNearest.meters <= 1.0 &&
@@ -215,8 +218,7 @@ class TrailRouter {
         : null;
     ({LatLng point, double meters})? snap;
     if (fromSeg != null) {
-      final sticky = graph._nearestSegSticky(to, fromSeg,
-          hysteresisMeters: connectHysteresisMeters);
+      final sticky = graph._nearestSegSticky(to, fromSeg);
       snap = sticky == null ? null : (point: sticky.point, meters: sticky.meters);
     } else {
       snap = graph.nearestOnEdge(to);

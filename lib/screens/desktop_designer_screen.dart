@@ -577,7 +577,18 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
       final last = _overlayPanLast;
       if (last != null) {
         final delta = e.localPosition - last;
-        _c?.moveCamera(CameraUpdate.scrollBy(delta.dx, delta.dy));
+        // Negated — this is the *opposite* of the established mobile
+        // gotcha for a native two-finger pan (`CameraUpdate.scrollBy`'s
+        // doc says positive dx moves the camera target east, but the
+        // native Android SDK's actual on-screen effect is reversed from
+        // that, so mobile passes the raw delta straight through
+        // unnegated). Confirmed live on web (2026-08-22) that passing the
+        // raw delta here made the map move in the *same* direction as the
+        // drag instead of the content following the cursor like grabbing
+        // and pulling it — i.e. web's `scrollBy` behaves like its own
+        // documented sense, not like mobile's native SDK override. One
+        // more platform-specific divergence in this same API, not a typo.
+        _c?.moveCamera(CameraUpdate.scrollBy(-delta.dx, -delta.dy));
       }
       _overlayPanLast = e.localPosition;
       return;
