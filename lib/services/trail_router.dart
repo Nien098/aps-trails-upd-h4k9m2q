@@ -922,10 +922,38 @@ class _Graph {
     return best;
   }
 
-  /// Nearest point lying on any graph edge, with its distance in metres.
+  /// Nearest point lying on any graph edge, with its distance in metres —
+  /// biased away from roads onto trails/sidewalks, same reasoning (and same
+  /// margin) as [_nearestSegSticky]'s asymmetric exception: a click near a
+  /// highway/road that also happens to run close to a parallel dedicated
+  /// trail should land on the trail, not the road, even if the road is
+  /// marginally closer. Without this, [connect]'s click-to-snap (used by
+  /// every tap-to-tap drawing flow, mobile and desktop) could snap — and
+  /// then route — straight onto a highway shoulder running next to the
+  /// actual intended trail (confirmed via the desktop designer: a click
+  /// meant for "Freeway Trail" landed on the adjacent Trans-Canada Highway
+  /// instead, including tracing through an on/off-ramp loop). This is a
+  /// one-shot lookup (no previous-point context, unlike [_nearestSegSticky]),
+  /// so the bias is unconditional here rather than only kicking in once
+  /// already anchored on a road.
   ({LatLng point, double meters})? nearestOnEdge(LatLng p) {
-    final r = _nearestSeg(p);
-    return r == null ? null : (point: r.point, meters: r.meters);
+    final best = _nearestSeg(p);
+    if (best == null || !best.seg.isRoad) {
+      return best == null ? null : (point: best.point, meters: best.meters);
+    }
+    ({LatLng point, double meters, _Seg seg})? bestNonRoad;
+    for (final seg in _segments) {
+      if (seg.isRoad) continue;
+      final r = _nearestOnSegment(p, seg.a, seg.b);
+      if (bestNonRoad == null || r.meters < bestNonRoad.meters) {
+        bestNonRoad = (point: r.point, meters: r.meters, seg: seg);
+      }
+    }
+    if (bestNonRoad != null &&
+        bestNonRoad.meters <= best.meters + _stickyHysteresisMeters) {
+      return (point: bestNonRoad.point, meters: bestNonRoad.meters);
+    }
+    return (point: best.point, meters: best.meters);
   }
 
   /// Margin (m) [preferred] is allowed to lose by and still be kept — see
