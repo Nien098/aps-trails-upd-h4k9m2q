@@ -102,14 +102,21 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
   /// annotation here (see the class doc).
   int? _pendingMoveAnchorIndex;
 
-  /// Vertices placed so far in [_Tool.drawBoundary] mode, drawn live via
-  /// [_boundary]. Committed to [_genBoundary] by "Finish boundary".
+  /// The generation-boundary outline, built up one click at a time in
+  /// [_Tool.drawBoundary] mode and drawn live via [_boundary] on every
+  /// click. This is the *only* copy of the boundary — earlier this also had
+  /// a separate "committed" `_genBoundary` set only by a "Finish boundary"
+  /// button, but that meant a boundary that was fully drawn and visibly
+  /// rendered on screen silently had zero effect on generation if the
+  /// button wasn't clicked (confirmed live: the outline still looked
+  /// finished, [TrailRouter.generate] just never got a `boundaryPolygon` and
+  /// used the whole viewport instead). Treating whatever's currently drawn
+  /// as the live boundary the moment it has ≥3 points removes that failure
+  /// mode entirely — "Finish boundary" now just switches the tool back to
+  /// drawing, it doesn't gate whether the outline counts.
   final List<LatLng> _boundaryPoints = [];
 
-  /// The finished generation-boundary outline, or null — mirrors
-  /// `AuthorScreen._genBoundary`. Constrains [TrailRouter.generate] to this
-  /// area when set.
-  List<LatLng>? _genBoundary;
+  bool get _hasBoundary => _boundaryPoints.length >= 3;
 
   bool _busy = false;
   String? _status;
@@ -224,6 +231,23 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     return bestIdx < 0 ? null : bestIdx;
   }
 
+  /// Nearest cue to [p] within [maxMeters], or null — same idea as
+  /// [_nearestAnchorIndex], used so a click in [_Tool.addCue] mode on top of
+  /// an existing cue opens *that* cue's editor (with Delete/"Add another")
+  /// instead of always creating a brand-new one at the exact same spot.
+  int? _nearestCueIndex(LatLng p, {double maxMeters = 15}) {
+    var bestIdx = -1;
+    var bestMeters = maxMeters;
+    for (var i = 0; i < _trail.cues.length; i++) {
+      final d = metersBetween(p, _trail.cues[i].position);
+      if (d < bestMeters) {
+        bestMeters = d;
+        bestIdx = i;
+      }
+    }
+    return bestIdx < 0 ? null : bestIdx;
+  }
+
   Future<void> _onMapClick(Point<double> _, LatLng coords) async {
     final c = _c;
     if (c == null || _busy || _modalOpen) return;
@@ -236,7 +260,12 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
         final idx = _nearestAnchorIndex(coords);
         if (idx != null) await _confirmDeleteAnchor(idx);
       case _Tool.addCue:
-        await _addCueAt(coords);
+        final idx = _nearestCueIndex(coords);
+        if (idx != null) {
+          await _editCue(_trail.cues[idx]);
+        } else {
+          await _addCueAt(coords);
+        }
       case _Tool.drawBoundary:
         setState(() => _boundaryPoints.add(coords));
         await _boundary?.setPolygon(_boundaryPoints);
@@ -424,13 +453,18 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
             title: const Text('Cues'),
             content: SizedBox(
               width: 420,
+              // A fixed height (not shrinkWrap) so a long cue list scrolls
+              // internally instead of trying to grow past what the dialog
+              // was given — the same silent-overflow risk fixed in
+              // _pickColor, just with a variable-length list instead of a
+              // fixed grid.
+              height: 360,
               child: sorted.isEmpty
                   ? const Padding(
                       padding: EdgeInsets.symmetric(vertical: 12),
                       child: Text('No cues yet — use "Add cue" or "Suggest cues".'),
                     )
                   : ListView.builder(
-                      shrinkWrap: true,
                       itemCount: sorted.length,
                       itemBuilder: (ctx, i) {
                         final cue = sorted[i];
@@ -458,12 +492,48 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
         ));
   }
 
+  /// Metres a stacked marker's *rendered* position is nudged north of its
+  /// real one, per line already stacked at ~the same spot — an anchor and a
+  /// cue (or two cues) at the same point is common (a "Start"/"Finish" cue
+  /// almost always sits exactly on the first/last anchor), and without this
+  /// their circles/labels painted at the identical coordinate overlap into
+  /// illegible interleaved text (confirmed live — "Start" over anchor "1"
+  /// rendered as garbled "1"/"Start" character soup). Mirrors the idea in
+  /// `GuideScreen._drawCues`'s stacked-cue nudging: offset the geometry
+  /// itself, since a data-driven `text-offset` isn't reliably supported by
+  /// this map/style combination (see `cue_layer.dart`'s own doc on that).
+  static const _stackLineMeters = 6.0;
+  static const _stackClusterMeters = 3.0;
+
+  /// Real (unnudged) positions seen so far this redraw, parallel-indexed
+  /// with how many markers have already claimed each — reset per redraw.
+  final List<LatLng> _stackAnchors = [];
+  final List<int> _stackCounts = [];
+
+  /// Returns [pos] nudged north by however many earlier markers this redraw
+  /// already claimed a spot within [_stackClusterMeters] of it (0 for the
+  /// first marker at a given spot, i.e. unmoved).
+  LatLng _stackedPosition(LatLng pos) {
+    for (var i = 0; i < _stackAnchors.length; i++) {
+      if (metersBetween(_stackAnchors[i], pos) < _stackClusterMeters) {
+        final line = ++_stackCounts[i];
+        final dLat = (_stackLineMeters * line) / 111320.0;
+        return LatLng(pos.latitude + dLat, pos.longitude);
+      }
+    }
+    _stackAnchors.add(pos);
+    _stackCounts.add(0);
+    return pos;
+  }
+
   Future<void> _redraw() async {
     await _route?.setRoute(_trail.path, _trail.color);
+    _stackAnchors.clear();
+    _stackCounts.clear();
     await _points?.setMarkers([
       for (var i = 0; i < _trail.anchors.length; i++)
         CueMarker(
-          position: _trail.anchors[i],
+          position: _stackedPosition(_trail.anchors[i]),
           radius: i == _pendingMoveAnchorIndex ? 9 : 7,
           color: i == _pendingMoveAnchorIndex ? '#EF6C00' : '#1565C0',
           strokeWidth: 2,
@@ -472,7 +542,7 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
         ),
       for (final cue in _trail.cues)
         CueMarker(
-          position: cue.position,
+          position: _stackedPosition(cue.position),
           radius: 9,
           color: '#2E7D32',
           strokeWidth: 2,
@@ -493,7 +563,6 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
       _undoStack.clear();
       _pendingMoveAnchorIndex = null;
       _boundaryPoints.clear();
-      _genBoundary = null;
     });
     await _boundary?.setPolygon(null);
     await _redraw();
@@ -543,7 +612,6 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
       _undoStack.clear();
       _pendingMoveAnchorIndex = null;
       _boundaryPoints.clear();
-      _genBoundary = null;
     });
     await _boundary?.setPolygon(null);
     await _redraw();
@@ -610,7 +678,12 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
   Future<void> _pickColor() async {
     final picked = await _showModal(() => showOpaqueDialog<String>(
           context,
-          maxHeight: 260,
+          // AlertDialog doesn't scroll its own content, so this needs to be
+          // tall enough for the whole (fixed, small) swatch grid up front —
+          // 260 was too short, silently causing the bottom row to overflow
+          // past the dialog's Material and become unclickable even though
+          // it kept painting (confirmed live).
+          maxHeight: 420,
           builder: (ctx) => AlertDialog(
             title: const Text('Trail colour'),
             content: Wrap(
@@ -683,16 +756,11 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
   }
 
   Future<void> _finishBoundary() async {
-    if (_boundaryPoints.length < 3) {
+    if (!_hasBoundary) {
       _toast('Click at least 3 points to outline an area');
       return;
     }
-    setState(() {
-      _genBoundary = List.of(_boundaryPoints);
-      _boundaryPoints.clear();
-      _tool = _Tool.draw;
-    });
-    await _boundary?.setPolygon(_genBoundary);
+    setState(() => _tool = _Tool.draw);
   }
 
   Future<void> _cancelBoundary() async {
@@ -700,11 +768,11 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
       _boundaryPoints.clear();
       _tool = _Tool.draw;
     });
-    await _boundary?.setPolygon(_genBoundary);
+    await _boundary?.setPolygon(null);
   }
 
   Future<void> _clearGenBoundary() async {
-    setState(() => _genBoundary = null);
+    setState(() => _boundaryPoints.clear());
     await _boundary?.setPolygon(null);
   }
 
@@ -714,7 +782,7 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     final choice = await _showModal(() => showOpaqueDialog<_GenChoice>(
           context,
           maxHeight: 620,
-          builder: (_) => _GeneratorDialog(hasBoundary: _genBoundary != null),
+          builder: (_) => _GeneratorDialog(hasBoundary: _hasBoundary),
         ));
     if (choice == null || !mounted) return;
     if (_trail.anchors.isNotEmpty &&
@@ -739,7 +807,7 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     setState(() => _busy = true);
     try {
       final router = TrailRouter(c);
-      final boundary = _genBoundary;
+      final boundary = _hasBoundary ? List<LatLng>.of(_boundaryPoints) : null;
       LatLng center;
       if (boundary != null) {
         final lats = boundary.map((p) => p.latitude);
@@ -783,7 +851,7 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
             ..clear()
             ..addAll(suggestCues(route.path, junctions: junctions));
         }
-        if (boundary != null) _genBoundary = null;
+        if (boundary != null) _boundaryPoints.clear();
       });
       if (boundary != null) await _boundary?.setPolygon(null);
       await _redraw();
@@ -863,7 +931,7 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
               const PopupMenuItem(value: 'clearPath', child: Text('Clear path')),
               const PopupMenuItem(value: 'clearCues', child: Text('Clear all cues')),
               const PopupMenuItem(value: 'clearAll', child: Text('Clear everything')),
-              if (_genBoundary != null)
+              if (_hasBoundary)
                 const PopupMenuItem(
                     value: 'clearBoundary', child: Text('Clear generation boundary')),
             ],
