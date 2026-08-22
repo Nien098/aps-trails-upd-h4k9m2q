@@ -85,6 +85,26 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
   bool _busy = false;
   String? _status;
 
+  /// True while a cue-editor/cue-list dialog is open — guards [_onMapClick]
+  /// against a confirmed Flutter-Web platform-view issue: clicks meant for
+  /// a modal (including its own Save/Cancel buttons) were also reaching
+  /// MapLibre's canvas underneath, and with "Add cue" mode still active
+  /// that immediately reopened another editor, making the dialog look
+  /// permanently stuck. `showDialog`'s barrier (see [showCueEditor]'s
+  /// `asDialog`) fixes this on its own in testing, but this flag is kept as
+  /// a second, unconditional guard — belt and suspenders against the same
+  /// class of platform-view click-through for any future dialog added here.
+  bool _modalOpen = false;
+
+  Future<T?> _showModal<T>(Future<T?> Function() show) async {
+    _modalOpen = true;
+    try {
+      return await show();
+    } finally {
+      if (mounted) _modalOpen = false;
+    }
+  }
+
   /// Snapshot stack for undo — identical shape and push-before-mutate
   /// discipline as `AuthorScreen._EditSnapshot`/`_pushUndo`/`_undo`. Mobile
   /// has no redo either; matched here rather than adding scope beyond that
@@ -172,7 +192,7 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
 
   Future<void> _onMapClick(Point<double> _, LatLng coords) async {
     final c = _c;
-    if (c == null || _busy) return;
+    if (c == null || _busy || _modalOpen) return;
     switch (_tool) {
       case _Tool.draw:
         await _addAnchor(coords);
@@ -304,8 +324,8 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
   }
 
   Future<void> _addCueAt(LatLng position) async {
-    final cue =
-        await showCueEditor(context, position: position, initialOrder: _nextCueOrder);
+    final cue = await _showModal(() => showCueEditor(context,
+        position: position, initialOrder: _nextCueOrder, asDialog: true));
     if (cue == null || !mounted) return;
     _pushUndo();
     setState(() => _insertCueAtOrder(cue));
@@ -317,15 +337,18 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     final currentRank =
         (List.of(_trail.cues)..sort((a, b) => a.order.compareTo(b.order)))
             .indexOf(cue);
-    final result = await showCueEditor(context,
-        position: cue.position, existing: cue, initialOrder: currentRank);
+    final result = await _showModal(() => showCueEditor(context,
+        position: cue.position,
+        existing: cue,
+        initialOrder: currentRank,
+        asDialog: true));
     if (!mounted) return;
     if (result == deletedCueSentinel) {
       _pushUndo();
       setState(() => _trail.cues.remove(cue));
     } else if (result == addAnotherCueSentinel) {
-      final another = await showCueEditor(context,
-          position: cue.position, initialOrder: _nextCueOrder);
+      final another = await _showModal(() => showCueEditor(context,
+          position: cue.position, initialOrder: _nextCueOrder, asDialog: true));
       if (!mounted || another == null) return;
       _pushUndo();
       setState(() => _insertCueAtOrder(another));
@@ -352,7 +375,7 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
   Future<void> _showCueList() async {
     final sorted = List<Cue>.of(_trail.cues)
       ..sort((a, b) => a.order.compareTo(b.order));
-    await showDialog<void>(
+    await _showModal(() => showDialog<void>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('Cues'),
@@ -388,7 +411,7 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Close')),
         ],
       ),
-    );
+    ));
   }
 
   Future<void> _redraw() async {

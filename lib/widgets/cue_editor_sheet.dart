@@ -22,10 +22,21 @@ final Cue addAnotherCueSentinel = Cue(
   order: -2,
 );
 
-/// Shows the cue editor as a modal bottom sheet. Returns the edited cue,
-/// [deletedCueSentinel] if deleted, [addAnotherCueSentinel] if the user chose
-/// to stack another cue here (both only possible when [existing] is given),
-/// or null if cancelled.
+/// Shows the cue editor as a modal bottom sheet (mobile) or a fixed-size
+/// centred dialog (desktop, [asDialog]) — a full-window-width/height bottom
+/// sheet on a desktop browser tab is a relic of the phone layout, and more
+/// importantly `showModalBottomSheet`'s barrier was confirmed on-device to
+/// *not* block clicks from reaching MapLibre's platform-view canvas
+/// underneath on Flutter Web: every click meant for the sheet (including
+/// Save/Cancel) was also landing on the map, which, with "Add cue" mode
+/// still active, immediately reopened another editor, looking like the
+/// sheet was permanently stuck. `showDialog`'s barrier doesn't have this
+/// problem; desktop callers additionally guard their own click handler
+/// while any dialog is open (`DesktopDesignerScreen._modalOpen`) as a
+/// second, independent layer against the same class of platform-view
+/// click-through. Returns the edited cue, [deletedCueSentinel] if deleted,
+/// [addAnotherCueSentinel] if the user chose to stack another cue here
+/// (both only possible when [existing] is given), or null if cancelled.
 ///
 /// [initialOrder] (0-based) is the stack position shown in the editable
 /// "Position in list" field: for a brand new cue, the default is typically
@@ -44,7 +55,30 @@ Future<Cue?> showCueEditor(
   required LatLng position,
   Cue? existing,
   int initialOrder = 0,
+  bool asDialog = false,
 }) {
+  Widget sheet(BuildContext ctx) => CueEditorSheet(
+        position: position,
+        existing: existing,
+        initialOrder: initialOrder,
+        onDelete:
+            existing == null ? null : () => Navigator.pop(ctx, deletedCueSentinel),
+        onAddAnother:
+            existing == null ? null : () => Navigator.pop(ctx, addAnotherCueSentinel),
+      );
+
+  if (asDialog) {
+    return showDialog<Cue>(
+      context: context,
+      builder: (ctx) => Dialog(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 480, maxHeight: 640),
+          child: sheet(ctx),
+        ),
+      ),
+    );
+  }
+
   return showModalBottomSheet<Cue>(
     context: context,
     isScrollControlled: true,
@@ -54,17 +88,7 @@ Future<Cue?> showCueEditor(
     ),
     builder: (ctx) => Padding(
       padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
-      child: CueEditorSheet(
-        position: position,
-        existing: existing,
-        initialOrder: initialOrder,
-        onDelete: existing == null
-            ? null
-            : () => Navigator.pop(ctx, deletedCueSentinel),
-        onAddAnother: existing == null
-            ? null
-            : () => Navigator.pop(ctx, addAnotherCueSentinel),
-      ),
+      child: sheet(ctx),
     ),
   );
 }
