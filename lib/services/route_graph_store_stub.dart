@@ -55,6 +55,17 @@ class RouteGraphStore {
   final Map<String, List<RouteWay>> _cache = {};
   final Map<String, Future<List<RouteWay>>> _inFlight = {};
 
+  /// When a cell last failed (see [_waysForCell]) — checked before starting
+  /// a new fetch so a still-rate-limited/unreachable Overpass doesn't get
+  /// hammered with an identical doomed request on every single subsequent
+  /// action; confirmed live (2026-08-22) that heavy automated testing can
+  /// get a public Overpass instance to reject/block requests outright for
+  /// a while. [_failureBackoff] is deliberately short — this is a courtesy
+  /// pause, not a long-lived "give up" signal, since a real edit session
+  /// should recover once the block/outage clears.
+  final Map<String, DateTime> _failedAt = {};
+  static const _failureBackoff = Duration(seconds: 30);
+
   /// Fetches every cell overlapping [bounds] **in parallel**, not one at a
   /// time — a single click/drag's padded query area can span 2-4 cells (see
   /// [_cellDeg]), and a sequential `for` loop here made each of those pay
@@ -98,6 +109,16 @@ class RouteGraphStore {
       return inFlight;
     }
 
+    final failedAt = _failedAt[key];
+    if (failedAt != null) {
+      final since = DateTime.now().difference(failedAt);
+      if (since < _failureBackoff) {
+        DebugLog.instance.log('RouteGraphStore cell $key: skipping, failed '
+            '${since.inSeconds}s ago (backoff ${_failureBackoff.inSeconds}s)');
+        return Future.value(const []);
+      }
+    }
+
     final south = cell.lat * _cellDeg;
     final north = south + _cellDeg;
     final west = cell.lon * _cellDeg;
@@ -106,6 +127,7 @@ class RouteGraphStore {
     final future = _fetchCell(south, west, north, east).then((ways) {
       _cache[key] = ways;
       _inFlight.remove(key);
+      _failedAt.remove(key);
       if (sw != null) {
         DebugLog.instance.log('RouteGraphStore cell $key: fetched '
             '${ways.length} ways in ${sw.elapsedMilliseconds}ms');
@@ -116,8 +138,10 @@ class RouteGraphStore {
       // permanently disable supplemental data for the rest of the editing
       // session, unlike a genuine empty-result cache hit above. The caller
       // (TrailRouter._addFeaturesToGraph) treats an empty list exactly like
-      // "nothing offline found here", same as it always has.
+      // "nothing offline found here", same as it always has. [_failedAt]
+      // just delays the *next* retry a little, it never gives up outright.
       _inFlight.remove(key);
+      _failedAt[key] = DateTime.now();
       if (sw != null) {
         DebugLog.instance.log('RouteGraphStore cell $key: failed after '
             '${sw.elapsedMilliseconds}ms — $e');
@@ -155,13 +179,30 @@ class RouteGraphStore {
   /// POSTs one small Overpass query for a single grid cell. A short client
   /// timeout (not [_fetchCellAdaptive]'s multi-minute budget in
   /// `region_downloader.dart` — that's for a one-off bulk region download,
-  /// this blocks an interactive click) with one retry; any failure just
-  /// yields an empty list so drawing/adjusting never hangs or breaks.
+  /// this blocks an interactive click) with one retry.
+  ///
+  /// Deliberately **throws** rather than returning `[]` when every attempt
+  /// fails (bad status, timeout, unparseable body) — a real, confirmed
+  /// "Overpass has no ways here" answer (a 200 with a genuinely empty
+  /// `elements` list) and a failed/rate-limited request must stay
+  /// distinguishable, because [_waysForCell] caches a *returned* empty list
+  /// forever but never caches a *thrown* one. Getting this backwards was a
+  /// real bug: an earlier version swallowed every failure into `return
+  /// const []`, so a transient Overpass error (rate-limiting from this
+  /// project's own repeated automated testing is exactly the case that
+  /// surfaced it, 2026-08-22) got cached as a permanent, wrongly-confident
+  /// "confirmed no trails here" for that grid cell — reported as the
+  /// Adjust tool's anchor-drag snapping going back to "barely functional",
+  /// traced via the debug panel to every single cell in the edited area
+  /// showing 0 rendered ways with no error ever logged, because the error
+  /// was being caught and hidden right here, one level below where logging
+  /// already existed.
   static Future<List<RouteWay>> _fetchCell(
       double south, double west, double north, double east) async {
     final query = '[out:json][timeout:10];'
         'way["highway"]($south,$west,$north,$east);'
         'out tags geom;';
+    Object? lastError;
     for (var attempt = 0; attempt <= 1; attempt++) {
       try {
         final swNet = DebugLog.instance.enabled ? (Stopwatch()..start()) : null;
@@ -170,7 +211,12 @@ class RouteGraphStore {
                 body: {'data': query})
             .timeout(const Duration(seconds: 8));
         final netMs = swNet?.elapsedMilliseconds;
-        if (resp.statusCode != 200) continue;
+        if (resp.statusCode != 200) {
+          lastError = 'HTTP ${resp.statusCode}: ${resp.body}';
+          DebugLog.instance.log('RouteGraphStore fetch attempt $attempt: '
+              '$lastError (network ${netMs}ms)');
+          continue;
+        }
         final swParse = DebugLog.instance.enabled ? (Stopwatch()..start()) : null;
         final decoded = jsonDecode(resp.body);
         final raw = decoded is Map ? decoded['elements'] : null;
@@ -179,7 +225,12 @@ class RouteGraphStore {
               '${resp.bodyBytes.length}B, jsonDecode '
               '${swParse.elapsedMilliseconds}ms so far');
         }
-        if (raw is! List) continue;
+        if (raw is! List) {
+          lastError = 'malformed response body (no elements list): '
+              '${resp.body.substring(0, resp.body.length.clamp(0, 300))}';
+          DebugLog.instance.log('RouteGraphStore fetch attempt $attempt: $lastError');
+          continue;
+        }
         // Eagerly filter to real Maps rather than a lazy `.cast<Map>()` —
         // Overpass can return a malformed/non-Map element under load, and a
         // lazy cast would let that sail through only to throw far away from
@@ -208,12 +259,15 @@ class RouteGraphStore {
               '${elements.length} elements into ${ways.length} ways, '
               '${swParse.elapsedMilliseconds}ms total parse');
         }
+        // A genuine, successfully-parsed answer — confirmed empty (0 ways)
+        // is a legitimate, cacheable result here, not a failure.
         return ways;
-      } catch (_) {
-        // fall through to retry/give up below
+      } catch (e) {
+        lastError = e;
+        DebugLog.instance.log('RouteGraphStore fetch attempt $attempt threw: $e');
       }
     }
-    return const [];
+    throw StateError('Overpass fetch failed after 2 attempts: $lastError');
   }
 
   /// Fire-and-forget cache warm-up for [bounds] — identical work to
