@@ -260,11 +260,24 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
         final idx = _nearestAnchorIndex(coords);
         if (idx != null) await _confirmDeleteAnchor(idx);
       case _Tool.addCue:
-        final idx = _nearestCueIndex(coords);
+        // Snapped onto the trail, not the raw click — mirrors
+        // AuthorScreen._placeMovingCue's default (non-"Free placement")
+        // behaviour: a cue belongs on the trail it's guiding, not wherever
+        // the mouse happened to land. Without this, a click even a few
+        // metres off the line placed the cue there permanently, and a
+        // later "Add another cue at this same spot" from a *different*
+        // stray cue (found by the on-map hit-test, which only searches
+        // within its own small radius) could easily land somewhere
+        // visibly different rather than genuinely stacking — confirmed as
+        // the likely cause of a real report of "stacked" cues scattering
+        // to different, off-trail spots.
+        final snapped =
+            _trail.path.length >= 2 ? nearestPointOnPath(coords, _trail.path) : coords;
+        final idx = _nearestCueIndex(snapped);
         if (idx != null) {
           await _editCue(_trail.cues[idx]);
         } else {
-          await _addCueAt(coords);
+          await _addCueAt(snapped);
         }
       case _Tool.drawBoundary:
         setState(() => _boundaryPoints.add(coords));
