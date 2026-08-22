@@ -1,8 +1,10 @@
 import 'dart:math' show Point, exp, max, min, sqrt;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:maplibre_gl/maplibre_gl.dart';
 
+import '../cue_style.dart';
 import '../models/trail.dart';
 import '../services/boundary_layer.dart';
 import '../services/cue_gen.dart';
@@ -449,13 +451,23 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     if (mounted) setState(() => _pendingMoveAnchorIndex = null);
   }
 
-  /// Re-routes the segment(s) touching anchor [idx] to [pos] — identical to
-  /// `AuthorScreen._commitAnchorPosition`. Caller pushes undo beforehand.
+  /// Re-routes the segment(s) touching anchor [idx] to [pos] — mirrors
+  /// `AuthorScreen._commitAnchorPosition`, plus one improvement: [pos] is
+  /// first snapped onto the nearest trail/road edge (same `nearestOnEdge`
+  /// snap `connect()` already applies when drawing a new point) before
+  /// being stored or routed to. Without this, a drag that landed a few
+  /// metres short of the intended trail left the anchor floating there
+  /// permanently — `between()` alone has no snapping of its own, it just
+  /// pathfinds between exactly the two points it's given, so an unsnapped
+  /// drop produced an ugly straight "spur" off the real trail instead of
+  /// the clean re-route the Adjust tool is meant to help fix a poorly
+  /// drawn line into. Caller pushes undo beforehand.
   Future<void> _commitAnchorPosition(int idx, LatLng pos) async {
     final c = _c;
     if (c == null) return;
     setState(() => _busy = true);
     try {
+      if (_followTrails) pos = await TrailRouter(c).snapPoint(pos);
       final anchors = _trail.anchors;
       anchors[idx] = pos;
       if (idx > 0) {
@@ -485,6 +497,21 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
   Point<double> _mapPoint(Offset p) {
     final probe = PointerProbe.mapRelativePosition();
     return probe == null ? Point(p.dx, p.dy) : Point(probe.x, probe.y);
+  }
+
+  /// Forwards mouse-wheel scroll straight to the camera while the drag-tool
+  /// overlay is up — without this, scroll-zoom stopped working the moment
+  /// either drag tool was turned on: [setMapDragLocked] sets
+  /// `pointer-events: none` on the map's own canvas so it never sees the
+  /// wheel event either, and a plain `GestureDetector` doesn't handle wheel
+  /// input at all. Mirrors `AuthorScreen._DrawGestureSurface._onWheel`
+  /// exactly (see the gotcha in that file's history: mobile hit the same
+  /// "a full-screen capture overlay silently breaks the map's own wheel
+  /// handling" bug when its drawing tools first shipped).
+  void _onOverlayWheel(PointerSignalEvent event) {
+    if (event is! PointerScrollEvent) return;
+    _c?.animateCamera(
+        event.scrollDelta.dy < 0 ? CameraUpdate.zoomIn() : CameraUpdate.zoomOut());
   }
 
   void _onStrokePanStart(Offset p) {
@@ -1072,7 +1099,8 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     await _route?.setRoute(_trail.path, _trail.color);
     _stackAnchors.clear();
     _stackCounts.clear();
-    await _points?.setMarkers([
+
+    final markers = <CueMarker>[
       for (var i = 0; i < _trail.anchors.length; i++)
         CueMarker(
           position: _stackedPosition(_trail.anchors[i]),
@@ -1082,16 +1110,59 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
           text: '${i + 1}',
           textColor: '#1A1A1A',
         ),
-      for (final cue in _trail.cues)
-        CueMarker(
-          position: _stackedPosition(cue.position),
-          radius: 9,
-          color: '#2E7D32',
-          strokeWidth: 2,
-          text: cue.label,
+    ];
+
+    // Group cues that share (almost) the same spot so they render as one
+    // merged marker (a distinct stacked colour) with every cue there listed
+    // on its own text line, instead of splitting into separate, overlapping
+    // dots — mirrors `AuthorScreen._cueDisplayInfo`/`GuideScreen._drawCues`
+    // exactly, including the merge distance (7m, matched to
+    // `cue_gen.dart`'s own `cueMergeMeters` default so this display grouping
+    // agrees with what auto-generated cues already consider "the same
+    // spot").
+    final sorted = List<Cue>.of(_trail.cues)..sort((a, b) => a.order.compareTo(b.order));
+    final rank = <Cue, int>{for (var i = 0; i < sorted.length; i++) sorted[i]: i + 1};
+    final groups = <List<Cue>>[];
+    for (final cue in _trail.cues) {
+      final match =
+          groups.where((g) => metersBetween(g.first.position, cue.position) < 7.0);
+      if (match.isNotEmpty) {
+        match.first.add(cue);
+      } else {
+        groups.add([cue]);
+      }
+    }
+    for (final group in groups) {
+      final stacked = group.length > 1;
+      if (stacked) {
+        group.sort((a, b) => (rank[a] ?? 0).compareTo(rank[b] ?? 0));
+      }
+      final pos = _stackedPosition(group.first.position);
+      final color = stacked ? stackedCueColorHex : cueColorHex(group.first.type);
+      // One line of text per cue in the group, each its own point feature
+      // nudged a little south of the real spot (only the first carries a
+      // real circle radius/stroke — the rest are radius 0, text-only) —
+      // see `cue_layer.dart`'s doc for why a joined multi-line label isn't
+      // used instead (data-driven text-offset isn't reliably supported
+      // here).
+      for (var i = 0; i < group.length; i++) {
+        final cue = group[i];
+        const metersPerDegLat = 111320.0;
+        final linePos = i == 0
+            ? pos
+            : LatLng(pos.latitude - (i * 3.5) / metersPerDegLat, pos.longitude);
+        markers.add(CueMarker(
+          position: linePos,
+          radius: i == 0 ? (stacked ? 13 : 11) : 0,
+          color: color,
+          strokeWidth: stacked ? 4 : 3,
+          text: '${rank[cue] ?? "–"}. ${cue.label}',
           textColor: '#1A1A1A',
-        ),
-    ]);
+        ));
+      }
+    }
+
+    await _points?.setMarkers(markers);
     if (mounted) {
       setState(() => _status =
           '${_trail.anchors.length} points · ${(pathLength(_trail.path) / 1000).toStringAsFixed(2)} km');
@@ -1584,17 +1655,21 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
               ),
               if (_tool == _Tool.dragDraw || _tool == _Tool.lineAdjust)
                 Positioned.fill(
-                  child: GestureDetector(
+                  child: Listener(
                     behavior: HitTestBehavior.opaque,
-                    onPanStart: (d) => _tool == _Tool.dragDraw
-                        ? _onStrokePanStart(d.localPosition)
-                        : _onAdjustPanStart(d.localPosition),
-                    onPanUpdate: (d) => _tool == _Tool.dragDraw
-                        ? _onStrokePanUpdate(d.localPosition)
-                        : _onAdjustPanUpdate(d.localPosition),
-                    onPanEnd: (_) => _tool == _Tool.dragDraw
-                        ? _onStrokePanEnd()
-                        : _onAdjustPanEnd(),
+                    onPointerSignal: _onOverlayWheel,
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onPanStart: (d) => _tool == _Tool.dragDraw
+                          ? _onStrokePanStart(d.localPosition)
+                          : _onAdjustPanStart(d.localPosition),
+                      onPanUpdate: (d) => _tool == _Tool.dragDraw
+                          ? _onStrokePanUpdate(d.localPosition)
+                          : _onAdjustPanUpdate(d.localPosition),
+                      onPanEnd: (_) => _tool == _Tool.dragDraw
+                          ? _onStrokePanEnd()
+                          : _onAdjustPanEnd(),
+                    ),
                   ),
                 ),
               Positioned(
