@@ -493,8 +493,7 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     final gen = _previewGeneration;
     _convertingStrokePoint = true;
     try {
-      final dpr = MediaQuery.of(context).devicePixelRatio;
-      final latlng = await c.toLatLng(Point(p.dx * dpr, p.dy * dpr));
+      final latlng = await c.toLatLng(Point(p.dx, p.dy));
       if (!mounted || _tool != _Tool.dragDraw || gen != _previewGeneration) return;
       _strokePreview.add(latlng);
       if (_strokePreview.length >= 2) {
@@ -528,9 +527,7 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
 
     setState(() => _committingStroke = true);
     try {
-      final dpr = MediaQuery.of(context).devicePixelRatio;
-      final raw = await Future.wait(
-          points.map((p) => c.toLatLng(Point(p.dx * dpr, p.dy * dpr))));
+      final raw = await Future.wait(points.map((p) => c.toLatLng(Point(p.dx, p.dy))));
       final simplified = simplifyPath(raw, 2.5);
       if (simplified.length < 2) return;
       final rawSnapped =
@@ -649,8 +646,7 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     final c = _c;
     if (c == null) return;
     final gen = ++_previewGeneration;
-    final dpr = MediaQuery.of(context).devicePixelRatio;
-    final screenX = p.dx * dpr, screenY = p.dy * dpr;
+    final screenX = p.dx, screenY = p.dy;
     final latlng = await c.toLatLng(Point(screenX, screenY));
     if (!mounted || _tool != _Tool.lineAdjust || gen != _previewGeneration) return;
 
@@ -752,8 +748,7 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     final gen = _previewGeneration;
     _convertingAdjustPoint = true;
     try {
-      final dpr = MediaQuery.of(context).devicePixelRatio;
-      final latlng = await c.toLatLng(Point(p.dx * dpr, p.dy * dpr));
+      final latlng = await c.toLatLng(Point(p.dx, p.dy));
       if (!mounted ||
           _tool != _Tool.lineAdjust ||
           _draggingAnchorIndex != idx ||
@@ -795,8 +790,7 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     final gen = _previewGeneration;
     _convertingAdjustPoint = true;
     try {
-      final dpr = MediaQuery.of(context).devicePixelRatio;
-      final latlng = await c.toLatLng(Point(p.dx * dpr, p.dy * dpr));
+      final latlng = await c.toLatLng(Point(p.dx, p.dy));
       if (!mounted ||
           _tool != _Tool.lineAdjust ||
           _grabSegIdx != segIdx ||
@@ -835,8 +829,7 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     await _strokeLayer?.setRoute(const [], _strokePreviewColor);
     if (!mounted || c == null || offset == null) return;
 
-    final dpr = MediaQuery.of(context).devicePixelRatio;
-    final newPos = await c.toLatLng(Point(offset.dx * dpr, offset.dy * dpr));
+    final newPos = await c.toLatLng(Point(offset.dx, offset.dy));
     if (!mounted) return;
 
     if (draggingAnchor != null) {
