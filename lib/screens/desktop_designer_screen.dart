@@ -1184,7 +1184,8 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
 
   /// Returns [pos] nudged north by however many earlier markers this redraw
   /// already claimed a spot within [_stackClusterMeters] of it (0 for the
-  /// first marker at a given spot, i.e. unmoved).
+  /// first marker at a given spot, i.e. unmoved). Used for *cue* markers
+  /// only — see [_registerStackPosition] for why anchors don't nudge.
   LatLng _stackedPosition(LatLng pos) {
     for (var i = 0; i < _stackAnchors.length; i++) {
       if (metersBetween(_stackAnchors[i], pos) < _stackClusterMeters) {
@@ -1198,22 +1199,44 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     return pos;
   }
 
+  /// Registers [pos] as a claimed marker spot for this redraw's collision
+  /// bookkeeping (above) without nudging it — used for anchor markers,
+  /// which should never move off their real clicked position no matter how
+  /// close together several end up. Confirmed unwanted live (2026-08-22):
+  /// clicking near-identical spots repeatedly in Draw mode used to nudge
+  /// each new anchor into a vertical stack the same way overlapping cues
+  /// used to — but a cluster of anchors isn't a meaningful "feature" the
+  /// way a genuine multi-cue junction is; an anchor sitting almost on top
+  /// of another is just where it was actually placed, and hiding that by
+  /// moving it is more confusing than an overlapping dot. Still updates
+  /// the shared tracker so a *cue* landing on the same spot as this anchor
+  /// knows to nudge itself away from it.
+  void _registerStackPosition(LatLng pos) {
+    for (final claimed in _stackAnchors) {
+      if (metersBetween(claimed, pos) < _stackClusterMeters) return;
+    }
+    _stackAnchors.add(pos);
+    _stackCounts.add(0);
+  }
+
   Future<void> _redraw() async {
     await _route?.setRoute(_trail.path, _trail.color);
     _stackAnchors.clear();
     _stackCounts.clear();
 
-    final markers = <CueMarker>[
-      for (var i = 0; i < _trail.anchors.length; i++)
-        CueMarker(
-          position: _stackedPosition(_trail.anchors[i]),
-          radius: i == _pendingMoveAnchorIndex ? 9 : 7,
-          color: i == _pendingMoveAnchorIndex ? '#EF6C00' : '#1565C0',
-          strokeWidth: 2,
-          text: '${i + 1}',
-          textColor: '#1A1A1A',
-        ),
-    ];
+    final markers = <CueMarker>[];
+    for (var i = 0; i < _trail.anchors.length; i++) {
+      final pos = _trail.anchors[i];
+      _registerStackPosition(pos);
+      markers.add(CueMarker(
+        position: pos,
+        radius: i == _pendingMoveAnchorIndex ? 9 : 7,
+        color: i == _pendingMoveAnchorIndex ? '#EF6C00' : '#1565C0',
+        strokeWidth: 2,
+        text: '${i + 1}',
+        textColor: '#1A1A1A',
+      ));
+    }
 
     // Group cues that share (almost) the same spot so they render as one
     // merged marker (a distinct stacked colour) with every cue there listed

@@ -189,12 +189,34 @@ class TrailRouter {
     // very first anchor of a trail has no `from` to be sticky about, so it
     // keeps the plain one-shot [nearestOnEdge] search (with its own
     // road-vs-trail bias) unchanged.
+    // `_segments` holds one tiny piece per pair of *consecutive* source
+    // vertices (a road with 50 mapped points is 49 short segments, not
+    // one), so the segment nearest to `from` is almost always just a few
+    // metres long — too short to safely stand in for "the direction this
+    // road continues." Confirmed live (2026-08-22): with the default 8m
+    // hysteresis (fine for [snapStroke]'s point-to-point continuous drag,
+    // where consecutive points are already close together), a short
+    // preferred segment could still register as "close enough to stick
+    // with" for a *second* anchor clicked a genuine 5-10m away, snapping
+    // it back onto virtually the same spot as the first — anchors meant
+    // to advance along a trail collapsed into a visible vertical stack
+    // instead. A much tighter hysteresis, plus refusing to treat a
+    // too-short segment as a real direction hint at all, keeps this
+    // solving the original problem (an unrelated *parallel* feature a
+    // touch closer at the exact same spot) without also capturing a click
+    // that's simply moved a normal anchor-spacing distance further on.
+    const minPreferredSegMeters = 5.0;
+    const connectHysteresisMeters = 2.0;
     final fromNearest = from == null ? null : graph._nearestSeg(from);
-    final fromSeg =
-        fromNearest != null && fromNearest.meters <= 1.0 ? fromNearest.seg : null;
+    final fromSeg = fromNearest != null &&
+            fromNearest.meters <= 1.0 &&
+            metersBetween(fromNearest.seg.a, fromNearest.seg.b) >= minPreferredSegMeters
+        ? fromNearest.seg
+        : null;
     ({LatLng point, double meters})? snap;
     if (fromSeg != null) {
-      final sticky = graph._nearestSegSticky(to, fromSeg);
+      final sticky = graph._nearestSegSticky(to, fromSeg,
+          hysteresisMeters: connectHysteresisMeters);
       snap = sticky == null ? null : (point: sticky.point, meters: sticky.meters);
     } else {
       snap = graph.nearestOnEdge(to);
