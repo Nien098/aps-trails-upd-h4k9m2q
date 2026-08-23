@@ -385,48 +385,77 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     await _redraw();
   }
 
-  /// Nearest anchor to [p] within [maxMeters], or null — the desktop
-  /// stand-in for a native tappable anchor marker (see the class doc).
-  int? _nearestAnchorIndex(LatLng p, {double maxMeters = 20}) {
+  /// Nearest anchor to click-point [screenPoint] within [maxPx] *screen*
+  /// pixels, or null — the desktop stand-in for a native tappable anchor
+  /// marker (see the class doc). Screen-space, not [metersBetween] on the
+  /// real coordinates: a fixed real-world-metres radius is zoom-dependent
+  /// by construction (tiny in screen terms zoomed out, enormous zoomed in),
+  /// the same class of bug already found and fixed twice this session for
+  /// cue-marker rendering — [screenPoint] comes straight from
+  /// `onMapClick`'s own `point` param, already in the same native pixel
+  /// space `toScreenLocation` returns (confirmed via `maplibre_gl_web`'s
+  /// source — see `pointer_probe.dart`'s doc), so no devicePixelRatio
+  /// conversion is needed here the way a raw Flutter `Offset` would.
+  Future<int?> _nearestAnchorIndex(Point<double> screenPoint,
+      {double maxPx = 24}) async {
+    final c = _c;
+    if (c == null) return null;
     var bestIdx = -1;
-    var bestMeters = maxMeters;
+    var bestPx = maxPx;
     for (var i = 0; i < _trail.anchors.length; i++) {
-      final d = metersBetween(p, _trail.anchors[i]);
-      if (d < bestMeters) {
-        bestMeters = d;
+      final sp = await c.toScreenLocation(_trail.anchors[i]);
+      final dx = sp.x.toDouble() - screenPoint.x;
+      final dy = sp.y.toDouble() - screenPoint.y;
+      final px = sqrt(dx * dx + dy * dy);
+      if (px < bestPx) {
+        bestPx = px;
         bestIdx = i;
       }
     }
     return bestIdx < 0 ? null : bestIdx;
   }
 
-  /// Nearest cue to [p] within [maxMeters], or null — same idea as
-  /// [_nearestAnchorIndex], used so a click in [_Tool.addCue] mode on top of
-  /// an existing cue opens *that* cue's editor (with Delete/"Add another")
-  /// instead of always creating a brand-new one at the exact same spot.
-  int? _nearestCueIndex(LatLng p, {double maxMeters = 15}) {
+  /// Nearest cue to click-point [screenPoint] within [maxPx] *screen*
+  /// pixels, or null — same idea as [_nearestAnchorIndex] (see its doc for
+  /// why screen pixels, not real-world metres), used so a click in
+  /// [_Tool.addCue] mode on top of an existing cue opens *that* cue's
+  /// editor (with Delete/"Add another") instead of always creating a
+  /// brand-new one at the exact same spot. The previous 15-metre version
+  /// of this was reported live (2026-08-22) as actively blocking legit
+  /// closely-spaced cue placement — at a normal editing zoom, 15 real
+  /// metres is far wider than the drawn circle, so clicking anywhere near
+  /// an *existing* cue silently redirected into editing it instead of
+  /// creating the *next* one, exactly the kind of accuracy-critical
+  /// placement this app exists for.
+  Future<int?> _nearestCueIndex(Point<double> screenPoint,
+      {double maxPx = 20}) async {
+    final c = _c;
+    if (c == null) return null;
     var bestIdx = -1;
-    var bestMeters = maxMeters;
+    var bestPx = maxPx;
     for (var i = 0; i < _trail.cues.length; i++) {
-      final d = metersBetween(p, _trail.cues[i].position);
-      if (d < bestMeters) {
-        bestMeters = d;
+      final sp = await c.toScreenLocation(_trail.cues[i].position);
+      final dx = sp.x.toDouble() - screenPoint.x;
+      final dy = sp.y.toDouble() - screenPoint.y;
+      final px = sqrt(dx * dx + dy * dy);
+      if (px < bestPx) {
+        bestPx = px;
         bestIdx = i;
       }
     }
     return bestIdx < 0 ? null : bestIdx;
   }
 
-  Future<void> _onMapClick(Point<double> _, LatLng coords) async {
+  Future<void> _onMapClick(Point<double> screenPoint, LatLng coords) async {
     final c = _c;
     if (c == null || _busy || _modalOpen) return;
     switch (_tool) {
       case _Tool.draw:
         await _addAnchor(coords);
       case _Tool.moveAnchor:
-        await _handleMoveAnchorClick(coords);
+        await _handleMoveAnchorClick(screenPoint, coords);
       case _Tool.deleteAnchor:
-        final idx = _nearestAnchorIndex(coords);
+        final idx = await _nearestAnchorIndex(screenPoint);
         if (idx != null) await _confirmDeleteAnchor(idx);
       case _Tool.addCue:
         // Snapped onto the trail, not the raw click — mirrors
@@ -442,7 +471,7 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
         // to different, off-trail spots.
         final snapped =
             _trail.path.length >= 2 ? nearestPointOnPath(coords, _trail.path) : coords;
-        final idx = _nearestCueIndex(snapped);
+        final idx = await _nearestCueIndex(screenPoint);
         if (idx != null) {
           await _editCue(_trail.cues[idx]);
         } else {
@@ -491,10 +520,10 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     }
   }
 
-  Future<void> _handleMoveAnchorClick(LatLng coords) async {
+  Future<void> _handleMoveAnchorClick(Point<double> screenPoint, LatLng coords) async {
     final pending = _pendingMoveAnchorIndex;
     if (pending == null) {
-      final idx = _nearestAnchorIndex(coords);
+      final idx = await _nearestAnchorIndex(screenPoint);
       if (idx != null) setState(() => _pendingMoveAnchorIndex = idx);
       return;
     }
