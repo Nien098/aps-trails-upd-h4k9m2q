@@ -52,6 +52,23 @@ class RouteGraphStore {
   /// reuse the cache. ~1.1km at the equator, tighter at higher latitudes.
   static const _cellDeg = 0.01;
 
+  /// Hard ceiling on how many cells a single [waysInBounds]/[prefetch] call
+  /// will process. The lat/lon cross-product that turns a [LatLngBounds]
+  /// into cells has no size limit of its own — a normal click/drag query
+  /// area is 2-4 cells, but
+  /// [prefetch] is called with the *entire visible viewport* on every camera
+  /// idle, and zooming out far enough to see a whole multi-state/province
+  /// region turns that into millions of cells. Confirmed live (2026-08-23):
+  /// that crashed the page outright — building a multi-million-entry cell
+  /// list and firing a `Future.wait` over that many concurrent Overpass
+  /// fetches exhausts the tab well before any of them could plausibly
+  /// finish. Past this ceiling, precise supplemental trail data isn't
+  /// meaningful at that zoom level anyway, so treating it as "nothing
+  /// offline found here" (same as a rate-limited/failed cell already
+  /// resolves to, see [_failedAt]) is the correct behaviour, not just a
+  /// safety hack.
+  static const _maxCells = 400;
+
   final Map<String, List<RouteWay>> _cache = {};
   final Map<String, Future<List<RouteWay>>> _inFlight = {};
 
@@ -79,20 +96,27 @@ class RouteGraphStore {
   /// total latency is roughly the *slowest single cell*, not the sum of all
   /// of them.
   Future<List<RouteWay>> waysInBounds(LatLngBounds bounds) async {
-    final cells = _cellsFor(bounds);
-    final perCell = await Future.wait(cells.map(_waysForCell));
-    return [for (final ways in perCell) ...ways];
-  }
-
-  List<({int lat, int lon})> _cellsFor(LatLngBounds b) {
-    final swLat = (b.southwest.latitude / _cellDeg).floor();
-    final neLat = (b.northeast.latitude / _cellDeg).floor();
-    final swLon = (b.southwest.longitude / _cellDeg).floor();
-    final neLon = (b.northeast.longitude / _cellDeg).floor();
-    return [
+    final swLat = (bounds.southwest.latitude / _cellDeg).floor();
+    final neLat = (bounds.northeast.latitude / _cellDeg).floor();
+    final swLon = (bounds.southwest.longitude / _cellDeg).floor();
+    final neLon = (bounds.northeast.longitude / _cellDeg).floor();
+    // Checked from the raw lat/lon span, before ever building the cell
+    // list — a multi-million-cell span shouldn't even get as far as
+    // allocating that list. See [_maxCells]'s doc.
+    final latCells = neLat - swLat + 1;
+    final lonCells = neLon - swLon + 1;
+    if (latCells * lonCells > _maxCells) {
+      DebugLog.instance.log('RouteGraphStore: viewport spans '
+          '${latCells * lonCells} cells (> $_maxCells) — skipping live '
+          'fetch, too large to be meaningful at this zoom');
+      return const [];
+    }
+    final cells = [
       for (var la = swLat; la <= neLat; la++)
         for (var lo = swLon; lo <= neLon; lo++) (lat: la, lon: lo),
     ];
+    final perCell = await Future.wait(cells.map(_waysForCell));
+    return [for (final ways in perCell) ...ways];
   }
 
   Future<List<RouteWay>> _waysForCell(({int lat, int lon}) cell) {

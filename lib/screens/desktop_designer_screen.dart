@@ -124,6 +124,10 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
   /// mirroring `AuthorScreen._strokeLayer`.
   RouteLayer? _strokeLayer;
 
+  /// "You're holding this" marker shown at the live cursor position during
+  /// an anchor/cue drag — see [_DragGhostLayer]'s doc.
+  _DragGhostLayer? _dragGhost;
+
   Trail _trail = Trail(name: 'New trail', regionId: 'web-design');
 
   /// Per-anchor-hop coordinate arrays, one entry per anchor, aligned by
@@ -233,7 +237,12 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
   static const _maxEditVertexGapMeters = 8.0;
 
   bool _busy = false;
-  String? _status;
+
+  /// Raw data for the bottom-left status line — kept unformatted (rather
+  /// than a pre-built "N points · X km" string) so the distance renders
+  /// live via [Settings.metric]/[Settings.format] instead of freezing
+  /// whatever unit was selected the last time [_redraw] ran.
+  ({int points, double meters})? _status;
 
   /// True while a cue-editor/cue-list overlay is open — guards [_onMapClick]
   /// against a confirmed Flutter-Web platform-view issue: clicks meant for
@@ -323,12 +332,15 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
   Future<void> _onStyleLoaded() async {
     final c = _c;
     if (c == null) return;
+    suppressMapContextMenu();
     _route = RouteLayer(c);
     await _route!.ensure(
         arrowScale: Settings.instance.chevronScale.value,
         arrowVisible: Settings.instance.chevronVisible.value);
     _points = CueLayer(c, id: 'designerPoints');
     await _points!.ensure();
+    _dragGhost = _DragGhostLayer(c);
+    await _dragGhost!.ensure();
     _boundary = BoundaryLayer(c);
     await _boundary!.ensure();
     _strokeLayer = RouteLayer(c, id: 'strokePreview', splitOutAndBack: false);
@@ -571,6 +583,80 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     }
   }
 
+  /// Right-click on the drawn line (Draw mode only) inserts a real,
+  /// permanent anchor exactly at the click, splitting whichever hop it
+  /// landed closest to into two routed segments — the desktop port of
+  /// `AuthorScreen._insertAnchorNear` (mobile reaches this via long-press,
+  /// since mobile has no right mouse button; confirmed live 2026-08-23 that
+  /// right-click is the web equivalent the user actually wants).
+  ///
+  /// [screenPoint] is used twice, for two different jobs that must NOT be
+  /// conflated: first, converted to a `LatLng` to search `_segments` (a
+  /// real-metres computation — `nearestPointOnPolyline` is a plain geometric
+  /// nearest-point search, the same kind cue-snapping already does, not a
+  /// click hit-test), *then* the winning candidate is projected back to
+  /// screen space to make the actual accept/reject decision in **pixels**.
+  /// That second check is deliberate, not redundant: a fixed real-world
+  /// tolerance for "is this right-click close enough to the line to count"
+  /// would be huge in screen terms zoomed out and razor-thin zoomed in — the
+  /// exact "metres where it should be pixels" bug class already fixed this
+  /// session for anchor/cue click detection, avoided here from the start.
+  Future<void> _insertAnchorNear(Point<double> screenPoint) async {
+    final c = _c;
+    if (c == null || _busy || _segments.length < 2) return;
+    final tapped = await c.toLatLng(screenPoint);
+    if (!mounted || _tool != _Tool.draw) return;
+
+    var bestHop = -1;
+    LatLng? bestPoint;
+    var bestMeters = double.infinity;
+    for (var k = 1; k < _segments.length; k++) {
+      final hit =
+          nearestPointOnPolyline(tapped, _segments[k], maxMeters: double.infinity);
+      if (hit != null && hit.meters < bestMeters) {
+        bestMeters = hit.meters;
+        bestHop = k;
+        bestPoint = hit.point;
+      }
+    }
+    if (bestHop < 0 || bestPoint == null) return; // no line here — no-op
+
+    final bestScreen = await c.toScreenLocation(bestPoint);
+    final dx = bestScreen.x.toDouble() - screenPoint.x;
+    final dy = bestScreen.y.toDouble() - screenPoint.y;
+    if (sqrt(dx * dx + dy * dy) > 24) return; // right-click landed too far away
+
+    _pushUndo();
+    setState(() => _busy = true);
+    try {
+      final prev = _trail.anchors[bestHop - 1];
+      final next = _trail.anchors[bestHop];
+      final segA =
+          _followTrails ? await TrailRouter(c).between(prev, tapped) : [prev, tapped];
+      final segB =
+          _followTrails ? await TrailRouter(c).between(tapped, next) : [tapped, next];
+      setState(() {
+        _trail.anchors.insert(bestHop, tapped);
+        _segments[bestHop] = segA;
+        _segments.insert(bestHop + 1, segB);
+        _trail.path = _composePath();
+      });
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+    await _redraw();
+  }
+
+  /// Right-click handler for the always-present (Draw-mode-only) secondary-
+  /// button listener — see the `Listener` in `build()`. Only the secondary
+  /// mouse button is acted on; anything else (a normal left click/drag)
+  /// passes straight through untouched, since this listener is translucent.
+  void _onDrawSecondaryPointerDown(PointerDownEvent e) {
+    if (_tool != _Tool.draw || _busy || _modalOpen) return;
+    if (e.buttons != kSecondaryMouseButton) return;
+    _insertAnchorNear(_mapPoint(e.localPosition));
+  }
+
   /// Which cue is being drag-relocated in [_Tool.moveAnchor] mode (or via
   /// [_ctrlMoveActive]), or null — mutually exclusive with
   /// [_draggingAnchorIndex] (a single grab picks up at most one of the two).
@@ -627,16 +713,15 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
 
   bool _convertingCuePoint = false;
 
-  /// Live preview for a dragged cue: moves the real [Cue.position] in place
-  /// and redraws — unlike the anchor drag (which only previews a cheap
-  /// straight-line stretch via [_strokeLayer] and leaves the real anchor
-  /// marker stationary until commit), a cue has no connecting-line preview
-  /// to show instead, so this redraws the actual marker each update.
-  /// Self-throttles (skips an update if a previous one is still converting/
-  /// redrawing) rather than queueing, same pattern as
-  /// [_pushStrokePreview]/[_pushAdjustPreview] — if [CueLayer]'s full
-  /// teardown-and-rebuild ever proves too slow for this to feel live, that's
-  /// the constant to revisit, not this method's shape.
+  /// Live preview for a dragged cue: shows [_dragGhost] at the cursor's
+  /// live map position. Does *not* touch the real [Cue.position] or call
+  /// [_redraw] on every update — [CueLayer]'s full teardown-and-rebuild per
+  /// update (needed for its own text layers, see its class doc) would be
+  /// too slow to track the cursor smoothly; the ghost gives instant visual
+  /// feedback instead, and the real marker only moves once, on commit (see
+  /// [_onMovePanEnd]). Self-throttles (skips an update if a previous one is
+  /// still converting) rather than queueing, same pattern as
+  /// [_pushStrokePreview]/[_pushAdjustPreview].
   Future<void> _pushCueDragPreview(Point<double> p) async {
     final c = _c;
     final idx = _draggingCueIndex;
@@ -646,8 +731,7 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     try {
       final latlng = await c.toLatLng(p);
       if (!mounted || _draggingCueIndex != idx || gen != _previewGeneration) return;
-      _trail.cues[idx].position = latlng;
-      await _redraw();
+      await _dragGhost?.show(latlng);
     } finally {
       _convertingCuePoint = false;
     }
@@ -671,13 +755,14 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
       _lastAdjustPoint = null;
     });
     await _strokeLayer?.setRoute(const [], _strokePreviewColor);
+    await _dragGhost?.hide();
     if (!mounted || c == null || point == null) return;
 
     final newPos = await c.toLatLng(point);
     if (!mounted) return;
 
     if (draggingAnchor != null) {
-      await _commitAnchorPosition(draggingAnchor, newPos);
+      await _commitAnchorPositionOnPath(draggingAnchor, newPos);
     } else if (draggingCue != null) {
       final snapped = _trail.path.length >= 2
           ? nearestPointOnPath(newPos, _trail.path)
@@ -685,6 +770,69 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
       setState(() => _trail.cues[draggingCue].position = snapped);
       await _redraw();
     }
+  }
+
+  /// Re-splits the path around anchor [idx] to reflect its new position
+  /// [pos] — the Move tool / Ctrl-drag's own commit, deliberately different
+  /// from [_commitAnchorPosition] (which Adjust mode's own anchor-drag still
+  /// uses, unchanged). Confirmed live (2026-08-23): a live
+  /// `TrailRouter.between()` reroute on every Move-tool drop made it feel
+  /// like "adjusting the whole line" — the user's own words — which is
+  /// Adjust mode's job, not Move's. This method never calls `TrailRouter`
+  /// at all: [pos] is constrained to slide along the *existing, unchanged*
+  /// line, the same way a cue is always constrained to `_trail.path`.
+  ///
+  /// The search for where [pos] lands is deliberately restricted to the one
+  /// or two hops immediately touching [idx] — `[..._segments[idx],
+  /// ..._segments[idx + 1].skip(1)]` for an interior anchor, just the one
+  /// real hop for an endpoint anchor — rather than the whole `_trail.path`.
+  /// A hop boundary only makes structural sense *between adjacent anchors*;
+  /// snapping onto some unrelated, far-away leg of a looping trail would
+  /// leave `_segments`' one-hop-per-anchor invariant incoherent (which hops
+  /// belong to which anchors would no longer line up along the trail). If
+  /// [pos] doesn't land within the local stretch at all (only possible if
+  /// it's on the wrong side of a self-intersection, since there's no
+  /// distance cap otherwise), the drag is a no-op — the anchor stays
+  /// exactly where it was, rather than doing something structurally
+  /// undefined.
+  Future<void> _commitAnchorPositionOnPath(int idx, LatLng pos) async {
+    final anchors = _trail.anchors;
+    final isFirst = idx == 0;
+    final isLast = idx == anchors.length - 1;
+    if (isFirst && isLast) return; // single-anchor trail — nothing to slide along
+
+    final combined = isFirst
+        ? List<LatLng>.of(_segments[idx + 1])
+        : isLast
+            ? List<LatLng>.of(_segments[idx])
+            : [..._segments[idx], ..._segments[idx + 1].skip(1)];
+    if (combined.length < 2) return;
+
+    // No distance cap (mirrors nearestPointOnPath's own uncapped cue-snap
+    // behaviour) — the local-stretch restriction above already bounds how
+    // far this can reasonably reach, so an extra cap here would only add a
+    // second, arbitrary threshold on top of that.
+    final hit = nearestPointOnPolyline(pos, combined, maxMeters: double.infinity);
+    if (hit == null) return;
+
+    _pushUndo();
+    setState(() {
+      final point = hit.point, edge = hit.edgeIndex;
+      final before = [...combined.sublist(0, edge + 1), point];
+      final after = [point, ...combined.sublist(edge + 1)];
+      if (isFirst) {
+        _segments[0] = [point];
+        _segments[1] = after;
+      } else if (isLast) {
+        _segments[idx] = before;
+      } else {
+        _segments[idx] = before;
+        _segments[idx + 1] = after;
+      }
+      anchors[idx] = point;
+      _trail.path = _composePath();
+    });
+    await _redraw();
   }
 
   /// Re-routes the segment(s) touching anchor [idx] to [pos] — mirrors
@@ -896,6 +1044,13 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     if (_overlayPanningCamera) {
       _overlayPanningCamera = false;
       _overlayPanLast = null;
+    }
+    if (_draggingAnchorIndex != null || _draggingCueIndex != null) {
+      setState(() {
+        _draggingAnchorIndex = null;
+        _draggingCueIndex = null;
+      });
+      _dragGhost?.hide();
     }
     // Safety net for a missed keyup (see _handleKeyEvent's doc) — a pointer
     // cancel (e.g. the browser tab losing focus mid-drag) is exactly the
@@ -1190,13 +1345,12 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
   }
 
   /// Live preview for a free-dragged anchor ([_draggingAnchorIndex]): a
-  /// cheap straight-line stretch to its immediate neighbours, not a live
-  /// re-route — matches how [_handleMoveAnchorClick]'s click-then-click flow
-  /// also only re-routes once, on commit. Mirrors
-  /// `AuthorScreen._pushAnchorDragPreview` (minus the live-moving marker
-  /// circle: this screen's anchor markers are plain non-interactive
-  /// GeoJSON, redrawn wholesale by [_redraw] on commit, same as every other
-  /// anchor edit here already does). Shared by both [_Tool.lineAdjust]'s own
+  /// cheap straight-line stretch to its immediate neighbours via
+  /// [_strokeLayer] (not a live re-route — that only happens once, on
+  /// commit), plus [_dragGhost] tracking the actual cursor position so the
+  /// anchor itself visibly follows the mouse even though its real marker
+  /// (plain non-interactive GeoJSON, redrawn wholesale by [_redraw]) stays
+  /// put until commit. Shared by both [_Tool.lineAdjust]'s own
   /// free-dragged-anchor case and [_Tool.moveAnchor]/[_ctrlMoveActive]'s
   /// drag-to-move — [_draggingAnchorIndex] is the same field either way, so
   /// this only needs to confirm one of those three contexts is still active,
@@ -1224,6 +1378,7 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
         if (idx < anchors.length - 1) anchors[idx + 1],
       ];
       await _strokeLayer?.setRoute(preview, _strokePreviewColor);
+      await _dragGhost?.show(latlng);
     } finally {
       _convertingAdjustPoint = false;
     }
@@ -1289,6 +1444,7 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
       _lastAdjustPoint = null;
     });
     await _strokeLayer?.setRoute(const [], _strokePreviewColor);
+    await _dragGhost?.hide();
     if (!mounted || c == null || point == null) return;
 
     final newPos = await c.toLatLng(point);
@@ -1467,14 +1623,16 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
         ));
   }
 
-  /// Toolbar/text size and trail-direction-arrow size — the web designer's
-  /// only settings surface (there's no dedicated Settings screen here the
-  /// way mobile's SettingsScreen is). Both are the same Settings.uiScale/
-  /// chevronScale values mobile uses; changing them here takes effect
-  /// immediately (uiScale via main_web.dart's app-wide ValueListenableBuilder,
-  /// chevronScale via an explicit setArrowScale call below) rather than
-  /// needing a page reload — useful for a designer actually comparing sizes
-  /// live rather than just picking a number blind.
+  /// Toolbar/text size, trail-direction-arrow size, and distance units —
+  /// the web designer's only settings surface (there's no dedicated
+  /// Settings screen here the way mobile's SettingsScreen is). All are the
+  /// same Settings.uiScale/chevronScale/metric values mobile uses; changing
+  /// them here takes effect immediately (uiScale via main_web.dart's
+  /// app-wide ValueListenableBuilder, chevronScale via an explicit
+  /// setArrowScale call below, metric via the status line's own
+  /// ValueListenableBuilder) rather than needing a page reload — useful for
+  /// a designer actually comparing sizes live rather than just picking a
+  /// number blind.
   Future<void> _showDisplaySize() async {
     await _showModal(() => showOpaqueDialog<void>(
           context,
@@ -1482,7 +1640,7 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
           // _ScaleSliderRow's plain, unscaled font today vs. a future bump),
           // and the established gotcha here is a *silently* uninteractable
           // overflow past whatever's given, not a visible clipped edge.
-          maxHeight: 460,
+          maxHeight: 520,
           builder: (ctx) => AlertDialog(
             title: const Text('Display size'),
             content: SizedBox(
@@ -1529,6 +1687,17 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
                           },
                         ),
                       ),
+                    ),
+                  ),
+                  const Divider(),
+                  ValueListenableBuilder<bool>(
+                    valueListenable: Settings.instance.metric,
+                    builder: (context, metric, _) => SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      value: metric,
+                      title: const Text('Distance units'),
+                      subtitle: Text(metric ? 'Kilometres' : 'Miles'),
+                      onChanged: Settings.instance.setMetric,
                     ),
                   ),
                 ],
@@ -1676,7 +1845,7 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     await _points?.setMarkers(markers);
     if (mounted) {
       setState(() => _status =
-          '${_trail.anchors.length} points · ${(pathLength(_trail.path) / 1000).toStringAsFixed(2)} km');
+          (points: _trail.anchors.length, meters: pathLength(_trail.path)));
     }
   }
 
@@ -1999,8 +2168,9 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
   }
 
   String _toolHint() => switch (_tool) {
-        _Tool.draw => 'Click the map to add a point. '
-            'Hold Ctrl and drag a point or cue to move it.',
+        _Tool.draw => 'Click the map to add a point, or right-click the '
+            'line to insert one there. Hold Ctrl and drag a point or cue '
+            'to move it.',
         _Tool.moveAnchor => 'Drag a point or cue to move it along the trail. '
             'Middle-click-drag, or hold Shift and drag, to pan the map instead.',
         _Tool.deleteAnchor => 'Click a point to delete it.',
@@ -2015,8 +2185,223 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
               'Middle-click-drag, or hold Shift/Ctrl and drag, to pan the map instead.',
       };
 
+  /// Below this width (a phone-portrait browser), the `AppBar.actions` row
+  /// no longer fits at all — confirmed live (2026-08-23) as cutting off
+  /// most of the toolbar entirely on a phone browser. Picked with margin
+  /// under the wide toolbar's own ~1750-1850px minimum width; tune further
+  /// if real narrow-screen testing shows it's still too tight or looser
+  /// than it needs to be.
+  static const _narrowBreakpoint = 700.0;
+
+  /// The debug panel's own fixed footprint (`width: 420` + 16px margins on
+  /// both sides below) — named so the capture-overlay exclusion math that
+  /// depends on it (`right: _debugPanelOpen ? _debugPanelExclusion : 0`,
+  /// used in three places in this build method) has one definition instead
+  /// of a repeated bare `452` magic number.
+  static const _debugPanelWidth = 420.0;
+  static const _debugPanelMargin = 16.0;
+  static const _debugPanelExclusion = _debugPanelWidth + 2 * _debugPanelMargin;
+
+  /// The tool `SegmentedButton` — shared by the wide `AppBar.actions` row
+  /// and the narrow layout's own dedicated `AppBar.bottom` row (mirroring
+  /// how mobile's `AuthorScreen` fixed an identical "shared a row, wrapped
+  /// to one-character-per-line" overflow by giving its own tool selector a
+  /// dedicated full-width row). [compact] drops the text labels, icon-only,
+  /// for the narrow case.
+  Widget _toolSelector({bool compact = false}) {
+    ButtonSegment<_Tool> seg(_Tool value, IconData icon, String label) =>
+        ButtonSegment(value: value, icon: Icon(icon), label: compact ? null : Text(label));
+    return SegmentedButton<_Tool>(
+      segments: [
+        seg(_Tool.draw, Icons.edit, 'Draw'),
+        seg(_Tool.moveAnchor, Icons.open_with, 'Move'),
+        seg(_Tool.deleteAnchor, Icons.remove_circle_outline, 'Delete'),
+        seg(_Tool.addCue, Icons.add_location_alt_outlined, 'Add cue'),
+        seg(_Tool.drawBoundary, Icons.crop_free, 'Boundary'),
+        seg(_Tool.dragDraw, Icons.gesture, 'Freehand'),
+        seg(_Tool.lineAdjust, Icons.polyline_outlined, 'Adjust'),
+      ],
+      selected: {_tool},
+      onSelectionChanged: (s) {
+        final next = s.first;
+        final wasCapturing = _tool == _Tool.dragDraw ||
+            _tool == _Tool.lineAdjust ||
+            _tool == _Tool.moveAnchor;
+        final willCapture = next == _Tool.dragDraw ||
+            next == _Tool.lineAdjust ||
+            next == _Tool.moveAnchor;
+        if (wasCapturing != willCapture) setMapDragLocked(willCapture);
+        setState(() => _tool = next);
+      },
+    );
+  }
+
+  /// Today's exact wide-viewport toolbar — byte-for-byte what shipped
+  /// before the narrow-layout rework, never touched by it.
+  List<Widget> _wideActions() => [
+        IconButton(
+          tooltip: 'New trail',
+          icon: const Icon(Icons.insert_drive_file_outlined),
+          onPressed: _newTrail,
+        ),
+        IconButton(
+          tooltip: 'Open .trail file',
+          icon: const Icon(Icons.folder_open),
+          onPressed: _open,
+        ),
+        IconButton(
+          tooltip: 'Save as .trail file',
+          icon: const Icon(Icons.save_outlined),
+          onPressed: _save,
+        ),
+        const SizedBox(width: 8),
+        IconButton(
+          tooltip: 'Undo',
+          icon: const Icon(Icons.undo),
+          onPressed: _undoStack.isEmpty ? null : _undo,
+        ),
+        IconButton(
+          tooltip: 'Trail colour',
+          icon: Icon(Icons.circle, color: _hexColor(_trail.color)),
+          onPressed: _pickColor,
+        ),
+        PopupMenuButton<String>(
+          tooltip: 'More',
+          itemBuilder: (ctx) => [
+            const PopupMenuItem(value: 'clearPath', child: Text('Clear path')),
+            const PopupMenuItem(value: 'clearCues', child: Text('Clear all cues')),
+            const PopupMenuItem(value: 'clearAll', child: Text('Clear everything')),
+            if (_hasBoundary)
+              const PopupMenuItem(
+                  value: 'clearBoundary', child: Text('Clear generation boundary')),
+          ],
+          onSelected: (v) => switch (v) {
+            'clearPath' => _clearPath(),
+            'clearCues' => _clearCuesOnly(),
+            'clearAll' => _clearAll(),
+            'clearBoundary' => _clearGenBoundary(),
+            _ => null,
+          },
+        ),
+        const SizedBox(width: 8),
+        IconButton(
+          tooltip: 'Suggest turn cues',
+          icon: const Icon(Icons.auto_awesome),
+          onPressed: _autoCues,
+        ),
+        IconButton(
+          tooltip: 'Manage cues',
+          icon: const Icon(Icons.list_alt_outlined),
+          onPressed: _showCueList,
+        ),
+        IconButton(
+          tooltip: 'Auto-generate a route',
+          icon: const Icon(Icons.route_outlined),
+          onPressed: _openGenerator,
+        ),
+        const SizedBox(width: 8),
+        _toolSelector(),
+        if (_tool == _Tool.drawBoundary) ...[
+          const SizedBox(width: 8),
+          TextButton(onPressed: _finishBoundary, child: const Text('Finish boundary')),
+          TextButton(onPressed: _cancelBoundary, child: const Text('Cancel')),
+        ],
+        const SizedBox(width: 8),
+        FilterChip(
+          label: const Text('Follow trails'),
+          tooltip: 'Snap clicks onto trails/roads and route between them',
+          selected: _followTrails,
+          onSelected: (v) => setState(() => _followTrails = v),
+        ),
+        IconButton(
+          icon: const Icon(Icons.format_size),
+          tooltip: 'Display size',
+          onPressed: _showDisplaySize,
+        ),
+        const SizedBox(width: 8),
+        IconButton(
+          icon: const Icon(Icons.bug_report_outlined),
+          tooltip: 'Diagnostics log',
+          isSelected: _debugPanelOpen,
+          onPressed: () => setState(() {
+            _debugPanelOpen = !_debugPanelOpen;
+            DebugLog.instance.enabled = _debugPanelOpen;
+          }),
+        ),
+        const SizedBox(width: 16),
+      ];
+
+  /// Narrow-viewport toolbar: everything except the tool selector (which
+  /// gets its own `AppBar.bottom` row, see [_toolSelector]) collapses into
+  /// one overflow menu grouped the same way the wide toolbar's own visual
+  /// spacing already groups it. The boundary-mode Finish/Cancel buttons are
+  /// deliberately not in here — they're a transient in-context action, not
+  /// a settings-style toggle, so they stay next to the tool selector below.
+  List<Widget> _narrowActions() => [
+        PopupMenuButton<String>(
+          tooltip: 'Menu',
+          itemBuilder: (ctx) => [
+            const PopupMenuItem(value: 'new', child: Text('New trail')),
+            const PopupMenuItem(value: 'open', child: Text('Open .trail file')),
+            const PopupMenuItem(value: 'save', child: Text('Save as .trail file')),
+            const PopupMenuDivider(),
+            PopupMenuItem(
+              value: 'undo',
+              enabled: _undoStack.isNotEmpty,
+              child: const Text('Undo'),
+            ),
+            const PopupMenuItem(value: 'color', child: Text('Trail colour')),
+            const PopupMenuDivider(),
+            const PopupMenuItem(value: 'clearPath', child: Text('Clear path')),
+            const PopupMenuItem(value: 'clearCues', child: Text('Clear all cues')),
+            const PopupMenuItem(value: 'clearAll', child: Text('Clear everything')),
+            if (_hasBoundary)
+              const PopupMenuItem(
+                  value: 'clearBoundary', child: Text('Clear generation boundary')),
+            const PopupMenuDivider(),
+            const PopupMenuItem(value: 'autoCues', child: Text('Suggest turn cues')),
+            const PopupMenuItem(value: 'manageCues', child: Text('Manage cues')),
+            const PopupMenuItem(value: 'generate', child: Text('Auto-generate a route')),
+            const PopupMenuDivider(),
+            CheckedPopupMenuItem(
+              value: 'followTrails',
+              checked: _followTrails,
+              child: const Text('Follow trails'),
+            ),
+            const PopupMenuItem(value: 'displaySize', child: Text('Display size')),
+            CheckedPopupMenuItem(
+              value: 'debug',
+              checked: _debugPanelOpen,
+              child: const Text('Diagnostics log'),
+            ),
+          ],
+          onSelected: (v) => switch (v) {
+            'new' => _newTrail(),
+            'open' => _open(),
+            'save' => _save(),
+            'undo' => _undoStack.isEmpty ? null : _undo(),
+            'color' => _pickColor(),
+            'clearPath' => _clearPath(),
+            'clearCues' => _clearCuesOnly(),
+            'clearAll' => _clearAll(),
+            'clearBoundary' => _clearGenBoundary(),
+            'autoCues' => _autoCues(),
+            'manageCues' => _showCueList(),
+            'generate' => _openGenerator(),
+            'followTrails' => setState(() => _followTrails = !_followTrails),
+            'displaySize' => _showDisplaySize(),
+            'debug' => setState(() {
+                _debugPanelOpen = !_debugPanelOpen;
+                DebugLog.instance.enabled = _debugPanelOpen;
+              }),
+            _ => null,
+          },
+        ),
+      ];
+
   @override
   Widget build(BuildContext context) {
+    final isNarrow = MediaQuery.sizeOf(context).width < _narrowBreakpoint;
     return Scaffold(
       appBar: AppBar(
         title: InkWell(
@@ -2030,139 +2415,29 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
             ],
           ),
         ),
-        actions: [
-          IconButton(
-            tooltip: 'New trail',
-            icon: const Icon(Icons.insert_drive_file_outlined),
-            onPressed: _newTrail,
-          ),
-          IconButton(
-            tooltip: 'Open .trail file',
-            icon: const Icon(Icons.folder_open),
-            onPressed: _open,
-          ),
-          IconButton(
-            tooltip: 'Save as .trail file',
-            icon: const Icon(Icons.save_outlined),
-            onPressed: _save,
-          ),
-          const SizedBox(width: 8),
-          IconButton(
-            tooltip: 'Undo',
-            icon: const Icon(Icons.undo),
-            onPressed: _undoStack.isEmpty ? null : _undo,
-          ),
-          IconButton(
-            tooltip: 'Trail colour',
-            icon: Icon(Icons.circle, color: _hexColor(_trail.color)),
-            onPressed: _pickColor,
-          ),
-          PopupMenuButton<String>(
-            tooltip: 'More',
-            itemBuilder: (ctx) => [
-              const PopupMenuItem(value: 'clearPath', child: Text('Clear path')),
-              const PopupMenuItem(value: 'clearCues', child: Text('Clear all cues')),
-              const PopupMenuItem(value: 'clearAll', child: Text('Clear everything')),
-              if (_hasBoundary)
-                const PopupMenuItem(
-                    value: 'clearBoundary', child: Text('Clear generation boundary')),
-            ],
-            onSelected: (v) => switch (v) {
-              'clearPath' => _clearPath(),
-              'clearCues' => _clearCuesOnly(),
-              'clearAll' => _clearAll(),
-              'clearBoundary' => _clearGenBoundary(),
-              _ => null,
-            },
-          ),
-          const SizedBox(width: 8),
-          IconButton(
-            tooltip: 'Suggest turn cues',
-            icon: const Icon(Icons.auto_awesome),
-            onPressed: _autoCues,
-          ),
-          IconButton(
-            tooltip: 'Manage cues',
-            icon: const Icon(Icons.list_alt_outlined),
-            onPressed: _showCueList,
-          ),
-          IconButton(
-            tooltip: 'Auto-generate a route',
-            icon: const Icon(Icons.route_outlined),
-            onPressed: _openGenerator,
-          ),
-          const SizedBox(width: 8),
-          SegmentedButton<_Tool>(
-            segments: const [
-              ButtonSegment(
-                  value: _Tool.draw, icon: Icon(Icons.edit), label: Text('Draw')),
-              ButtonSegment(
-                  value: _Tool.moveAnchor,
-                  icon: Icon(Icons.open_with),
-                  label: Text('Move')),
-              ButtonSegment(
-                  value: _Tool.deleteAnchor,
-                  icon: Icon(Icons.remove_circle_outline),
-                  label: Text('Delete')),
-              ButtonSegment(
-                  value: _Tool.addCue,
-                  icon: Icon(Icons.add_location_alt_outlined),
-                  label: Text('Add cue')),
-              ButtonSegment(
-                  value: _Tool.drawBoundary,
-                  icon: Icon(Icons.crop_free),
-                  label: Text('Boundary')),
-              ButtonSegment(
-                  value: _Tool.dragDraw,
-                  icon: Icon(Icons.gesture),
-                  label: Text('Freehand')),
-              ButtonSegment(
-                  value: _Tool.lineAdjust,
-                  icon: Icon(Icons.polyline_outlined),
-                  label: Text('Adjust')),
-            ],
-            selected: {_tool},
-            onSelectionChanged: (s) {
-              final next = s.first;
-              final wasCapturing = _tool == _Tool.dragDraw ||
-                  _tool == _Tool.lineAdjust ||
-                  _tool == _Tool.moveAnchor;
-              final willCapture = next == _Tool.dragDraw ||
-                  next == _Tool.lineAdjust ||
-                  next == _Tool.moveAnchor;
-              if (wasCapturing != willCapture) setMapDragLocked(willCapture);
-              setState(() => _tool = next);
-            },
-          ),
-          if (_tool == _Tool.drawBoundary) ...[
-            const SizedBox(width: 8),
-            TextButton(onPressed: _finishBoundary, child: const Text('Finish boundary')),
-            TextButton(onPressed: _cancelBoundary, child: const Text('Cancel')),
-          ],
-          const SizedBox(width: 8),
-          FilterChip(
-            label: const Text('Follow trails'),
-            tooltip: 'Snap clicks onto trails/roads and route between them',
-            selected: _followTrails,
-            onSelected: (v) => setState(() => _followTrails = v),
-          ),
-          IconButton(
-            icon: const Icon(Icons.format_size),
-            tooltip: 'Display size',
-            onPressed: _showDisplaySize,
-          ),
-          const SizedBox(width: 8),
-          IconButton(
-            icon: const Icon(Icons.bug_report_outlined),
-            tooltip: 'Diagnostics log',
-            isSelected: _debugPanelOpen,
-            onPressed: () => setState(() {
-              _debugPanelOpen = !_debugPanelOpen;
-              DebugLog.instance.enabled = _debugPanelOpen;
-            }),
-          ),
-          const SizedBox(width: 16),
-        ],
+        actions: isNarrow ? _narrowActions() : _wideActions(),
+        bottom: isNarrow
+            ? PreferredSize(
+                preferredSize: const Size.fromHeight(56),
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      _toolSelector(compact: true),
+                      if (_tool == _Tool.drawBoundary) ...[
+                        const SizedBox(width: 8),
+                        TextButton(
+                            onPressed: _finishBoundary,
+                            child: const Text('Finish boundary')),
+                        TextButton(onPressed: _cancelBoundary, child: const Text('Cancel')),
+                      ],
+                    ],
+                  ),
+                ),
+              )
+            : null,
       ),
       body: FutureBuilder<String>(
         future: buildWebMapStyle(),
@@ -2182,8 +2457,36 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
                 onStyleLoadedCallback: _onStyleLoaded,
                 onMapClick: _onMapClick,
                 onCameraIdle: _prefetchRouteGraph,
-                compassEnabled: true,
+                // Rotate/tilt are a mobile walking-view concept (facing
+                // direction of travel) that don't belong in a top-down
+                // desktop drawing tool — confirmed unwanted live
+                // (2026-08-23). Disabling both also frees up right-click-
+                // drag (MapLibre's default rotate gesture) for the new
+                // right-click-to-insert-anchor feature below, with no
+                // native handler left to compete with it.
+                compassEnabled: false,
+                rotateGesturesEnabled: false,
+                tiltGesturesEnabled: false,
               ),
+              // Right-click-to-insert-anchor (Draw mode only) — translucent
+              // (not opaque, unlike the capture overlay below) so an
+              // ordinary left click/drag still reaches the map underneath
+              // untouched; only the secondary mouse button is acted on, see
+              // _onDrawSecondaryPointerDown. Placed before the capture
+              // overlay in this Stack so that overlay (opaque, mounted
+              // whenever Ctrl is also held) still takes priority over this
+              // one when both could apply.
+              if (_tool == _Tool.draw)
+                Positioned(
+                  left: 0,
+                  top: 0,
+                  bottom: 0,
+                  right: _debugPanelOpen ? _debugPanelExclusion : 0,
+                  child: Listener(
+                    behavior: HitTestBehavior.translucent,
+                    onPointerDown: _onDrawSecondaryPointerDown,
+                  ),
+                ),
               // Geometrically excludes the debug panel's own rectangle
               // (right:16/top:16/bottom:16/width:420 below) rather than
               // relying on Flutter's Stack-order hit-testing to keep this
@@ -2201,7 +2504,7 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
                   left: 0,
                   top: 0,
                   bottom: 0,
-                  right: _debugPanelOpen ? 452 : 0,
+                  right: _debugPanelOpen ? _debugPanelExclusion : 0,
                   child: Listener(
                     behavior: HitTestBehavior.opaque,
                     onPointerSignal: _onOverlayWheel,
@@ -2225,7 +2528,14 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
                             style: const TextStyle(
                                 fontSize: 13, fontStyle: FontStyle.italic)),
                         if (_status != null)
-                          Text(_status!, style: const TextStyle(fontSize: 15)),
+                          ValueListenableBuilder<bool>(
+                            valueListenable: Settings.instance.metric,
+                            builder: (context, metric, _) => Text(
+                              '${_status!.points} points · '
+                              '${Settings.format(_status!.meters, metric)}',
+                              style: const TextStyle(fontSize: 15),
+                            ),
+                          ),
                       ],
                     ),
                   ),
@@ -2233,10 +2543,10 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
               ),
               if (_debugPanelOpen)
                 Positioned(
-                  right: 16,
-                  top: 16,
-                  bottom: 16,
-                  width: 420,
+                  right: _debugPanelMargin,
+                  top: _debugPanelMargin,
+                  bottom: _debugPanelMargin,
+                  width: _debugPanelWidth,
                   // Excluding this rect from the drag-tool overlay (above)
                   // only stops *that* Flutter Listener from also seeing a
                   // click — it does nothing for MapLibreMap itself, which is
@@ -2416,6 +2726,72 @@ class _ScaleSliderRow extends StatelessWidget {
         ],
       ),
     );
+  }
+}
+
+/// A single "you're holding this" marker shown at the live cursor position
+/// while dragging an anchor or cue in Move/Ctrl-move mode — see
+/// [_DesktopDesignerScreenState._pushAnchorDragPreview]/
+/// [_pushCueDragPreview]. Deliberately its own tiny GeoJSON source + one
+/// circle layer rather than routed through [CueLayer]: that layer's full
+/// teardown-and-rebuild per update (needed so its *text* layers reliably
+/// refresh, see its own class doc) would be far too slow for a marker meant
+/// to track the cursor on every pointer-move — a plain circle has no text,
+/// so a cheap in-place [MapLibreMapController.setGeoJsonSource] position
+/// update is all this ever needs.
+class _DragGhostLayer {
+  _DragGhostLayer(this.controller);
+  final MapLibreMapController controller;
+
+  static const _sourceId = 'dragGhost';
+  static const _layerId = 'dragGhost_circle';
+  bool _ready = false;
+
+  static const _empty = {'type': 'FeatureCollection', 'features': <dynamic>[]};
+
+  /// Call once after the style loads, after [CueLayer.ensure] — layer add
+  /// order is paint order on MapLibre, so this must come after the anchor/
+  /// cue markers to actually paint on top of them while dragging.
+  Future<void> ensure() async {
+    if (_ready) return;
+    await controller.addGeoJsonSource(_sourceId, Map.of(_empty));
+    await controller.addCircleLayer(
+      _sourceId,
+      _layerId,
+      const CircleLayerProperties(
+        circleRadius: 12,
+        // Matches the orange used to highlight a dragged anchor's own
+        // marker elsewhere in this file — reads as "this is what's moving".
+        circleColor: '#EF6C00',
+        circleOpacity: 0.85,
+        circleStrokeColor: '#ffffff',
+        circleStrokeWidth: 2,
+      ),
+      enableInteraction: false,
+    );
+    _ready = true;
+  }
+
+  Future<void> show(LatLng pos) async {
+    if (!_ready) return;
+    await controller.setGeoJsonSource(_sourceId, {
+      'type': 'FeatureCollection',
+      'features': [
+        {
+          'type': 'Feature',
+          'geometry': {
+            'type': 'Point',
+            'coordinates': [pos.longitude, pos.latitude],
+          },
+          'properties': <String, dynamic>{},
+        },
+      ],
+    });
+  }
+
+  Future<void> hide() async {
+    if (!_ready) return;
+    await controller.setGeoJsonSource(_sourceId, Map.of(_empty));
   }
 }
 

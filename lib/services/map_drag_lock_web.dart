@@ -40,3 +40,28 @@ void setMapDragLocked(bool locked) {
     }
   }
 }
+
+bool _contextMenuSuppressed = false;
+
+/// Suppresses the browser's own native right-click context menu over
+/// MapLibre's canvas — call once (idempotent). Needed for the desktop
+/// designer's right-click-to-insert-anchor gesture: without this, every
+/// right-click would also pop up the browser's menu on top of it, same
+/// class of problem [setMapDragLocked] already works around (Flutter has
+/// no way to reach into this real DOM element's native event handling).
+/// Scoped to just the map canvas via `closest` so it never affects a
+/// right-click anywhere else on the page.
+void suppressMapContextMenu() {
+  if (_contextMenuSuppressed) return;
+  _contextMenuSuppressed = true;
+  web.document.addEventListener(
+    'contextmenu',
+    (web.MouseEvent e) {
+      final target = e.target;
+      if (target.isA<web.Element>() &&
+          (target as web.Element).closest('.maplibregl-canvas') != null) {
+        e.preventDefault();
+      }
+    }.toJS,
+  );
+}

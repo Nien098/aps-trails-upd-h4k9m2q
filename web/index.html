@@ -19,6 +19,11 @@
   <meta charset="UTF-8">
   <meta content="IE=Edge" http-equiv="X-UA-Compatible">
   <meta name="description" content="A new Flutter project.">
+  <!-- Without this, mobile browsers render at a fixed ~980px virtual
+       viewport and scale the whole page down to fit, instead of reflowing
+       at the device's real width — confirmed live (2026-08-23) as part of
+       why this desktop-focused app was unusable on a phone browser. -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
   <!-- iOS meta tags & icons -->
   <meta name="mobile-web-app-capable" content="yes">
