@@ -80,7 +80,7 @@ class _NavigateScreenState extends State<NavigateScreen> {
   }
 
   Future<void> _onStyleLoaded() async {
-    await _routeLayer?.ensure();
+    await _routeLayer?.ensure(arrowScale: Settings.instance.chevronScale.value);
     // Default the start point to GPS the moment the map's ready, mirroring
     // how a real nav app opens already anchored to "here" — silently left
     // unset if location is denied/unavailable, same as every other

@@ -87,14 +87,33 @@ class TrailGuideApp extends StatelessWidget {
       ),
       builder: (context, child) {
         // Bump text at least 15% larger, but still honour the user's system
-        // font-size setting when they've made it bigger.
-        final mq = MediaQuery.of(context);
-        final scale = mq.textScaler.scale(1.0);
-        return MediaQuery(
-          data: mq.copyWith(
-            textScaler: TextScaler.linear(scale < 1.15 ? 1.15 : scale),
-          ),
-          child: child!,
+        // font-size setting when they've made it bigger. Settings.uiScale is
+        // then applied on top as its own independent multiplier — added for
+        // accessibility (parents with low vision), separate from whatever
+        // the phone's own system font size already does. Icon glyphs get
+        // the same multiplier via IconTheme so unlabelled buttons (map
+        // toolbars, FABs) grow too, not just text — note this resizes the
+        // icon *glyph*, not a fixed-size widget like FloatingActionButton's
+        // own circular footprint (Android has no continuous-size FAB); a
+        // few screens (GuideScreen's FAB column, see HudScale) additionally
+        // scale the whole button, not just its icon.
+        return ValueListenableBuilder<double>(
+          valueListenable: Settings.instance.uiScale,
+          builder: (context, uiScale, child) {
+            final mq = MediaQuery.of(context);
+            final systemScale = mq.textScaler.scale(1.0);
+            final floor = systemScale < 1.15 ? 1.15 : systemScale;
+            return MediaQuery(
+              data: mq.copyWith(
+                textScaler: TextScaler.linear(floor * uiScale),
+              ),
+              child: IconTheme.merge(
+                data: IconThemeData(size: 24 * uiScale),
+                child: child!,
+              ),
+            );
+          },
+          child: child,
         );
       },
       home: const HomeScreen(),

@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 
@@ -225,6 +226,31 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
           ),
           const Divider(height: 40),
+          const Text('Display size',
+              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 6),
+          const Text(
+              'Make on-screen buttons and text bigger or smaller, and the '
+              "direction arrows along a trail line easier to spot. Changes "
+              "apply the next time a walk/map screen opens.",
+              style: TextStyle(fontSize: 14, color: Color(0xFF4A4A4A))),
+          const SizedBox(height: 12),
+          _ScaleSliderControl(
+            label: 'Buttons & text size',
+            valueListenable: s.uiScale,
+            min: 0.85,
+            max: 1.75,
+            onChanged: s.setUiScale,
+          ),
+          const SizedBox(height: 8),
+          _ScaleSliderControl(
+            label: 'Trail direction arrow size',
+            valueListenable: s.chevronScale,
+            min: 0.7,
+            max: 2.2,
+            onChanged: s.setChevronScale,
+          ),
+          const Divider(height: 40),
           const Text('Trail drawing',
               style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
           const SizedBox(height: 6),
@@ -381,6 +407,55 @@ class _DetourFactorControlState extends State<_DetourFactorControl> {
               onSubmitted: _submitText,
               onTapOutside: (_) => _submitText(_controller.text),
             ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Slider + label showing "Nx" for a plain 0-2ish multiplier setting (e.g.
+/// [Settings.uiScale]/[Settings.chevronScale]) — a simpler sibling of
+/// [_DetourFactorControl] with no text-box (a coarse slider is enough here;
+/// the exact value doesn't matter to a walker the way the router's detour
+/// factor does to a trail author).
+class _ScaleSliderControl extends StatelessWidget {
+  const _ScaleSliderControl({
+    required this.label,
+    required this.valueListenable,
+    required this.min,
+    required this.max,
+    required this.onChanged,
+  });
+
+  final String label;
+  final ValueListenable<double> valueListenable;
+  final double min;
+  final double max;
+  final ValueChanged<double> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<double>(
+      valueListenable: valueListenable,
+      builder: (context, value, _) => Row(
+        children: [
+          SizedBox(width: 170, child: Text(label, style: const TextStyle(fontSize: 15))),
+          Expanded(
+            child: Slider(
+              value: value,
+              min: min,
+              max: max,
+              divisions: ((max - min) / 0.05).round(),
+              label: '${value.toStringAsFixed(2)}x',
+              onChanged: onChanged,
+            ),
+          ),
+          SizedBox(
+            width: 48,
+            child: Text('${value.toStringAsFixed(2)}x',
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontWeight: FontWeight.w600)),
           ),
         ],
       ),

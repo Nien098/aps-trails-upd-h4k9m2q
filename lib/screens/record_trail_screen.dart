@@ -407,10 +407,10 @@ class _RecordTrailScreenState extends State<RecordTrailScreen> {
     final c = _c;
     if (c == null) return;
     _route = RouteLayer(c);
-    await _route!.ensure();
+    await _route!.ensure(arrowScale: Settings.instance.chevronScale.value);
     _excursionHighlight =
         RouteLayer(c, id: 'excursionHighlight', splitOutAndBack: false);
-    await _excursionHighlight!.ensure();
+    await _excursionHighlight!.ensure(arrowScale: Settings.instance.chevronScale.value);
     // A resumed recording already has a path — draw it immediately instead
     // of waiting for the next GPS fix to trigger the first draw.
     if (_path.length >= 2) await _route!.setRoute(_path, '#1565C0');

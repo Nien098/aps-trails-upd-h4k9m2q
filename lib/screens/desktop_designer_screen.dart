@@ -288,13 +288,13 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     final c = _c;
     if (c == null) return;
     _route = RouteLayer(c);
-    await _route!.ensure();
+    await _route!.ensure(arrowScale: Settings.instance.chevronScale.value);
     _points = CueLayer(c, id: 'designerPoints');
     await _points!.ensure();
     _boundary = BoundaryLayer(c);
     await _boundary!.ensure();
     _strokeLayer = RouteLayer(c, id: 'strokePreview', splitOutAndBack: false);
-    await _strokeLayer!.ensure();
+    await _strokeLayer!.ensure(arrowScale: Settings.instance.chevronScale.value);
     await _redraw();
     _prefetchRouteGraph();
   }
@@ -504,6 +504,18 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
         final conn = await TrailRouter(c).connect(from: from, to: tap);
         end = conn.end;
         segment = conn.polyline;
+        // A straight fallback is a legitimate result (there may genuinely be
+        // no mapped trail between the two taps, especially while the live
+        // Overpass-backed offline supplement is unavailable/rate-limited —
+        // see route_graph_store_stub.dart), but it's easy to mistake for a
+        // routing bug when it silently cuts across terrain. Tell the author
+        // what happened so they know to redraw/adjust rather than assume
+        // "Follow trails" is broken — mirrors AuthorScreen._addAnchor.
+        if (from != null && !conn.followed) {
+          final why = conn.debugReason;
+          _toast('No connected trail found here — drew a straight line'
+              '${why != null ? ' ($why)' : ''}');
+        }
       } else {
         end = tap;
         segment = from == null ? [tap] : [from, tap];

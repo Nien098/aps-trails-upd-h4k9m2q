@@ -26,6 +26,7 @@ import '../services/trail_router.dart';
 import '../services/trail_store.dart';
 import '../widgets/base_map.dart';
 import '../widgets/big_action_card.dart';
+import '../widgets/hud_scale.dart';
 import 'activity_detail_screen.dart';
 
 /// The three ways a walker can bail out partway through a walk — see
@@ -842,7 +843,7 @@ class _GuideScreenState extends State<GuideScreen> {
     final c = _c;
     if (c == null) return;
     _routeLayer = RouteLayer(c);
-    await _routeLayer!.ensure();
+    await _routeLayer!.ensure(arrowScale: Settings.instance.chevronScale.value);
     await _routeLayer!.setRoute(widget.trail.path, widget.trail.color);
     _cueLayer = CueLayer(c);
     await _cueLayer!.ensure();
@@ -1139,37 +1140,42 @@ class _GuideScreenState extends State<GuideScreen> {
               top: false,
               child: Padding(
                 padding: EdgeInsets.only(bottom: reservedBottom),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    FloatingActionButton(
-                      heroTag: 'driveMode',
-                      mini: true,
-                      backgroundColor:
-                          _driveMode ? const Color(0xFF1B5E20) : null,
-                      foregroundColor: _driveMode ? Colors.white : null,
-                      tooltip: _driveMode
-                          ? 'Switch to birds-eye view'
-                          : 'Switch to drive mode (follow + tilt)',
-                      onPressed: _toggleDriveMode,
-                      child: Icon(
-                          _driveMode ? Icons.navigation : Icons.map_outlined),
-                    ),
-                    const SizedBox(height: 10),
-                    FloatingActionButton(
-                      heroTag: 'recenter',
-                      onPressed: _recenter,
-                      child: const Icon(Icons.my_location),
-                    ),
-                    const SizedBox(height: 10),
-                    FloatingActionButton(
-                      heroTag: 'search',
-                      mini: true,
-                      tooltip: 'Search streets and trails',
-                      onPressed: () => setState(() => _searchOpen = !_searchOpen),
-                      child: const Icon(Icons.search),
-                    ),
-                  ],
+                child: HudScale(
+                  alignment: Alignment.bottomRight,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      FloatingActionButton(
+                        heroTag: 'driveMode',
+                        mini: true,
+                        backgroundColor:
+                            _driveMode ? const Color(0xFF1B5E20) : null,
+                        foregroundColor: _driveMode ? Colors.white : null,
+                        tooltip: _driveMode
+                            ? 'Switch to birds-eye view'
+                            : 'Switch to drive mode (follow + tilt)',
+                        onPressed: _toggleDriveMode,
+                        child: Icon(_driveMode
+                            ? Icons.navigation
+                            : Icons.map_outlined),
+                      ),
+                      const SizedBox(height: 10),
+                      FloatingActionButton(
+                        heroTag: 'recenter',
+                        onPressed: _recenter,
+                        child: const Icon(Icons.my_location),
+                      ),
+                      const SizedBox(height: 10),
+                      FloatingActionButton(
+                        heroTag: 'search',
+                        mini: true,
+                        tooltip: 'Search streets and trails',
+                        onPressed: () =>
+                            setState(() => _searchOpen = !_searchOpen),
+                        child: const Icon(Icons.search),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -1184,13 +1190,17 @@ class _GuideScreenState extends State<GuideScreen> {
                 top: false,
                 child: Padding(
                   padding: EdgeInsets.only(bottom: reservedBottom),
-                  child: FloatingActionButton.extended(
-                    heroTag: 'repeat',
-                    backgroundColor: Colors.white,
-                    foregroundColor: Colors.black,
-                    onPressed: () => _speak(_lastSpoken!),
-                    icon: const Icon(Icons.volume_up, size: 28),
-                    label: const Text('Repeat', style: TextStyle(fontSize: 18)),
+                  child: HudScale(
+                    alignment: Alignment.bottomLeft,
+                    child: FloatingActionButton.extended(
+                      heroTag: 'repeat',
+                      backgroundColor: Colors.white,
+                      foregroundColor: Colors.black,
+                      onPressed: () => _speak(_lastSpoken!),
+                      icon: const Icon(Icons.volume_up, size: 28),
+                      label:
+                          const Text('Repeat', style: TextStyle(fontSize: 18)),
+                    ),
                   ),
                 ),
               ),

@@ -44,6 +44,14 @@ class RouteLayer {
   final String _arrowImage;
 
   bool _ready = false;
+  String? _belowId;
+
+  /// Base icon size before [setArrowScale]'s multiplier — was 0.5, bumped to
+  /// 1.3 for legibility (see below); kept as its own constant so
+  /// [setArrowScale] always means "relative to what this app already ships
+  /// with", independent of whatever that base happens to be.
+  static const _baseArrowSize = 1.3;
+  double _arrowScale = 1.0;
 
   static const _empty = {
     'type': 'FeatureCollection',
@@ -55,9 +63,12 @@ class RouteLayer {
   /// as before; `'return'` renders on the dashed, offset, arrow-free layer.
   static const _legProp = 'leg';
 
-  /// Adds the arrow image, source and layers. Call once after the style loads.
-  Future<void> ensure() async {
+  /// Adds the arrow image, source and layers. Call once after the style
+  /// loads. [arrowScale] is the initial multiplier on [_baseArrowSize] — see
+  /// [setArrowScale] to change it later on an already-`ensure()`d layer.
+  Future<void> ensure({double arrowScale = 1.0}) async {
     if (_ready) return;
+    _arrowScale = arrowScale;
     final bytes = await rootBundle.load('assets/img/arrow.png');
     await controller.addImage(_arrowImage,
         bytes.buffer.asUint8List(bytes.offsetInBytes, bytes.lengthInBytes));
@@ -70,7 +81,8 @@ class RouteLayer {
     // the top of the stack — burying every marker and label under the
     // route line and its direction arrows.
     final symbolLayerIds = controller.symbolManager?.layerIds ?? const [];
-    final belowId = symbolLayerIds.isEmpty ? null : symbolLayerIds.first;
+    _belowId = symbolLayerIds.isEmpty ? null : symbolLayerIds.first;
+    final belowId = _belowId;
 
     final notReturn = ['!=', ['get', _legProp], 'return'];
 
@@ -104,28 +116,45 @@ class RouteLayer {
       belowLayerId: belowId,
       filter: ['==', ['get', _legProp], 'return'],
     );
-    await controller.addSymbolLayer(
-      _sourceId,
-      _arrowLayerId,
-      SymbolLayerProperties(
-        iconImage: _arrowImage,
-        // Was 0.5 — nearly invisible to anyone with reduced vision, which
-        // defeats the point of an app built around being easy to read for
-        // older walkers. 1.3x renders it at a clearly legible size.
-        iconSize: 1.3,
-        symbolPlacement: 'line',
-        // Wider spacing to match the bigger icon — otherwise adjacent
-        // arrows crowd/overlap each other along tighter bends.
-        symbolSpacing: 110.0,
-        iconRotationAlignment: 'map',
-        iconAllowOverlap: true,
-        iconIgnorePlacement: true,
-      ),
-      enableInteraction: false,
-      belowLayerId: belowId,
-      filter: notReturn,
-    );
+    await _addArrowLayer(notReturn);
     _ready = true;
+  }
+
+  Future<void> _addArrowLayer(List<Object> notReturn) => controller.addSymbolLayer(
+        _sourceId,
+        _arrowLayerId,
+        SymbolLayerProperties(
+          iconImage: _arrowImage,
+          // Was 0.5 — nearly invisible to anyone with reduced vision, which
+          // defeats the point of an app built around being easy to read for
+          // older walkers. 1.3x (_baseArrowSize) renders it at a clearly
+          // legible size; [_arrowScale] lets a walker size it up/down
+          // further from Settings.
+          iconSize: _baseArrowSize * _arrowScale,
+          symbolPlacement: 'line',
+          // Wider spacing to match the bigger icon — otherwise adjacent
+          // arrows crowd/overlap each other along tighter bends.
+          symbolSpacing: 110.0,
+          iconRotationAlignment: 'map',
+          iconAllowOverlap: true,
+          iconIgnorePlacement: true,
+        ),
+        enableInteraction: false,
+        belowLayerId: _belowId,
+        filter: notReturn,
+      );
+
+  /// Changes the arrow icon size live (a [Settings.chevronScale] multiplier
+  /// on [_baseArrowSize]) by tearing down and re-adding just the arrow
+  /// layer — mirrors [CueLayer]'s hard-won lesson that this plugin/native
+  /// combination reliably applies a *new* symbol layer's properties but not
+  /// always an in-place update to an existing one. No-op before [ensure].
+  Future<void> setArrowScale(double scale) async {
+    if (!_ready || scale == _arrowScale) return;
+    _arrowScale = scale;
+    final notReturn = ['!=', ['get', _legProp], 'return'];
+    await controller.removeLayer(_arrowLayerId);
+    await _addArrowLayer(notReturn);
   }
 
   /// Updates the drawn route to [points] with line colour [colorHex]

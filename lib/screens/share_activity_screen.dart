@@ -139,7 +139,7 @@ class _ShareActivityScreenState extends State<ShareActivityScreen> {
     }
     try {
       _routeLayer = RouteLayer(c);
-      await _routeLayer!.ensure();
+      await _routeLayer!.ensure(arrowScale: Settings.instance.chevronScale.value);
       await _routeLayer!.setRoute(_points, '#1565C0');
       await _drawDistanceMarkers(c);
       await c.animateCamera(CameraUpdate.newLatLngBounds(

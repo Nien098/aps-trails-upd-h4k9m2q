@@ -25,6 +25,8 @@ class Settings {
   static const _kTtsVoice = 'tts_voice';
   static const _kBundledMapUpdated = 'bundled_map_updated';
   static const _kDriveModeFollow = 'drive_mode_follow';
+  static const _kUiScale = 'ui_scale';
+  static const _kChevronScale = 'chevron_scale';
 
   /// true = metric (m / km), false = imperial (ft / mi). Defaults to metric.
   final ValueNotifier<bool> metric = ValueNotifier(true);
@@ -115,6 +117,26 @@ class Settings {
   /// re-pick it on every single walk.
   final ValueNotifier<bool> driveModeFollow = ValueNotifier(false);
 
+  /// Overall size of the on-map "HUD" chrome — mode-bar/toolbar buttons, the
+  /// search bar, hint banners and their text — on the walking/authoring/
+  /// browsing screens. A straight multiplier applied both to text (via a
+  /// [MediaQuery] textScaler override, app-wide) and, per screen, to the
+  /// floating button clusters themselves (via a scale transform anchored to
+  /// each cluster's own screen corner, so it grows toward the visible area
+  /// rather than off-edge). Added for accessibility — older/low-vision users
+  /// need bigger touch targets and text than a fixed default serves everyone.
+  /// Defaults to 1.0 (unchanged from before this existed).
+  final ValueNotifier<double> uiScale = ValueNotifier(1.0);
+
+  /// Size of the direction chevrons drawn along a route/trail line — see
+  /// [RouteLayer]. A multiplier on top of that layer's own base icon size, so
+  /// 1.0 always means "whatever this app already shipped with", independent
+  /// of the base constant. Same accessibility motivation as [uiScale], kept
+  /// as its own separate setting since a walker may want bigger arrows
+  /// without necessarily wanting a bigger toolbar (or vice versa). Defaults
+  /// to 1.0.
+  final ValueNotifier<double> chevronScale = ValueNotifier(1.0);
+
   /// Parses a saved [ttsVoice] value into the map `FlutterTts.setVoice`
   /// expects, or null if unset/malformed (falls back to system default).
   static Map<String, String>? parseVoice(String v) {
@@ -143,6 +165,8 @@ class Settings {
     ttsVoice.value = p.getString(_kTtsVoice) ?? '';
     bundledMapUpdated.value = p.getBool(_kBundledMapUpdated) ?? false;
     driveModeFollow.value = p.getBool(_kDriveModeFollow) ?? false;
+    uiScale.value = p.getDouble(_kUiScale) ?? 1.0;
+    chevronScale.value = p.getDouble(_kChevronScale) ?? 1.0;
   }
 
   Future<void> setMetric(bool value) async {
@@ -239,6 +263,18 @@ class Settings {
     driveModeFollow.value = value;
     final p = await SharedPreferences.getInstance();
     await p.setBool(_kDriveModeFollow, value);
+  }
+
+  Future<void> setUiScale(double value) async {
+    uiScale.value = value.clamp(0.85, 1.75);
+    final p = await SharedPreferences.getInstance();
+    await p.setDouble(_kUiScale, uiScale.value);
+  }
+
+  Future<void> setChevronScale(double value) async {
+    chevronScale.value = value.clamp(0.7, 2.2);
+    final p = await SharedPreferences.getInstance();
+    await p.setDouble(_kChevronScale, chevronScale.value);
   }
 
   /// Adds a finished walk's distance and elevation gain to the lifetime totals.

@@ -48,7 +48,7 @@ class _ActivityDetailScreenState extends State<ActivityDetailScreen> {
     final c = _c;
     if (c == null || _points.length < 2) return;
     _route = RouteLayer(c);
-    await _route!.ensure();
+    await _route!.ensure(arrowScale: Settings.instance.chevronScale.value);
     await _route!.setRoute(_points, '#1565C0');
     await c.animateCamera(CameraUpdate.newLatLngBounds(
       _boundsOf(_points),

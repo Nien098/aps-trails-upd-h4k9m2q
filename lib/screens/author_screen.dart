@@ -488,11 +488,11 @@ class _AuthorScreenState extends State<AuthorScreen> {
 
   Future<void> _onStyleLoaded() async {
     _routeLayer = RouteLayer(_c!);
-    await _routeLayer!.ensure();
+    await _routeLayer!.ensure(arrowScale: Settings.instance.chevronScale.value);
     _boundaryLayer = BoundaryLayer(_c!);
     await _boundaryLayer!.ensure();
     _strokeLayer = RouteLayer(_c!, id: 'strokePreview', splitOutAndBack: false);
-    await _strokeLayer!.ensure();
+    await _strokeLayer!.ensure(arrowScale: Settings.instance.chevronScale.value);
     _otherRegionsOutline = BoundaryLayer(
       _c!,
       id: 'other-regions-outline',
@@ -1295,6 +1295,17 @@ class _AuthorScreenState extends State<AuthorScreen> {
         final conn = await TrailRouter(c).connect(from: from, to: tap);
         end = conn.end;
         segment = conn.polyline;
+        // A straight fallback is a legitimate result (there may genuinely be
+        // no mapped trail between the two taps), but it's easy to mistake
+        // for a routing bug when it silently cuts across terrain — confirmed
+        // live (2026-08-22) as a real point of confusion. Tell the author
+        // what happened so they know to redraw/adjust rather than assume
+        // "Follow trails" is broken.
+        if (from != null && !conn.followed) {
+          final why = conn.debugReason;
+          _toast('No connected trail found here — drew a straight line'
+              '${why != null ? ' ($why)' : ''}');
+        }
       } else if (_follow) {
         end = tap;
         segment = from == null ? [tap] : await TrailRouter(c).between(from, tap);
