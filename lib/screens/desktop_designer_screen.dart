@@ -355,11 +355,27 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
   /// this as a safety net.
   bool _ctrlHeld = false;
 
+  /// Tracks Shift up/down purely so [_panCursorAvailable] can show a "grab"
+  /// hand cursor the instant the key goes down — Shift itself doesn't need
+  /// tracking for the pan-override logic ([_onOverlayPointerDown] reads
+  /// `HardwareKeyboard.instance.isShiftPressed` directly at the moment a
+  /// drag starts), only for reactively updating the cursor with no pointer
+  /// movement required (reported live 2026-08-23: holding Shift in Freehand
+  /// left the cursor a plain arrow instead of a hand, since nothing was
+  /// rebuilding the overlay's `MouseRegion` on a bare key-down).
+  bool _shiftHeld = false;
+
   bool _handleKeyEvent(KeyEvent event) {
     final isCtrl = event.logicalKey == LogicalKeyboardKey.controlLeft ||
         event.logicalKey == LogicalKeyboardKey.controlRight;
-    if (!isCtrl) return false;
+    final isShift = event.logicalKey == LogicalKeyboardKey.shiftLeft ||
+        event.logicalKey == LogicalKeyboardKey.shiftRight;
+    if (!isCtrl && !isShift) return false;
     final held = event is! KeyUpEvent;
+    if (isShift) {
+      if (held != _shiftHeld) setState(() => _shiftHeld = held);
+      return false;
+    }
     if (held != _ctrlHeld) {
       setState(() => _ctrlHeld = held);
       setMapDragLocked(_captureOverlayActive);
@@ -384,6 +400,18 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
       _tool == _Tool.lineAdjust ||
       _tool == _Tool.moveAnchor ||
       _ctrlMoveActive;
+
+  /// True whenever a pointer-down on the capture overlay right now would be
+  /// treated as a camera-pan override rather than the tool's own drag — kept
+  /// in exact sync with [_onOverlayPointerDown]'s own `panOverride` check
+  /// (minus the middle-mouse-button case, which has no "held" state to show
+  /// a cursor for ahead of a click). Drives the "grab" hand cursor shown
+  /// over the map in every capturing tool while this is true, so the
+  /// keyboard override to pan is visible before the user commits to a drag —
+  /// previously there was no such feedback at all (2026-08-23 report:
+  /// "holding shift, the mouse pointer remains a regular point and not the
+  /// hand").
+  bool get _panCursorAvailable => _shiftHeld || (!_ctrlMoveActive && _ctrlHeld);
 
   void _onMapCreated(MapLibreMapController c) => _c = c;
 
@@ -1030,7 +1058,10 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     final panOverride = e.buttons == kMiddleMouseButton ||
         HardwareKeyboard.instance.isShiftPressed ||
         (!_ctrlMoveActive && HardwareKeyboard.instance.isControlPressed);
-    _overlayPanningCamera = panOverride;
+    // setState so the overlay's "grab"/"grabbing" cursor (see
+    // _panCursorAvailable) switches the instant a pan-drag actually starts,
+    // not just when the modifier key alone is pressed.
+    setState(() => _overlayPanningCamera = panOverride);
     if (panOverride) {
       _overlayPanLast = e.localPosition;
       return;
@@ -1084,7 +1115,7 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
 
   void _onOverlayPointerUp(PointerUpEvent e) {
     if (_overlayPanningCamera) {
-      _overlayPanningCamera = false;
+      setState(() => _overlayPanningCamera = false);
       _overlayPanLast = null;
       return;
     }
@@ -1101,7 +1132,7 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
 
   void _onOverlayPointerCancel(PointerCancelEvent e) {
     if (_overlayPanningCamera) {
-      _overlayPanningCamera = false;
+      setState(() => _overlayPanningCamera = false);
       _overlayPanLast = null;
     }
     if (_draggingAnchorIndex != null || _draggingCueIndex != null) {
@@ -2628,13 +2659,32 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
                   top: 0,
                   bottom: 0,
                   right: _debugPanelOpen ? _debugPanelExclusion : 0,
-                  child: Listener(
-                    behavior: HitTestBehavior.opaque,
-                    onPointerSignal: _onOverlayWheel,
-                    onPointerDown: _onOverlayPointerDown,
-                    onPointerMove: _onOverlayPointerMove,
-                    onPointerUp: _onOverlayPointerUp,
-                    onPointerCancel: _onOverlayPointerCancel,
+                  // Shows a "grab" hand cursor whenever the keyboard/mouse
+                  // combo held right now would pan the camera instead of
+                  // driving the active tool (see _panCursorAvailable, kept in
+                  // sync with _onOverlayPointerDown's own pan-override
+                  // check), switching to "grabbing" for the duration of an
+                  // actual pan drag. This overlay's plain Listener has no
+                  // cursor of its own otherwise, so without this the pointer
+                  // stayed a plain arrow the whole time a capturing tool was
+                  // active — reported live (2026-08-23) for Freehand/Shift
+                  // specifically, but the same gap existed for every tool
+                  // that mounts this overlay (Move, Adjust, Freehand,
+                  // Ctrl-held Draw/Add cue).
+                  child: MouseRegion(
+                    cursor: _overlayPanningCamera
+                        ? SystemMouseCursors.grabbing
+                        : (_panCursorAvailable
+                            ? SystemMouseCursors.grab
+                            : MouseCursor.defer),
+                    child: Listener(
+                      behavior: HitTestBehavior.opaque,
+                      onPointerSignal: _onOverlayWheel,
+                      onPointerDown: _onOverlayPointerDown,
+                      onPointerMove: _onOverlayPointerMove,
+                      onPointerUp: _onOverlayPointerUp,
+                      onPointerCancel: _onOverlayPointerCancel,
+                    ),
                   ),
                 ),
               Positioned(
