@@ -145,12 +145,6 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
   /// time.
   bool _debugPanelOpen = false;
 
-  /// Anchor index picked in [_Tool.moveAnchor] mode, awaiting the click that
-  /// places it — a simple click-then-click flow (mirrors the older tap-to-
-  /// place flow `AuthorScreen._placeMovingAnchor` still supports) rather than
-  /// a drag gesture, since there's no tappable/draggable native anchor
-  /// annotation here (see the class doc).
-  int? _pendingMoveAnchorIndex;
 
   /// The generation-boundary outline, built up one click at a time in
   /// [_Tool.drawBoundary] mode and drawn live via [_boundary] on every
@@ -275,13 +269,54 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
   void initState() {
     super.initState();
     PointerProbe.ensureStarted();
+    HardwareKeyboard.instance.addHandler(_handleKeyEvent);
   }
 
   @override
   void dispose() {
+    HardwareKeyboard.instance.removeHandler(_handleKeyEvent);
     _prefetchDebounce?.cancel();
     super.dispose();
   }
+
+  /// Tracks Ctrl up/down so [_Tool.draw]/[_Tool.addCue] can temporarily
+  /// behave like [_Tool.moveAnchor] while held — see [_ctrlMoveActive]. Never
+  /// swallows the event (`return false`) so normal shortcuts (undo, etc.)
+  /// keep working while Ctrl is held. If a keyup is ever missed (e.g. the
+  /// browser tab loses focus mid-hold, a known general limitation of
+  /// tracking modifier keys this way), [_onOverlayPointerCancel] also clears
+  /// this as a safety net.
+  bool _ctrlHeld = false;
+
+  bool _handleKeyEvent(KeyEvent event) {
+    final isCtrl = event.logicalKey == LogicalKeyboardKey.controlLeft ||
+        event.logicalKey == LogicalKeyboardKey.controlRight;
+    if (!isCtrl) return false;
+    final held = event is! KeyUpEvent;
+    if (held != _ctrlHeld) {
+      setState(() => _ctrlHeld = held);
+      setMapDragLocked(_captureOverlayActive);
+    }
+    return false;
+  }
+
+  /// True while Ctrl is held and the active tool is one where a click
+  /// normally *creates* something ([_Tool.draw]/[_Tool.addCue]) — Ctrl
+  /// temporarily redirects a click-drag on an existing anchor/cue to moving
+  /// it instead, without switching tools. See the "hold Ctrl to move"
+  /// request this was built for.
+  bool get _ctrlMoveActive =>
+      _ctrlHeld && (_tool == _Tool.draw || _tool == _Tool.addCue);
+
+  /// True whenever the full-screen pointer-capturing overlay should be
+  /// mounted (and the native map's own drag-panning disabled via
+  /// [setMapDragLocked]) — every tool that needs raw drag gestures instead
+  /// of (or in addition to) a plain click, plus the Ctrl-held case above.
+  bool get _captureOverlayActive =>
+      _tool == _Tool.dragDraw ||
+      _tool == _Tool.lineAdjust ||
+      _tool == _Tool.moveAnchor ||
+      _ctrlMoveActive;
 
   void _onMapCreated(MapLibreMapController c) => _c = c;
 
@@ -385,7 +420,6 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
         ..clear()
         ..addAll(snap.cues);
       _trail.path = _composePath();
-      _pendingMoveAnchorIndex = null;
     });
     await _redraw();
   }
@@ -457,8 +491,6 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     switch (_tool) {
       case _Tool.draw:
         await _addAnchor(coords);
-      case _Tool.moveAnchor:
-        await _handleMoveAnchorClick(screenPoint, coords);
       case _Tool.deleteAnchor:
         final idx = await _nearestAnchorIndex(screenPoint);
         if (idx != null) await _confirmDeleteAnchor(idx);
@@ -487,10 +519,12 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
         await _boundary?.setPolygon(_boundaryPoints);
       case _Tool.dragDraw:
       case _Tool.lineAdjust:
-        // No-op: both tools draw via the full-screen GestureDetector
-        // overlay's pan callbacks while active, not map clicks — the
-        // overlay's HitTestBehavior.opaque means this callback shouldn't
-        // even fire, but the switch must stay exhaustive regardless.
+      case _Tool.moveAnchor:
+        // No-op: all three tools act via the full-screen Listener overlay's
+        // pointer callbacks while active (drag-to-move for moveAnchor, see
+        // _onMovePanStart/Update/End), not map clicks — the overlay's
+        // HitTestBehavior.opaque means this callback shouldn't even fire,
+        // but the switch must stay exhaustive regardless.
         break;
     }
   }
@@ -537,16 +571,120 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     }
   }
 
-  Future<void> _handleMoveAnchorClick(Point<double> screenPoint, LatLng coords) async {
-    final pending = _pendingMoveAnchorIndex;
-    if (pending == null) {
-      final idx = await _nearestAnchorIndex(screenPoint);
-      if (idx != null) setState(() => _pendingMoveAnchorIndex = idx);
+  /// Which cue is being drag-relocated in [_Tool.moveAnchor] mode (or via
+  /// [_ctrlMoveActive]), or null — mutually exclusive with
+  /// [_draggingAnchorIndex] (a single grab picks up at most one of the two).
+  int? _draggingCueIndex;
+
+  /// Picks up whatever's under [p] — an anchor first (checked first since
+  /// an anchor and a cue can legitimately sit at/near the same spot, e.g. a
+  /// "Start" cue right on anchor 1), then a cue — for a live drag-to-move,
+  /// replacing the old click-then-click flow (reported live as "clunky and
+  /// weird": pick a point, then click again elsewhere to drop it, with no
+  /// visual feedback in between). [_draggingAnchorIndex] then drives the
+  /// exact same live preview [_Tool.lineAdjust]'s own free-dragged-anchor
+  /// case already uses ([_pushAnchorDragPreview]/[_commitAnchorPosition]) —
+  /// this is that same underlying gesture, just reachable from a dedicated
+  /// Move tool (and temporarily via Ctrl) instead of only from Adjust.
+  Future<void> _onMovePanStart(Offset p) async {
+    final c = _c;
+    if (c == null) return;
+    final gen = ++_previewGeneration;
+    final mapped = _mapPoint(p);
+    final anchorIdx = await _nearestAnchorIndex(mapped);
+    if (!mounted || gen != _previewGeneration) return;
+    if (anchorIdx != null) {
+      _pushUndo();
+      setState(() {
+        _draggingAnchorIndex = anchorIdx;
+        _draggingCueIndex = null;
+      });
       return;
     }
-    _pushUndo();
-    await _commitAnchorPosition(pending, coords);
-    if (mounted) setState(() => _pendingMoveAnchorIndex = null);
+    final cueIdx = await _nearestCueIndex(mapped);
+    if (!mounted || gen != _previewGeneration) return;
+    if (cueIdx != null) {
+      _pushUndo();
+      setState(() {
+        _draggingCueIndex = cueIdx;
+        _draggingAnchorIndex = null;
+      });
+    }
+    // Neither found: a Ctrl-held click (or a Move-tool click) on empty map
+    // is deliberately a no-op — Ctrl's whole point is "move something that's
+    // already there", not "also draw/place something new".
+  }
+
+  void _onMovePanUpdate(Offset p) {
+    final mapped = _mapPoint(p);
+    _lastAdjustPoint = mapped;
+    if (_draggingAnchorIndex != null) {
+      _pushAnchorDragPreview(mapped);
+    } else if (_draggingCueIndex != null) {
+      _pushCueDragPreview(mapped);
+    }
+  }
+
+  bool _convertingCuePoint = false;
+
+  /// Live preview for a dragged cue: moves the real [Cue.position] in place
+  /// and redraws — unlike the anchor drag (which only previews a cheap
+  /// straight-line stretch via [_strokeLayer] and leaves the real anchor
+  /// marker stationary until commit), a cue has no connecting-line preview
+  /// to show instead, so this redraws the actual marker each update.
+  /// Self-throttles (skips an update if a previous one is still converting/
+  /// redrawing) rather than queueing, same pattern as
+  /// [_pushStrokePreview]/[_pushAdjustPreview] — if [CueLayer]'s full
+  /// teardown-and-rebuild ever proves too slow for this to feel live, that's
+  /// the constant to revisit, not this method's shape.
+  Future<void> _pushCueDragPreview(Point<double> p) async {
+    final c = _c;
+    final idx = _draggingCueIndex;
+    if (c == null || idx == null || _convertingCuePoint || !mounted) return;
+    final gen = _previewGeneration;
+    _convertingCuePoint = true;
+    try {
+      final latlng = await c.toLatLng(p);
+      if (!mounted || _draggingCueIndex != idx || gen != _previewGeneration) return;
+      _trail.cues[idx].position = latlng;
+      await _redraw();
+    } finally {
+      _convertingCuePoint = false;
+    }
+  }
+
+  /// Commits whichever grab is active: an anchor re-routes exactly like the
+  /// old click-then-click flow did ([_commitAnchorPosition]); a cue snaps
+  /// onto the trail's own path (always, regardless of "Follow trails" — a
+  /// cue belongs on the line it's guiding, same rule [_onMapClick]'s
+  /// add-cue case already applies) and redraws once more with the final,
+  /// snapped position.
+  Future<void> _onMovePanEnd() async {
+    final c = _c;
+    final draggingAnchor = _draggingAnchorIndex;
+    final draggingCue = _draggingCueIndex;
+    final point = _lastAdjustPoint;
+    setState(() {
+      _previewGeneration++;
+      _draggingAnchorIndex = null;
+      _draggingCueIndex = null;
+      _lastAdjustPoint = null;
+    });
+    await _strokeLayer?.setRoute(const [], _strokePreviewColor);
+    if (!mounted || c == null || point == null) return;
+
+    final newPos = await c.toLatLng(point);
+    if (!mounted) return;
+
+    if (draggingAnchor != null) {
+      await _commitAnchorPosition(draggingAnchor, newPos);
+    } else if (draggingCue != null) {
+      final snapped = _trail.path.length >= 2
+          ? nearestPointOnPath(newPos, _trail.path)
+          : newPos;
+      setState(() => _trail.cues[draggingCue].position = snapped);
+      await _redraw();
+    }
   }
 
   /// Re-routes the segment(s) touching anchor [idx] to [pos] — mirrors
@@ -677,20 +815,31 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
   /// pointer-down — a `GestureDetector`'s pan callbacks don't expose either
   /// of those. Lets the user pan the map with the middle mouse button, or
   /// by holding Shift/Ctrl, without having to switch the tool off and back
-  /// on just to reposition the view mid-edit.
+  /// on just to reposition the view mid-edit. Ctrl is excluded from that
+  /// pan-override check while [_ctrlMoveActive] — Ctrl is already spoken
+  /// for there (hold to move an anchor/cue), so it can't also mean "pan" in
+  /// that state; Shift and the middle button still work.
   void _onOverlayPointerDown(PointerDownEvent e) {
     final panOverride = e.buttons == kMiddleMouseButton ||
         HardwareKeyboard.instance.isShiftPressed ||
-        HardwareKeyboard.instance.isControlPressed;
+        (!_ctrlMoveActive && HardwareKeyboard.instance.isControlPressed);
     _overlayPanningCamera = panOverride;
     if (panOverride) {
       _overlayPanLast = e.localPosition;
       return;
     }
-    if (_tool == _Tool.dragDraw) {
-      _onStrokePanStart(e.localPosition);
-    } else {
-      _onAdjustPanStart(e.localPosition);
+    switch (_tool) {
+      case _Tool.dragDraw:
+        _onStrokePanStart(e.localPosition);
+      case _Tool.moveAnchor:
+        _onMovePanStart(e.localPosition);
+      default:
+        // _Tool.lineAdjust, or a Ctrl-held draw/addCue click (_ctrlMoveActive).
+        if (_ctrlMoveActive) {
+          _onMovePanStart(e.localPosition);
+        } else {
+          _onAdjustPanStart(e.localPosition);
+        }
     }
   }
 
@@ -717,6 +866,10 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     }
     if (_tool == _Tool.dragDraw) {
       _onStrokePanUpdate(e.localPosition);
+    } else if (_tool == _Tool.moveAnchor ||
+        _draggingAnchorIndex != null ||
+        _draggingCueIndex != null) {
+      _onMovePanUpdate(e.localPosition);
     } else {
       _onAdjustPanUpdate(e.localPosition);
     }
@@ -730,6 +883,10 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     }
     if (_tool == _Tool.dragDraw) {
       _onStrokePanEnd();
+    } else if (_tool == _Tool.moveAnchor ||
+        _draggingAnchorIndex != null ||
+        _draggingCueIndex != null) {
+      _onMovePanEnd();
     } else {
       _onAdjustPanEnd();
     }
@@ -739,6 +896,14 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     if (_overlayPanningCamera) {
       _overlayPanningCamera = false;
       _overlayPanLast = null;
+    }
+    // Safety net for a missed keyup (see _handleKeyEvent's doc) — a pointer
+    // cancel (e.g. the browser tab losing focus mid-drag) is exactly the
+    // scenario where a stuck _ctrlHeld would otherwise leave the overlay
+    // wrongly locked on afterward.
+    if (_ctrlHeld) {
+      setState(() => _ctrlHeld = false);
+      setMapDragLocked(_captureOverlayActive);
     }
   }
 
@@ -1031,7 +1196,11 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
   /// `AuthorScreen._pushAnchorDragPreview` (minus the live-moving marker
   /// circle: this screen's anchor markers are plain non-interactive
   /// GeoJSON, redrawn wholesale by [_redraw] on commit, same as every other
-  /// anchor edit here already does).
+  /// anchor edit here already does). Shared by both [_Tool.lineAdjust]'s own
+  /// free-dragged-anchor case and [_Tool.moveAnchor]/[_ctrlMoveActive]'s
+  /// drag-to-move — [_draggingAnchorIndex] is the same field either way, so
+  /// this only needs to confirm one of those three contexts is still active,
+  /// not which specific one.
   Future<void> _pushAnchorDragPreview(Point<double> p) async {
     final c = _c;
     final idx = _draggingAnchorIndex;
@@ -1040,8 +1209,10 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     _convertingAdjustPoint = true;
     try {
       final latlng = await c.toLatLng(p);
+      final validContext =
+          _tool == _Tool.lineAdjust || _tool == _Tool.moveAnchor || _ctrlMoveActive;
       if (!mounted ||
-          _tool != _Tool.lineAdjust ||
+          !validContext ||
           _draggingAnchorIndex != idx ||
           gen != _previewGeneration) {
         return;
@@ -1430,8 +1601,8 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
       _registerStackPosition(pos);
       markers.add(CueMarker(
         position: pos,
-        radius: i == _pendingMoveAnchorIndex ? 9 : 7,
-        color: i == _pendingMoveAnchorIndex ? '#EF6C00' : '#1565C0',
+        radius: i == _draggingAnchorIndex ? 9 : 7,
+        color: i == _draggingAnchorIndex ? '#EF6C00' : '#1565C0',
         strokeWidth: 2,
         text: '${i + 1}',
         textColor: '#1A1A1A',
@@ -1514,7 +1685,8 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
       _trail = Trail(name: 'New trail', regionId: 'web-design');
       _segments.clear();
       _undoStack.clear();
-      _pendingMoveAnchorIndex = null;
+      _draggingAnchorIndex = null;
+      _draggingCueIndex = null;
       _boundaryPoints.clear();
     });
     await _boundary?.setPolygon(null);
@@ -1563,7 +1735,8 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
         ..clear()
         ..addAll(_rebuildSegments(_trail.path, _trail.anchors));
       _undoStack.clear();
-      _pendingMoveAnchorIndex = null;
+      _draggingAnchorIndex = null;
+      _draggingCueIndex = null;
       _boundaryPoints.clear();
     });
     await _boundary?.setPolygon(null);
@@ -1826,12 +1999,13 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
   }
 
   String _toolHint() => switch (_tool) {
-        _Tool.draw => 'Click the map to add a point.',
-        _Tool.moveAnchor => _pendingMoveAnchorIndex == null
-            ? 'Click an existing point to pick it up.'
-            : 'Click where it should go.',
+        _Tool.draw => 'Click the map to add a point. '
+            'Hold Ctrl and drag a point or cue to move it.',
+        _Tool.moveAnchor => 'Drag a point or cue to move it along the trail. '
+            'Middle-click-drag, or hold Shift and drag, to pan the map instead.',
         _Tool.deleteAnchor => 'Click a point to delete it.',
-        _Tool.addCue => 'Click the map to place a cue there.',
+        _Tool.addCue => 'Click the map to place a cue there. '
+            'Hold Ctrl and drag a point or cue to move it.',
         _Tool.drawBoundary =>
           'Click each corner of the area, then "Finish boundary" (${_boundaryPoints.length} so far).',
         _Tool.dragDraw => 'Click and drag to trace a trail freehand. '
@@ -1950,15 +2124,14 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
             selected: {_tool},
             onSelectionChanged: (s) {
               final next = s.first;
-              final wasCapturing =
-                  _tool == _Tool.dragDraw || _tool == _Tool.lineAdjust;
-              final willCapture =
-                  next == _Tool.dragDraw || next == _Tool.lineAdjust;
+              final wasCapturing = _tool == _Tool.dragDraw ||
+                  _tool == _Tool.lineAdjust ||
+                  _tool == _Tool.moveAnchor;
+              final willCapture = next == _Tool.dragDraw ||
+                  next == _Tool.lineAdjust ||
+                  next == _Tool.moveAnchor;
               if (wasCapturing != willCapture) setMapDragLocked(willCapture);
-              setState(() {
-                _tool = next;
-                _pendingMoveAnchorIndex = null;
-              });
+              setState(() => _tool = next);
             },
           ),
           if (_tool == _Tool.drawBoundary) ...[
@@ -2023,7 +2196,7 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
               // also reaching the draw/adjust tool underneath. Making the
               // two widgets not overlap at all, geometrically, sidesteps the
               // ambiguity entirely rather than fighting hit-test ordering.
-              if (_tool == _Tool.dragDraw || _tool == _Tool.lineAdjust)
+              if (_captureOverlayActive)
                 Positioned(
                   left: 0,
                   top: 0,
@@ -2084,8 +2257,7 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
                   // this can't clobber Freehand/Adjust's own lock).
                   child: MouseRegion(
                     onEnter: (_) => setMapDragLocked(true),
-                    onExit: (_) => setMapDragLocked(
-                        _tool == _Tool.dragDraw || _tool == _Tool.lineAdjust),
+                    onExit: (_) => setMapDragLocked(_captureOverlayActive),
                     child: _DebugPanel(onClose: () => setState(() {
                       _debugPanelOpen = false;
                       DebugLog.instance.enabled = false;
