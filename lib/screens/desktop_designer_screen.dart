@@ -210,8 +210,26 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
 
   /// Anchor index being free-dragged in [_Tool.lineAdjust] mode instead of
   /// the mid-line grab-and-bend above — mirrors
-  /// `AuthorScreen._draggingAnchorIndex`.
+  /// `AuthorScreen._draggingAnchorIndex`. Also set by [_onMovePanStart] for
+  /// the Move tool/Ctrl-drag's own anchor-drag — see [_anchorDragViaMove]
+  /// for why those two producers of this same field must stay
+  /// distinguishable.
   int? _draggingAnchorIndex;
+
+  /// True when the anchor currently in [_draggingAnchorIndex] was picked up
+  /// by [_onMovePanStart] (Move tool / Ctrl-drag) rather than
+  /// [_onAdjustPanStart] (Adjust mode's own free-anchor-drag) — both set the
+  /// same field, so this is what the pointer-move/up dispatch and the drag
+  /// preview use to tell which family of behaviour should keep driving the
+  /// rest of the gesture. Missing this distinction was a real, shipped bug
+  /// (confirmed live 2026-08-23): a plain `_draggingAnchorIndex != null`
+  /// check in the dispatch (added so a Ctrl-drag released mid-gesture still
+  /// routes correctly, see [_ctrlMoveActive]'s doc) also matched Adjust
+  /// mode's own anchor-drag, silently diverting its commit through the
+  /// Move tool's no-reroute [_commitAnchorPositionOnPath] instead of
+  /// Adjust's intended full-reroute [_commitAnchorPosition] — reported as
+  /// "Adjust no longer properly aligns the path to the trail."
+  bool _anchorDragViaMove = false;
 
   /// Real map-canvas-relative point (see [_mapPoint]) for the most recent
   /// [_Tool.lineAdjust] drag update — captured at event time, not derived
@@ -683,6 +701,7 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
       _pushUndo();
       setState(() {
         _draggingAnchorIndex = anchorIdx;
+        _anchorDragViaMove = true;
         _draggingCueIndex = null;
       });
       return;
@@ -1015,8 +1034,8 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     if (_tool == _Tool.dragDraw) {
       _onStrokePanUpdate(e.localPosition);
     } else if (_tool == _Tool.moveAnchor ||
-        _draggingAnchorIndex != null ||
-        _draggingCueIndex != null) {
+        _draggingCueIndex != null ||
+        (_draggingAnchorIndex != null && _anchorDragViaMove)) {
       _onMovePanUpdate(e.localPosition);
     } else {
       _onAdjustPanUpdate(e.localPosition);
@@ -1032,8 +1051,8 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     if (_tool == _Tool.dragDraw) {
       _onStrokePanEnd();
     } else if (_tool == _Tool.moveAnchor ||
-        _draggingAnchorIndex != null ||
-        _draggingCueIndex != null) {
+        _draggingCueIndex != null ||
+        (_draggingAnchorIndex != null && _anchorDragViaMove)) {
       _onMovePanEnd();
     } else {
       _onAdjustPanEnd();
@@ -1282,6 +1301,7 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
         _grabOriginalSeg = null;
         _grabOriginalPoint = null;
         _draggingAnchorIndex = bestAnchor;
+        _anchorDragViaMove = false;
       });
       return;
     }
@@ -1344,17 +1364,21 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     }
   }
 
-  /// Live preview for a free-dragged anchor ([_draggingAnchorIndex]): a
-  /// cheap straight-line stretch to its immediate neighbours via
-  /// [_strokeLayer] (not a live re-route — that only happens once, on
-  /// commit), plus [_dragGhost] tracking the actual cursor position so the
-  /// anchor itself visibly follows the mouse even though its real marker
-  /// (plain non-interactive GeoJSON, redrawn wholesale by [_redraw]) stays
-  /// put until commit. Shared by both [_Tool.lineAdjust]'s own
+  /// Live preview for a free-dragged anchor ([_draggingAnchorIndex]):
+  /// [_dragGhost] always tracks the actual cursor position so the anchor
+  /// itself visibly follows the mouse even though its real marker (plain
+  /// non-interactive GeoJSON, redrawn wholesale by [_redraw]) stays put
+  /// until commit. Shared by both [_Tool.lineAdjust]'s own
   /// free-dragged-anchor case and [_Tool.moveAnchor]/[_ctrlMoveActive]'s
-  /// drag-to-move — [_draggingAnchorIndex] is the same field either way, so
-  /// this only needs to confirm one of those three contexts is still active,
-  /// not which specific one.
+  /// drag-to-move ([_draggingAnchorIndex] is the same field either way,
+  /// disambiguated by [_anchorDragViaMove]) — but the two differ on the
+  /// connecting-line stretch: Adjust mode also draws it via [_strokeLayer]
+  /// (a legitimate preview of the reshape it's about to commit), while
+  /// Move/Ctrl deliberately does NOT — confirmed live (2026-08-23) as
+  /// actively misleading there, since it visually reads identically to
+  /// Adjust's own line-bending preview even though Move never touches the
+  /// line's shape at all (see [_commitAnchorPositionOnPath]). Move's drag
+  /// shows only the ghost dot, same as a dragged cue.
   Future<void> _pushAnchorDragPreview(Point<double> p) async {
     final c = _c;
     final idx = _draggingAnchorIndex;
@@ -1371,13 +1395,15 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
           gen != _previewGeneration) {
         return;
       }
-      final anchors = _trail.anchors;
-      final preview = [
-        if (idx > 0) anchors[idx - 1],
-        latlng,
-        if (idx < anchors.length - 1) anchors[idx + 1],
-      ];
-      await _strokeLayer?.setRoute(preview, _strokePreviewColor);
+      if (!_anchorDragViaMove) {
+        final anchors = _trail.anchors;
+        final preview = [
+          if (idx > 0) anchors[idx - 1],
+          latlng,
+          if (idx < anchors.length - 1) anchors[idx + 1],
+        ];
+        await _strokeLayer?.setRoute(preview, _strokePreviewColor);
+      }
       await _dragGhost?.show(latlng);
     } finally {
       _convertingAdjustPoint = false;
@@ -1923,7 +1949,14 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
   Future<bool> _confirm(String title) async {
     final ok = await _showModal(() => showOpaqueDialog<bool>(
           context,
-          maxHeight: 200,
+          // Was 200 — too tight once Settings.uiScale exists: at higher
+          // scale a longer confirmation title (e.g. "Clear the path and
+          // all cues?") wraps to more lines than this budget had room for,
+          // pushing Cancel/OK into the same silent, uninteractable overflow
+          // this file's own established gotcha warns about (painted, but
+          // not actually clickable) — confirmed live (2026-08-23) as
+          // exactly why Cancel/OK stopped responding. Generous, not exact.
+          maxHeight: 320,
           builder: (ctx) => AlertDialog(
             title: Text(title),
             actions: [
@@ -1943,7 +1976,8 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     final controller = TextEditingController(text: _trail.name);
     final name = await _showModal(() => showOpaqueDialog<String>(
           context,
-          maxHeight: 220,
+          // Same fix as _confirm's own maxHeight bump — see its comment.
+          maxHeight: 320,
           builder: (ctx) => AlertDialog(
             title: const Text('Trail name'),
             content: TextField(
