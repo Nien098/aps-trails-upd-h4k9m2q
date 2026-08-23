@@ -18,12 +18,14 @@ import '../services/map_drag_lock.dart';
 import '../services/pointer_probe.dart';
 import '../services/route_graph_store.dart';
 import '../services/route_layer.dart';
+import '../services/search_service.dart';
 import '../services/settings.dart';
 import '../services/trail_router.dart';
 import '../services/web_file_io.dart';
 import '../services/web_map_style.dart';
 import '../trail_colors.dart';
 import '../widgets/cue_editor_sheet.dart';
+import '../widgets/map_search_bar.dart';
 import '../widgets/opaque_dialog.dart';
 
 /// Desktop trail designer (Flutter Web, installed as a PWA) — a purpose-built
@@ -149,6 +151,35 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
   /// time.
   bool _debugPanelOpen = false;
 
+  /// Whether the [MapSearchBar] overlay is showing — mirrors
+  /// `AuthorScreen._searchOpen`. Unconfined (`confineTo: null`, see
+  /// [_onSearchResult]): unlike mobile's per-region screens, this screen has
+  /// no [Region]/`kRegions` concept to confine results to in the first
+  /// place — it isn't tied to swapping between separate bundled pmtiles
+  /// files the way AuthorScreen/GuideScreen are.
+  bool _searchOpen = false;
+
+  /// Toggles [_searchOpen] and pairs it with [_modalOpen] — confirmed live
+  /// (2026-08-23) that, unlike a real [showOpaqueDialog] route, this
+  /// overlay's plain `Positioned` `Card` does *not* reliably stop a click on
+  /// it from also reaching the MapLibre platform view underneath: picking a
+  /// search result dropped a real anchor at that screen position, the exact
+  /// "platform-view click-through" class [_modalOpen]'s own doc already
+  /// warns future overlays about. `_onMapClick`/`_onDrawSecondaryPointerDown`
+  /// already guard on `_modalOpen`, so reusing it here (rather than a
+  /// search-specific flag) closes the gap with zero new guard logic.
+  void _setSearchOpen(bool open) => setState(() {
+        _searchOpen = open;
+        _modalOpen = open;
+      });
+
+  /// Jumps to a searched street/trail so the author doesn't have to scroll
+  /// around to find where they want to draw — mirrors
+  /// `AuthorScreen._onSearchResult`.
+  Future<void> _onSearchResult(SearchResult result) async {
+    _setSearchOpen(false);
+    await jumpCamera(_c, result.position);
+  }
 
   /// The generation-boundary outline, built up one click at a time in
   /// [_Tool.drawBoundary] mode and drawn live via [_boundary] on every
@@ -2317,6 +2348,12 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
             _ => null,
           },
         ),
+        IconButton(
+          tooltip: 'Search streets and trails',
+          icon: const Icon(Icons.search),
+          isSelected: _searchOpen,
+          onPressed: () => _setSearchOpen(!_searchOpen),
+        ),
         const SizedBox(width: 8),
         IconButton(
           tooltip: 'Suggest turn cues',
@@ -2386,6 +2423,12 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
             ),
             const PopupMenuItem(value: 'color', child: Text('Trail colour')),
             const PopupMenuDivider(),
+            CheckedPopupMenuItem(
+              value: 'search',
+              checked: _searchOpen,
+              child: const Text('Search streets and trails'),
+            ),
+            const PopupMenuDivider(),
             const PopupMenuItem(value: 'clearPath', child: Text('Clear path')),
             const PopupMenuItem(value: 'clearCues', child: Text('Clear all cues')),
             const PopupMenuItem(value: 'clearAll', child: Text('Clear everything')),
@@ -2415,6 +2458,7 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
             'save' => _save(),
             'undo' => _undoStack.isEmpty ? null : _undo(),
             'color' => _pickColor(),
+            'search' => _setSearchOpen(!_searchOpen),
             'clearPath' => _clearPath(),
             'clearCues' => _clearCuesOnly(),
             'clearAll' => _clearAll(),
@@ -2502,6 +2546,34 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
                 rotateGesturesEnabled: false,
                 tiltGesturesEnabled: false,
               ),
+              if (_searchOpen)
+                Positioned(
+                  top: 16,
+                  left: 16,
+                  // MapLibreMap is a real native `<canvas>` platform view, not
+                  // something Flutter paints — a plain overlay widget in this
+                  // Stack does not reliably stop it from also receiving a
+                  // click underneath, confirmed live (2026-08-23): picking a
+                  // search result dropped a real anchor at that screen
+                  // position despite the [_modalOpen] guard in [_onMapClick]
+                  // (a Flutter-level check that runs too late for a
+                  // DOM-level leak like this one). Same proven fix as the
+                  // diagnostics panel just above: disable the canvas's
+                  // `pointer-events` for as long as the mouse is over this
+                  // overlay, restoring whatever the current tool wants on
+                  // exit rather than unconditionally unlocking.
+                  child: MouseRegion(
+                    onEnter: (_) => setMapDragLocked(true),
+                    onExit: (_) => setMapDragLocked(_captureOverlayActive),
+                    child: SizedBox(
+                      width: 380,
+                      child: MapSearchBar(
+                        onSelected: _onSearchResult,
+                        onClose: () => _setSearchOpen(false),
+                      ),
+                    ),
+                  ),
+                ),
               // Right-click-to-insert-anchor (Draw mode only) — translucent
               // (not opaque, unlike the capture overlay below) so an
               // ordinary left click/drag still reaches the map underneath

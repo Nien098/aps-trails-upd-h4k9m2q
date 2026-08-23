@@ -36,8 +36,10 @@ Future<void> jumpCamera(MapLibreMapController? controller, LatLng pos,
 /// than Flutter's `Autocomplete<T>`, which uses a different overlay
 /// mechanism than anything else in this app).
 ///
-/// Results re-query on every keystroke — no debounce — since FTS5 lookups at
-/// this scale (tens of thousands of rows) are sub-millisecond.
+/// Results re-query on every keystroke — no debounce — since a lookup at
+/// this scale (tens of thousands of rows) is sub-millisecond, whether it's
+/// an FTS5 query (`search_service_io.dart`) or an in-memory scan
+/// (`search_service_stub.dart`, web).
 class MapSearchBar extends StatefulWidget {
   const MapSearchBar(
       {super.key, required this.onSelected, required this.onClose, this.confineTo});
@@ -142,14 +144,15 @@ class _ResultsList extends StatelessWidget {
           itemBuilder: (context, i) {
             final r = results[i];
             return ListTile(
-              leading: Icon(
-                  r.type == SearchResultType.trail ? Icons.route : Icons.signpost),
+              leading: Icon(r.type == SearchResultType.street ? Icons.signpost : Icons.route),
               title: Text(r.name),
-              subtitle: Text(r.type == SearchResultType.trail
-                  ? 'Trail'
-                  : r.locality != null
-                      ? 'Street · ${r.locality}'
-                      : 'Street'),
+              subtitle: Text(switch (r.type) {
+                SearchResultType.trail => 'Trail',
+                SearchResultType.namedTrail =>
+                  r.locality != null ? 'Trail · ${r.locality}' : 'Trail',
+                SearchResultType.street =>
+                  r.locality != null ? 'Street · ${r.locality}' : 'Street',
+              }),
               onTap: () => onPick(r),
             );
           },

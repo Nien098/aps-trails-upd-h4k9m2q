@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
-"""Builds assets/data/streets.sqlite — a bundled, offline street-name index.
+"""Builds assets/data/streets.sqlite — a bundled, offline street/trail-name
+index.
 
-Queries the Overpass API for named roads within each bundled region's bbox
-(see lib/models/region.dart's kRegions), dedupes by name, picks a
-representative point per name (midpoint of the longest matching way), and
-writes them to a small SQLite database with an FTS5 index so the app can
-search street names entirely offline.
+Queries the Overpass API for named roads and trails (footway/path/cycleway/
+bridleway) within each bundled region's bbox (see lib/models/region.dart's
+kRegions), dedupes by name, picks a representative point per name (midpoint
+of the longest matching way), and writes them to a small SQLite database
+with an FTS5 index so the app can search street/trail names entirely
+offline. Each row's `kind` column ('street' or 'trail') is what lets the
+app distinguish a real, named OSM trail (e.g. "Trans Canada Trail") from an
+ordinary street in search results.
+
+After rebuilding this file, also re-run tools/export_streets_web_json.py —
+the web app can't use sqlite3 (no FFI on web), so it searches a flat JSON
+export of this same data instead; the two files drift apart otherwise.
 
 Usage:
     python tools/build_streets_db.py [region_id ...]
@@ -62,11 +70,18 @@ REGIONS.append(("tangerang_test", -6.25, 106.58, -6.10, 106.70))
 CELL_OVERRIDES = {"jakarta_metro_test": 0.05, "tangerang_test": 0.05}
 DEFAULT_CELL_DEG = 0.20  # generous — the 13 original small regions never needed tiling
 
-# highway=* values that overlap with the app's own trail data or aren't
-# meaningful for street search — kept as a tunable denylist.
+# highway=* values indexed as a named *trail* rather than a street — these
+# used to be excluded entirely (overlapping the app's own trail data seemed
+# redundant), but a named trail like "Trans Canada Trail" is exactly the
+# kind of thing search should be able to jump the camera to, same as a
+# street name (2026-08-23).
+TRAIL_HIGHWAY = {"footway", "path", "cycleway", "bridleway"}
+
+# highway=* values that aren't meaningful for either street or trail search
+# (tiny stair segments, indoor routing, non-built features) — kept as a
+# tunable denylist.
 EXCLUDED_HIGHWAY = {
-    "footway", "path", "steps", "cycleway", "bridleway", "corridor",
-    "proposed", "construction", "razed", "abandoned",
+    "steps", "corridor", "proposed", "construction", "razed", "abandoned",
 }
 
 
@@ -135,9 +150,10 @@ def representative_point(geom: list[dict]) -> tuple[float, float]:
     return mid["lat"], mid["lon"]
 
 
-def dedupe_streets(elements: list[dict]) -> dict[str, tuple[float, float]]:
+def dedupe_streets(elements: list[dict]) -> dict[str, tuple[float, float, str]]:
     best_len: dict[str, float] = {}
     best_point: dict[str, tuple[float, float]] = {}
+    best_kind: dict[str, str] = {}
     for el in elements:
         if el.get("type") != "way":
             continue
@@ -151,7 +167,8 @@ def dedupe_streets(elements: list[dict]) -> dict[str, tuple[float, float]]:
         if length > best_len.get(name, -1):
             best_len[name] = length
             best_point[name] = representative_point(geom)
-    return best_point
+            best_kind[name] = "trail" if highway in TRAIL_HIGHWAY else "street"
+    return {name: (*best_point[name], best_kind[name]) for name in best_point}
 
 
 def build_schema(conn: sqlite3.Connection) -> None:
@@ -162,7 +179,8 @@ def build_schema(conn: sqlite3.Connection) -> None:
             name TEXT NOT NULL,
             region_id TEXT NOT NULL,
             lat REAL NOT NULL,
-            lon REAL NOT NULL
+            lon REAL NOT NULL,
+            kind TEXT NOT NULL DEFAULT 'street'
         );
         CREATE VIRTUAL TABLE IF NOT EXISTS streets_fts USING fts5(
             name, content='streets', content_rowid='id'
@@ -202,8 +220,9 @@ def main() -> None:
         print(f"  {len(streets)} uniquely-named streets")
         conn.execute("DELETE FROM streets WHERE region_id = ?", (region_id,))
         conn.executemany(
-            "INSERT INTO streets(name, region_id, lat, lon) VALUES (?, ?, ?, ?)",
-            [(name, region_id, lat, lon) for name, (lat, lon) in streets.items()],
+            "INSERT INTO streets(name, region_id, lat, lon, kind) VALUES (?, ?, ?, ?, ?)",
+            [(name, region_id, lat, lon, kind)
+             for name, (lat, lon, kind) in streets.items()],
         )
         conn.commit()
         if len(regions) > 1:

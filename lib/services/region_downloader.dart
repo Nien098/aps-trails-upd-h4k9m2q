@@ -702,7 +702,8 @@ class RegionDownloader {
   /// One representative point per name (midpoint of the longest matching
   /// way), so a repeated street name (common for long roads split into many
   /// OSM ways) doesn't produce duplicate search results.
-  static Future<({List<({String name, double lat, double lon})> items, double coverage})>
+  static Future<
+      ({List<({String name, double lat, double lon, String kind})> items, double coverage})>
       _fetchStreets(
       double west, double south, double east, double north,
       {void Function(int done, int total)? onCellProgress}) async {
@@ -714,9 +715,12 @@ class RegionDownloader {
     return (items: _dedupeStreets(result.elements), coverage: result.coverage);
   }
 
+  // Mirrors tools/build_streets_db.py's TRAIL_HIGHWAY/EXCLUDED_HIGHWAY split
+  // exactly — a named trail (e.g. "Trans Canada Trail") is searchable
+  // alongside streets, tagged so the UI can tell them apart (2026-08-23).
+  static const _trailHighway = {'footway', 'path', 'cycleway', 'bridleway'};
   static const _excludedHighway = {
-    'footway', 'path', 'steps', 'cycleway', 'bridleway', 'corridor',
-    'proposed', 'construction', 'razed', 'abandoned',
+    'steps', 'corridor', 'proposed', 'construction', 'razed', 'abandoned',
   };
 
   /// One malformed element must never cost the whole batch — a dense/huge
@@ -728,10 +732,11 @@ class RegionDownloader {
   /// exception straight out of [_fetchStreets], discarding everything
   /// already successfully fetched and reporting "not available" instead of
   /// whatever real (possibly large) coverage had actually been gathered.
-  static List<({String name, double lat, double lon})> _dedupeStreets(
+  static List<({String name, double lat, double lon, String kind})> _dedupeStreets(
       List<Map> elements) {
     final bestLen = <String, double>{};
     final bestPoint = <String, (double, double)>{};
+    final bestKind = <String, String>{};
     for (final el in elements) {
       try {
         if (el['type'] != 'way') continue;
@@ -754,6 +759,7 @@ class RegionDownloader {
           bestLen[name] = length;
           final mid = geom[geom.length ~/ 2];
           bestPoint[name] = ((mid['lat'] as num).toDouble(), (mid['lon'] as num).toDouble());
+          bestKind[name] = _trailHighway.contains(highway) ? 'trail' : 'street';
         }
       } catch (_) {
         // Skip just this one way — see this method's doc.
@@ -761,7 +767,7 @@ class RegionDownloader {
     }
     return [
       for (final entry in bestPoint.entries)
-        (name: entry.key, lat: entry.value.$1, lon: entry.value.$2),
+        (name: entry.key, lat: entry.value.$1, lon: entry.value.$2, kind: bestKind[entry.key]!),
     ];
   }
 

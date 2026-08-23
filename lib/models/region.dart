@@ -1,10 +1,8 @@
-import 'dart:convert';
-import 'dart:io';
-
 import 'package:maplibre_gl/maplibre_gl.dart';
-import 'package:path_provider/path_provider.dart';
 
 import 'trail.dart';
+
+export 'region_store.dart';
 
 /// The single bundled offline basemap covering ~100 km around Burnaby
 /// (Victoria → Whistler → Hope → the US border). Matches the pmtiles asset
@@ -73,44 +71,6 @@ List<Region> userRegions = [];
 
 /// Bundled bookmarks + any downloaded regions.
 List<Region> allRegions() => [...kRegions, ...userRegions];
-
-Future<File> _userRegionsFile() async {
-  final dir = await getApplicationDocumentsDirectory();
-  return File('${dir.path}/user_regions.json');
-}
-
-Future<void> loadUserRegions() async {
-  try {
-    final f = await _userRegionsFile();
-    if (!f.existsSync()) return;
-    final list = jsonDecode(await f.readAsString()) as List;
-    userRegions = [for (final e in list) Region.fromJson(e as Map<String, dynamic>)];
-  } catch (_) {
-    userRegions = [];
-  }
-}
-
-Future<void> _saveUserRegions() async {
-  final f = await _userRegionsFile();
-  await f.writeAsString(jsonEncode([for (final r in userRegions) r.toJson()]));
-}
-
-Future<void> addUserRegion(Region r) async {
-  userRegions.removeWhere((e) => e.id == r.id);
-  userRegions.add(r);
-  await _saveUserRegions();
-}
-
-Future<void> removeUserRegion(String id) async {
-  userRegions.removeWhere((e) => e.id == id);
-  await _saveUserRegions();
-  // Best-effort delete of the downloaded basemap file.
-  try {
-    final dir = await getApplicationDocumentsDirectory();
-    final f = File('${dir.path}/map/$id.pmtiles');
-    if (f.existsSync()) await f.delete();
-  } catch (_) {}
-}
 
 /// Bookmarked areas within the bundled map. The bundled pmtiles covers a
 /// ~100km span (Victoria → Whistler → Hope → the US border) as one file, so

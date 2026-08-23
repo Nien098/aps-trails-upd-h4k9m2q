@@ -633,6 +633,23 @@ class TrailRouter {
     // so the trail reads as one continuous edge again.
     graph._mergeNearbyNodes(_mergeToleranceMeters);
     final afterMerge = sw?.elapsedMilliseconds;
+    // A real T-junction — one way's endpoint terminating against the middle
+    // of another way, with no shared vertex at all — is invisible to both
+    // of the passes above: [_mergeNearbyNodes] only bridges two *loose ends*
+    // near each other, and [_splitCrossings] only catches a proper X-shaped
+    // crossing. Confirmed as a real, reproducible gap (2026-08-23): a
+    // reported "can't auto-generate through this junction no matter where
+    // the anchors go" location has a fully-connected shared vertex in the
+    // offline route-graph data, but the *rendered* vector tile (simplified
+    // for the current zoom level, same as any vector-tile pyramid) drops
+    // that exact vertex from one of the two ways — Douglas-Peucker-style
+    // simplification is free to omit a point sitting almost exactly on a
+    // neighbouring straight run, which is exactly the shape a T-junction
+    // has. See [_Graph._snapDanglingEndsToSegments]'s own doc for why this
+    // is restricted to loose ends only, mirroring [_mergeNearbyNodes]'s
+    // safety net against welding unrelated nearby paths together.
+    graph._snapDanglingEndsToSegments(_mergeToleranceMeters);
+    final afterSnap = sw?.elapsedMilliseconds;
     // Two edges that visibly cross on the map (a trail crossing a road,
     // most commonly) are otherwise invisible to the router as a connection
     // point unless the source data happens to place a real shared vertex
@@ -641,10 +658,12 @@ class TrailRouter {
     graph._splitCrossings();
     if (sw != null) {
       final mergeMs = afterMerge! - afterFeatures!;
-      final crossMs = sw.elapsedMilliseconds - afterMerge;
+      final snapMs = afterSnap! - afterMerge;
+      final crossMs = sw.elapsedMilliseconds - afterSnap;
       DebugLog.instance.log('_buildGraph: ${graph.nodes.length} nodes, '
           '${sw.elapsedMilliseconds}ms total (features ${afterFeatures}ms, '
-          'mergeNearbyNodes ${mergeMs}ms, splitCrossings ${crossMs}ms)');
+          'mergeNearbyNodes ${mergeMs}ms, snapDanglingEnds ${snapMs}ms, '
+          'splitCrossings ${crossMs}ms)');
     }
     return graph;
   }
@@ -658,6 +677,7 @@ class TrailRouter {
     await _addFeaturesToGraph(graph, rect,
         include: _includeFor(Surface.mixed), geoBounds: geoBounds);
     graph._mergeNearbyNodes(_mergeToleranceMeters);
+    graph._snapDanglingEndsToSegments(_mergeToleranceMeters);
     return graph;
   }
 
@@ -934,6 +954,124 @@ class _Graph {
     roadNodeKeys
       ..clear()
       ..addAll(newRoadNodeKeys);
+  }
+
+  /// Splices any *loose-end* node (degree <= 1) that falls within
+  /// [toleranceMeters] of another segment's interior — but not near either
+  /// of that segment's own endpoints — onto that segment, at the loose
+  /// end's own position.
+  ///
+  /// This is the third real junction shape, distinct from the two already
+  /// handled: [_mergeNearbyNodes] bridges two loose ends near *each other*,
+  /// and [_splitCrossings] bridges two segments that visibly cross clean
+  /// through each other. A T-junction — one way's endpoint terminating
+  /// against the middle of another way, with no shared vertex — is neither:
+  /// there's only one loose end (not two), and nothing "crosses" (one line
+  /// just stops touching the other's side). Confirmed as a real gap via a
+  /// live report (2026-08-23) of a specific junction where auto-generate/
+  /// reroute refused to connect through no matter where the anchors were
+  /// placed: the offline route-graph data for that spot has a fully
+  /// connected shared vertex, but the currently-*rendered* vector tile
+  /// (simplified for the active zoom level, same as any vector-tile
+  /// pyramid) had dropped that exact vertex from one of the two ways —
+  /// Douglas-Peucker-style simplification is free to omit a point sitting
+  /// almost exactly on a neighbouring straight run, which is precisely the
+  /// shape a T-junction has.
+  ///
+  /// Restricted to loose ends only, for the same reason [_mergeNearbyNodes]
+  /// restricts itself to loose ends: a node with 2+ connections is never a
+  /// dangling junction, so it can never trigger this and get welded onto
+  /// some unrelated nearby path it merely happens to run close to. The
+  /// `t`-interior margin (skip near either of the segment's own endpoints)
+  /// avoids double-handling what [_mergeNearbyNodes] already owns.
+  void _snapDanglingEndsToSegments(double toleranceMeters) {
+    bool isLooseEnd(String k) => (adj[k]?.length ?? 0) <= 1;
+    final looseEnds = nodes.keys.where(isLooseEnd).toList();
+    if (looseEnds.isEmpty) return;
+
+    // Snapshot before any mutation, same reasoning as [_splitCrossings]:
+    // every candidate is evaluated against the *original* segment list.
+    final segments = List.of(_segments);
+    final snaps = <int, List<(double t, String key, LatLng point)>>{};
+
+    for (final lk in looseEnds) {
+      final lp = nodes[lk]!;
+      var bestDist = toleranceMeters;
+      var bestSeg = -1;
+      var bestT = 0.0;
+      for (var i = 0; i < segments.length; i++) {
+        final seg = segments[i];
+        if (seg.aKey == lk || seg.bKey == lk) continue;
+        final proj = _projectOntoSegment(lp, seg.a, seg.b);
+        if (proj.t <= 0.02 || proj.t >= 0.98) continue;
+        final d = metersBetween(lp, proj.point);
+        if (d < bestDist) {
+          bestDist = d;
+          bestSeg = i;
+          bestT = proj.t;
+        }
+      }
+      if (bestSeg == -1) continue;
+      (snaps[bestSeg] ??= []).add((bestT, lk, lp));
+    }
+    if (snaps.isEmpty) return;
+
+    final replacements = <int, List<_Seg>>{};
+    for (final entry in snaps.entries) {
+      final seg = segments[entry.key];
+      final pts = List.of(entry.value)..sort((a, b) => a.$1.compareTo(b.$1));
+      final chainKeys = <String>[seg.aKey];
+      final chainPts = <LatLng>[seg.a];
+      for (final (_, key, point) in pts) {
+        if (key == chainKeys.last) continue;
+        chainKeys.add(key);
+        chainPts.add(point);
+      }
+      if (chainKeys.last != seg.bKey) {
+        chainKeys.add(seg.bKey);
+        chainPts.add(seg.b);
+      }
+      adj[seg.aKey]?.removeWhere((e) => e.to == seg.bKey);
+      adj[seg.bKey]?.removeWhere((e) => e.to == seg.aKey);
+      final pieces = <_Seg>[];
+      for (var k = 0; k < chainKeys.length - 1; k++) {
+        final aKey = chainKeys[k], bKey = chainKeys[k + 1];
+        final w = metersBetween(chainPts[k], chainPts[k + 1]);
+        (adj[aKey] ??= []).add(_Edge(bKey, w));
+        (adj[bKey] ??= []).add(_Edge(aKey, w));
+        pieces.add(_Seg(aKey, bKey, chainPts[k], chainPts[k + 1], seg.isRoad));
+        if (seg.isRoad) {
+          roadNodeKeys.add(aKey);
+          roadNodeKeys.add(bKey);
+        }
+      }
+      replacements[entry.key] = pieces;
+    }
+
+    final rebuilt = <_Seg>[];
+    for (var i = 0; i < segments.length; i++) {
+      final pieces = replacements[i];
+      rebuilt.addAll(pieces ?? [segments[i]]);
+    }
+    _segments
+      ..clear()
+      ..addAll(rebuilt);
+  }
+
+  /// Projects [p] onto segment [a]-[b] using the same flat lat/lng
+  /// approximation as [_properIntersection] (accurate enough at
+  /// trail/street scale) — returns how far along the segment the closest
+  /// point falls (0 at [a], 1 at [b], clamped) and that closest point.
+  static ({double t, LatLng point}) _projectOntoSegment(
+      LatLng p, LatLng a, LatLng b) {
+    final x1 = a.longitude, y1 = a.latitude;
+    final x2 = b.longitude, y2 = b.latitude;
+    final dx = x2 - x1, dy = y2 - y1;
+    final len2 = dx * dx + dy * dy;
+    if (len2 < 1e-18) return (t: 0, point: a);
+    var t = ((p.longitude - x1) * dx + (p.latitude - y1) * dy) / len2;
+    t = t.clamp(0.0, 1.0);
+    return (t: t, point: LatLng(y1 + t * dy, x1 + t * dx));
   }
 
   /// Splits every pair of edges that geometrically cross at an interior
