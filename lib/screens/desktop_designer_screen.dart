@@ -316,12 +316,28 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
   /// click-through for any future overlay added here.
   bool _modalOpen = false;
 
+  /// Every [showOpaqueDialog] call in this file (confirm/rename/colour
+  /// picker/cue editor/generator, ...) goes through this one wrapper, which
+  /// made it the right single place to add the same DOM-level
+  /// `setMapDragLocked` fix already proven for the search bar and popup
+  /// menus. [_modalOpen] alone wasn't enough here either, for the exact
+  /// same reason it wasn't for search: reported live (2026-08-24) — tapping
+  /// a confirm dialog's OK button also dropped a real anchor on the map at
+  /// that screen position. The dialog's own OK handler pops the route (and
+  /// this wrapper's `finally` clears `_modalOpen`) as a direct, synchronous
+  /// result of that same tap, so by the time the leaked platform-view click
+  /// reaches `_onMapClick`, the Flutter-level guard has already been reset
+  /// — a race `_modalOpen` can never close on its own. `setMapDragLocked`
+  /// sidesteps it by disabling the canvas at the DOM level for the dialog's
+  /// entire lifetime, independent of exactly when the Flutter route pops.
   Future<T?> _showModal<T>(Future<T?> Function() show) async {
     _modalOpen = true;
+    setMapDragLocked(true);
     try {
       return await show();
     } finally {
       if (mounted) _modalOpen = false;
+      setMapDragLocked(_captureOverlayActive);
     }
   }
 
@@ -400,6 +416,18 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
       _tool == _Tool.lineAdjust ||
       _tool == _Tool.moveAnchor ||
       _ctrlMoveActive;
+
+  /// Locks/restores the map's pointer-events for as long as a
+  /// [PopupMenuButton]'s dropdown is open — the same "platform-view
+  /// click-through" class already fixed for the search bar and diagnostics
+  /// panel. `PopupMenuButton`'s own menu route uses a small, non-full-screen
+  /// barrier (not a fully opaque route), which this file's own established
+  /// lesson (see `showOpaqueDialog`'s doc) says does not reliably stop a
+  /// click from also reaching the MapLibre canvas underneath. Reported live
+  /// on a real phone browser (2026-08-24): tapping a menu item also
+  /// registered on the map beneath it ("tap through it with your finger").
+  void _onPopupMenuOpened() => setMapDragLocked(true);
+  void _onPopupMenuClosed() => setMapDragLocked(_captureOverlayActive);
 
   /// True whenever a pointer-down on the capture overlay right now would be
   /// treated as a camera-pan override rather than the tool's own drag — kept
@@ -2316,7 +2344,24 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
   Widget _toolSelector({bool compact = false}) {
     ButtonSegment<_Tool> seg(_Tool value, IconData icon, String label) =>
         ButtonSegment(value: value, icon: Icon(icon), label: compact ? null : Text(label));
-    return SegmentedButton<_Tool>(
+    final button = SegmentedButton<_Tool>(
+      // Compact mode's own tight sizing — Material 3's default segment
+      // padding/min-width (plus whatever Settings.uiScale the author has
+      // picked, which scales icons app-wide via main_web.dart's ambient
+      // IconTheme) made all 7 icon-only segments wider than a real phone
+      // screen, forcing a horizontal scroll to reach the last couple of
+      // tools. Reported live on a real Android phone browser (2026-08-24).
+      // Shrinking padding/density here (and overriding the icon size below,
+      // decoupling just this control from the ambient uiScale) reliably
+      // fits all 7 in one row on a normal phone width instead.
+      style: compact
+          ? SegmentedButton.styleFrom(
+              visualDensity: VisualDensity.compact,
+              padding: const EdgeInsets.symmetric(horizontal: 2),
+              minimumSize: Size.zero,
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            )
+          : null,
       segments: [
         seg(_Tool.draw, Icons.edit, 'Draw'),
         seg(_Tool.moveAnchor, Icons.open_with, 'Move'),
@@ -2339,7 +2384,52 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
         setState(() => _tool = next);
       },
     );
+    return compact
+        ? IconTheme.merge(data: const IconThemeData(size: 20), child: button)
+        : button;
   }
+
+  /// Split out of the "More" [PopupMenuButton]'s `onSelected` so that
+  /// callback's body can be a plain block (needed to call
+  /// [_onPopupMenuClosed] first) while this switch stays a genuine switch
+  /// *expression* — Dart only allows the arrow-case syntax used here in an
+  /// expression context; the block-bodied callback (a bare statement
+  /// position) can't hold one directly, so it's pulled out into this
+  /// arrow-bodied method instead of rewritten as a case/break statement.
+  void _selectMoreMenuAction(String v) => switch (v) {
+        'clearPath' => _clearPath(),
+        'clearCues' => _clearCuesOnly(),
+        'clearAll' => _clearAll(),
+        'clearBoundary' => _clearGenBoundary(),
+        _ => null,
+      };
+
+  /// Same reasoning as [_selectMoreMenuAction] — pulled out of the narrow
+  /// layout's "Menu" [PopupMenuButton] so its `onSelected` can be a block
+  /// (to call [_onPopupMenuClosed] first) while this stays a genuine switch
+  /// expression.
+  void _selectMainMenuAction(String v) => switch (v) {
+        'new' => _newTrail(),
+        'open' => _open(),
+        'save' => _save(),
+        'undo' => _undoStack.isEmpty ? null : _undo(),
+        'color' => _pickColor(),
+        'search' => _setSearchOpen(!_searchOpen),
+        'clearPath' => _clearPath(),
+        'clearCues' => _clearCuesOnly(),
+        'clearAll' => _clearAll(),
+        'clearBoundary' => _clearGenBoundary(),
+        'autoCues' => _autoCues(),
+        'manageCues' => _showCueList(),
+        'generate' => _openGenerator(),
+        'followTrails' => setState(() => _followTrails = !_followTrails),
+        'displaySize' => _showDisplaySize(),
+        'debug' => setState(() {
+            _debugPanelOpen = !_debugPanelOpen;
+            DebugLog.instance.enabled = _debugPanelOpen;
+          }),
+        _ => null,
+      };
 
   /// Today's exact wide-viewport toolbar — byte-for-byte what shipped
   /// before the narrow-layout rework, never touched by it.
@@ -2372,6 +2462,8 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
         ),
         PopupMenuButton<String>(
           tooltip: 'More',
+          onOpened: _onPopupMenuOpened,
+          onCanceled: _onPopupMenuClosed,
           itemBuilder: (ctx) => [
             const PopupMenuItem(value: 'clearPath', child: Text('Clear path')),
             const PopupMenuItem(value: 'clearCues', child: Text('Clear all cues')),
@@ -2380,12 +2472,9 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
               const PopupMenuItem(
                   value: 'clearBoundary', child: Text('Clear generation boundary')),
           ],
-          onSelected: (v) => switch (v) {
-            'clearPath' => _clearPath(),
-            'clearCues' => _clearCuesOnly(),
-            'clearAll' => _clearAll(),
-            'clearBoundary' => _clearGenBoundary(),
-            _ => null,
+          onSelected: (v) {
+            _onPopupMenuClosed();
+            _selectMoreMenuAction(v);
           },
         ),
         IconButton(
@@ -2451,6 +2540,8 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
   List<Widget> _narrowActions() => [
         PopupMenuButton<String>(
           tooltip: 'Menu',
+          onOpened: _onPopupMenuOpened,
+          onCanceled: _onPopupMenuClosed,
           itemBuilder: (ctx) => [
             const PopupMenuItem(value: 'new', child: Text('New trail')),
             const PopupMenuItem(value: 'open', child: Text('Open .trail file')),
@@ -2492,27 +2583,9 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
               child: const Text('Diagnostics log'),
             ),
           ],
-          onSelected: (v) => switch (v) {
-            'new' => _newTrail(),
-            'open' => _open(),
-            'save' => _save(),
-            'undo' => _undoStack.isEmpty ? null : _undo(),
-            'color' => _pickColor(),
-            'search' => _setSearchOpen(!_searchOpen),
-            'clearPath' => _clearPath(),
-            'clearCues' => _clearCuesOnly(),
-            'clearAll' => _clearAll(),
-            'clearBoundary' => _clearGenBoundary(),
-            'autoCues' => _autoCues(),
-            'manageCues' => _showCueList(),
-            'generate' => _openGenerator(),
-            'followTrails' => setState(() => _followTrails = !_followTrails),
-            'displaySize' => _showDisplaySize(),
-            'debug' => setState(() {
-                _debugPanelOpen = !_debugPanelOpen;
-                DebugLog.instance.enabled = _debugPanelOpen;
-              }),
-            _ => null,
+          onSelected: (v) {
+            _onPopupMenuClosed();
+            _selectMainMenuAction(v);
           },
         ),
       ];
