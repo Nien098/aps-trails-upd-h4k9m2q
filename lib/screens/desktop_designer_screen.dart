@@ -289,13 +289,17 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     final c = _c;
     if (c == null) return;
     _route = RouteLayer(c);
-    await _route!.ensure(arrowScale: Settings.instance.chevronScale.value);
+    await _route!.ensure(
+        arrowScale: Settings.instance.chevronScale.value,
+        arrowVisible: Settings.instance.chevronVisible.value);
     _points = CueLayer(c, id: 'designerPoints');
     await _points!.ensure();
     _boundary = BoundaryLayer(c);
     await _boundary!.ensure();
     _strokeLayer = RouteLayer(c, id: 'strokePreview', splitOutAndBack: false);
-    await _strokeLayer!.ensure(arrowScale: Settings.instance.chevronScale.value);
+    await _strokeLayer!.ensure(
+        arrowScale: Settings.instance.chevronScale.value,
+        arrowVisible: Settings.instance.chevronVisible.value);
     await _redraw();
     _prefetchRouteGraph();
   }
@@ -1303,7 +1307,11 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
   Future<void> _showDisplaySize() async {
     await _showModal(() => showOpaqueDialog<void>(
           context,
-          maxHeight: 320,
+          // Generous — this dialog's own rows grow with uiScale itself (see
+          // _ScaleSliderRow's plain, unscaled font today vs. a future bump),
+          // and the established gotcha here is a *silently* uninteractable
+          // overflow past whatever's given, not a visible clipped edge.
+          maxHeight: 460,
           builder: (ctx) => AlertDialog(
             title: const Text('Display size'),
             content: SizedBox(
@@ -1319,16 +1327,38 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
                     onChanged: Settings.instance.setUiScale,
                   ),
                   const SizedBox(height: 8),
-                  _ScaleSliderRow(
-                    label: 'Trail direction arrow size',
-                    valueListenable: Settings.instance.chevronScale,
-                    min: 0.7,
-                    max: 2.2,
-                    onChanged: (v) {
-                      Settings.instance.setChevronScale(v);
-                      _route?.setArrowScale(v);
-                      _strokeLayer?.setArrowScale(v);
-                    },
+                  ValueListenableBuilder<bool>(
+                    valueListenable: Settings.instance.chevronVisible,
+                    builder: (context, visible, _) => SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      value: visible,
+                      title: const Text('Show trail direction arrows'),
+                      onChanged: (v) {
+                        Settings.instance.setChevronVisible(v);
+                        _route?.setArrowVisible(v);
+                        _strokeLayer?.setArrowVisible(v);
+                      },
+                    ),
+                  ),
+                  ValueListenableBuilder<bool>(
+                    valueListenable: Settings.instance.chevronVisible,
+                    builder: (context, visible, _) => Opacity(
+                      opacity: visible ? 1 : 0.4,
+                      child: IgnorePointer(
+                        ignoring: !visible,
+                        child: _ScaleSliderRow(
+                          label: 'Arrow size',
+                          valueListenable: Settings.instance.chevronScale,
+                          min: 0.1,
+                          max: 1.5,
+                          onChanged: (v) {
+                            Settings.instance.setChevronScale(v);
+                            _route?.setArrowScale(v);
+                            _strokeLayer?.setArrowScale(v);
+                          },
+                        ),
+                      ),
+                    ),
                   ),
                 ],
               ),

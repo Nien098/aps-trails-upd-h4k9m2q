@@ -27,6 +27,7 @@ class Settings {
   static const _kDriveModeFollow = 'drive_mode_follow';
   static const _kUiScale = 'ui_scale';
   static const _kChevronScale = 'chevron_scale';
+  static const _kChevronVisible = 'chevron_visible';
 
   /// true = metric (m / km), false = imperial (ft / mi). Defaults to metric.
   final ValueNotifier<bool> metric = ValueNotifier(true);
@@ -134,8 +135,19 @@ class Settings {
   /// of the base constant. Same accessibility motivation as [uiScale], kept
   /// as its own separate setting since a walker may want bigger arrows
   /// without necessarily wanting a bigger toolbar (or vice versa). Defaults
-  /// to 1.0.
-  final ValueNotifier<double> chevronScale = ValueNotifier(1.0);
+  /// to 0.5 — the original 1.0 (this app's original fixed 1.3x base size)
+  /// was reported live (2026-08-22, web trail designer) as much too large
+  /// while actually drawing a trail, crowding the screen.
+  final ValueNotifier<double> chevronScale = ValueNotifier(0.5);
+
+  /// Whether the direction chevrons render at all — off entirely, not just
+  /// small, for someone who wants a completely uncluttered view of the trail
+  /// line while drawing. Independent of [chevronScale] (which still applies
+  /// once turned back on) rather than overloading scale 0 to mean "hidden",
+  /// since a real MapLibre icon layer at size 0 isn't guaranteed to render
+  /// as cleanly invisible as an explicit opacity toggle. Defaults to true
+  /// (visible) — unchanged from before this existed.
+  final ValueNotifier<bool> chevronVisible = ValueNotifier(true);
 
   /// Parses a saved [ttsVoice] value into the map `FlutterTts.setVoice`
   /// expects, or null if unset/malformed (falls back to system default).
@@ -166,7 +178,8 @@ class Settings {
     bundledMapUpdated.value = p.getBool(_kBundledMapUpdated) ?? false;
     driveModeFollow.value = p.getBool(_kDriveModeFollow) ?? false;
     uiScale.value = p.getDouble(_kUiScale) ?? 1.0;
-    chevronScale.value = p.getDouble(_kChevronScale) ?? 1.0;
+    chevronScale.value = p.getDouble(_kChevronScale) ?? 0.5;
+    chevronVisible.value = p.getBool(_kChevronVisible) ?? true;
   }
 
   Future<void> setMetric(bool value) async {
@@ -272,9 +285,15 @@ class Settings {
   }
 
   Future<void> setChevronScale(double value) async {
-    chevronScale.value = value.clamp(0.7, 2.2);
+    chevronScale.value = value.clamp(0.1, 1.5);
     final p = await SharedPreferences.getInstance();
     await p.setDouble(_kChevronScale, chevronScale.value);
+  }
+
+  Future<void> setChevronVisible(bool value) async {
+    chevronVisible.value = value;
+    final p = await SharedPreferences.getInstance();
+    await p.setBool(_kChevronVisible, value);
   }
 
   /// Adds a finished walk's distance and elevation gain to the lifetime totals.

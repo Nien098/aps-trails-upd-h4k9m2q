@@ -52,6 +52,7 @@ class RouteLayer {
   /// with", independent of whatever that base happens to be.
   static const _baseArrowSize = 1.3;
   double _arrowScale = 1.0;
+  bool _arrowVisible = true;
 
   static const _empty = {
     'type': 'FeatureCollection',
@@ -64,11 +65,14 @@ class RouteLayer {
   static const _legProp = 'leg';
 
   /// Adds the arrow image, source and layers. Call once after the style
-  /// loads. [arrowScale] is the initial multiplier on [_baseArrowSize] — see
-  /// [setArrowScale] to change it later on an already-`ensure()`d layer.
-  Future<void> ensure({double arrowScale = 1.0}) async {
+  /// loads. [arrowScale] is the initial multiplier on [_baseArrowSize], and
+  /// [arrowVisible] the initial on/off state — see [setArrowScale]/
+  /// [setArrowVisible] to change either later on an already-`ensure()`d
+  /// layer.
+  Future<void> ensure({double arrowScale = 1.0, bool arrowVisible = true}) async {
     if (_ready) return;
     _arrowScale = arrowScale;
+    _arrowVisible = arrowVisible;
     final bytes = await rootBundle.load('assets/img/arrow.png');
     await controller.addImage(_arrowImage,
         bytes.buffer.asUint8List(bytes.offsetInBytes, bytes.lengthInBytes));
@@ -131,6 +135,12 @@ class RouteLayer {
           // legible size; [_arrowScale] lets a walker size it up/down
           // further from Settings.
           iconSize: _baseArrowSize * _arrowScale,
+          // Explicit on/off via opacity rather than overloading iconSize:0
+          // to mean "hidden" — a real MapLibre icon layer at size 0 isn't
+          // guaranteed to render as cleanly invisible (and still occupies
+          // its collision/placement footprint) the way an opacity toggle
+          // does. See Settings.chevronVisible.
+          iconOpacity: _arrowVisible ? 1.0 : 0.0,
           symbolPlacement: 'line',
           // Wider spacing to match the bigger icon — otherwise adjacent
           // arrows crowd/overlap each other along tighter bends.
@@ -152,6 +162,18 @@ class RouteLayer {
   Future<void> setArrowScale(double scale) async {
     if (!_ready || scale == _arrowScale) return;
     _arrowScale = scale;
+    await _rebuildArrowLayer();
+  }
+
+  /// Shows/hides the direction arrows entirely (see [Settings.chevronVisible]) —
+  /// same teardown-and-rebuild approach as [setArrowScale].
+  Future<void> setArrowVisible(bool visible) async {
+    if (!_ready || visible == _arrowVisible) return;
+    _arrowVisible = visible;
+    await _rebuildArrowLayer();
+  }
+
+  Future<void> _rebuildArrowLayer() async {
     final notReturn = ['!=', ['get', _legProp], 'return'];
     await controller.removeLayer(_arrowLayerId);
     await _addArrowLayer(notReturn);
