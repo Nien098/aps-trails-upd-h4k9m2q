@@ -1718,16 +1718,20 @@ class _AuthorScreenState extends State<AuthorScreen> {
         groups.add([cue]);
         continue;
       }
-      // 7m, not 1m — matched to suggestCues' own merge distance
-      // (cue_gen.dart's cueMergeMeters) so this display grouping and the
-      // data-level merge recorded trails already get agree on what "the
-      // same spot" means, rather than showing hand-drawn/generated cues a
-      // few metres apart as separate stacked markers that data-level merge
-      // would have collapsed.
+      // 1m, matching GuideScreen._drawCues — deliberately much tighter than
+      // cue_gen.dart's 7m cueMergeMeters (that constant decides whether two
+      // *auto-generated* waypoints represent the same real junction, a
+      // different question). Confirmed live (2026-08-22): at 7m, two
+      // distinct cues placed at genuinely separate nearby junctions
+      // silently rendered as one merged marker, making it look like only
+      // one had been placed — real cues should only ever share a marker
+      // when the author explicitly chose "Add another cue" at the exact
+      // same spot (see addAnotherCueSentinel), never just because they
+      // happened to land within a few metres of each other.
       final match = groups.where((g) =>
           !identical(g.first, _moving) &&
           !identical(g.first, _highlighted) &&
-          metersBetween(g.first.position, cue.position) < 7.0);
+          metersBetween(g.first.position, cue.position) < 1.0);
       if (match.isNotEmpty) {
         match.first.add(cue);
       } else {

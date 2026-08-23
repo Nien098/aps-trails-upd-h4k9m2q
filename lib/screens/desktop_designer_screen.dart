@@ -1349,17 +1349,22 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
     // Group cues that share (almost) the same spot so they render as one
     // merged marker (a distinct stacked colour) with every cue there listed
     // on its own text line, instead of splitting into separate, overlapping
-    // dots — mirrors `AuthorScreen._cueDisplayInfo`/`GuideScreen._drawCues`
-    // exactly, including the merge distance (7m, matched to
-    // `cue_gen.dart`'s own `cueMergeMeters` default so this display grouping
-    // agrees with what auto-generated cues already consider "the same
-    // spot").
+    // dots — mirrors `AuthorScreen._cueDisplayInfo`/`GuideScreen._drawCues`.
+    // 1m, matching `GuideScreen._drawCues` — deliberately much tighter than
+    // `cue_gen.dart`'s 7m `cueMergeMeters` (that constant decides whether
+    // two *auto-generated* waypoints represent the same real junction, a
+    // different question). Confirmed live (2026-08-22): at 7m, two distinct
+    // cues placed at genuinely separate nearby junctions silently rendered
+    // as one merged marker, making it look like only one had been placed —
+    // real cues should only ever share a marker when the author explicitly
+    // chose "Add another cue" at the exact same spot, never just because
+    // they happened to land within a few metres of each other.
     final sorted = List<Cue>.of(_trail.cues)..sort((a, b) => a.order.compareTo(b.order));
     final rank = <Cue, int>{for (var i = 0; i < sorted.length; i++) sorted[i]: i + 1};
     final groups = <List<Cue>>[];
     for (final cue in _trail.cues) {
       final match =
-          groups.where((g) => metersBetween(g.first.position, cue.position) < 7.0);
+          groups.where((g) => metersBetween(g.first.position, cue.position) < 1.0);
       if (match.isNotEmpty) {
         match.first.add(cue);
       } else {
