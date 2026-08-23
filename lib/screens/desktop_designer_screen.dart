@@ -159,19 +159,28 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
   /// files the way AuthorScreen/GuideScreen are.
   bool _searchOpen = false;
 
-  /// Toggles [_searchOpen] and pairs it with [_modalOpen] — confirmed live
-  /// (2026-08-23) that, unlike a real [showOpaqueDialog] route, this
-  /// overlay's plain `Positioned` `Card` does *not* reliably stop a click on
-  /// it from also reaching the MapLibre platform view underneath: picking a
-  /// search result dropped a real anchor at that screen position, the exact
-  /// "platform-view click-through" class [_modalOpen]'s own doc already
-  /// warns future overlays about. `_onMapClick`/`_onDrawSecondaryPointerDown`
-  /// already guard on `_modalOpen`, so reusing it here (rather than a
-  /// search-specific flag) closes the gap with zero new guard logic.
-  void _setSearchOpen(bool open) => setState(() {
-        _searchOpen = open;
-        _modalOpen = open;
-      });
+  /// Toggles [_searchOpen], pairs it with [_modalOpen] (belt-and-suspenders
+  /// guard for [_onMapClick]/[_onDrawSecondaryPointerDown]), and directly
+  /// drives [setMapDragLocked] rather than a `MouseRegion.onEnter`/`onExit`
+  /// pair — confirmed live (2026-08-23) that hover-based locking left the
+  /// map's canvas permanently unclickable after picking a result: the
+  /// overlay unmounts (via this same method, called from
+  /// [_onSearchResult]) *while the mouse is still over it*, and Flutter's
+  /// `MouseTracker` did not reliably fire `onExit` for that removal in this
+  /// case, so the lock this method now sets directly on open/close was
+  /// never being cleared. Driving the lock explicitly at the moment of the
+  /// state change, rather than inferring it from hover, has no such timing
+  /// dependency. Locking for the overlay's *entire* open duration (not just
+  /// while the cursor happens to be over the card) is also simply more
+  /// correct: search is a modal-ish action, the map shouldn't be
+  /// interactive underneath it regardless of exactly where the mouse is.
+  void _setSearchOpen(bool open) {
+    setState(() {
+      _searchOpen = open;
+      _modalOpen = open;
+    });
+    setMapDragLocked(open || _captureOverlayActive);
+  }
 
   /// Jumps to a searched street/trail so the author doesn't have to scroll
   /// around to find where they want to draw — mirrors
@@ -2557,20 +2566,18 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
                   // search result dropped a real anchor at that screen
                   // position despite the [_modalOpen] guard in [_onMapClick]
                   // (a Flutter-level check that runs too late for a
-                  // DOM-level leak like this one). Same proven fix as the
-                  // diagnostics panel just above: disable the canvas's
-                  // `pointer-events` for as long as the mouse is over this
-                  // overlay, restoring whatever the current tool wants on
-                  // exit rather than unconditionally unlocking.
-                  child: MouseRegion(
-                    onEnter: (_) => setMapDragLocked(true),
-                    onExit: (_) => setMapDragLocked(_captureOverlayActive),
-                    child: SizedBox(
-                      width: 380,
-                      child: MapSearchBar(
-                        onSelected: _onSearchResult,
-                        onClose: () => _setSearchOpen(false),
-                      ),
+                  // DOM-level leak like this one). [_setSearchOpen] locks the
+                  // canvas's `pointer-events` directly for as long as this
+                  // overlay is open — not a `MouseRegion.onEnter`/`onExit`
+                  // pair, which left the map permanently unclickable after
+                  // picking a result (the overlay unmounts *while the mouse
+                  // is still over it*, and `onExit` did not reliably fire
+                  // for that — see [_setSearchOpen]'s doc).
+                  child: SizedBox(
+                    width: 380,
+                    child: MapSearchBar(
+                      onSelected: _onSearchResult,
+                      onClose: () => _setSearchOpen(false),
                     ),
                   ),
                 ),
@@ -2605,7 +2612,17 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
               // also reaching the draw/adjust tool underneath. Making the
               // two widgets not overlap at all, geometrically, sidesteps the
               // ambiguity entirely rather than fighting hit-test ordering.
-              if (_captureOverlayActive)
+              //
+              // Also excluded whenever the search bar is open
+              // (`!_searchOpen`): this opaque, full-map Listener is what a
+              // capturing tool (Move/Adjust/Freehand/lineAdjust) uses to grab
+              // drag gestures, and being higher in this Stack than the
+              // search bar above, it was winning hit-testing over the search
+              // results list whenever one of those tools was active —
+              // reported live (2026-08-23) as "search doesn't work unless
+              // you're on the Draw tool." No drag-tool gesture should be
+              // starting on the map while the author is searching anyway.
+              if (_captureOverlayActive && !_searchOpen)
                 Positioned(
                   left: 0,
                   top: 0,
