@@ -1,6 +1,7 @@
 import 'dart:async' show Timer, unawaited;
 import 'dart:math' show Point, exp, max, min, sqrt;
 
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -1291,6 +1292,55 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
         ));
   }
 
+  /// Toolbar/text size and trail-direction-arrow size — the web designer's
+  /// only settings surface (there's no dedicated Settings screen here the
+  /// way mobile's SettingsScreen is). Both are the same Settings.uiScale/
+  /// chevronScale values mobile uses; changing them here takes effect
+  /// immediately (uiScale via main_web.dart's app-wide ValueListenableBuilder,
+  /// chevronScale via an explicit setArrowScale call below) rather than
+  /// needing a page reload — useful for a designer actually comparing sizes
+  /// live rather than just picking a number blind.
+  Future<void> _showDisplaySize() async {
+    await _showModal(() => showOpaqueDialog<void>(
+          context,
+          maxHeight: 320,
+          builder: (ctx) => AlertDialog(
+            title: const Text('Display size'),
+            content: SizedBox(
+              width: 420,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _ScaleSliderRow(
+                    label: 'Toolbar & text size',
+                    valueListenable: Settings.instance.uiScale,
+                    min: 0.85,
+                    max: 1.75,
+                    onChanged: Settings.instance.setUiScale,
+                  ),
+                  const SizedBox(height: 8),
+                  _ScaleSliderRow(
+                    label: 'Trail direction arrow size',
+                    valueListenable: Settings.instance.chevronScale,
+                    min: 0.7,
+                    max: 2.2,
+                    onChanged: (v) {
+                      Settings.instance.setChevronScale(v);
+                      _route?.setArrowScale(v);
+                      _strokeLayer?.setArrowScale(v);
+                    },
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                  onPressed: () => Navigator.pop(ctx), child: const Text('Close')),
+            ],
+          ),
+        ));
+  }
+
   /// Metres a stacked marker's *rendered* position is nudged north of its
   /// real one, per line already stacked at ~the same spot — an anchor and a
   /// cue (or two cues) at the same point is common (a "Start"/"Finish" cue
@@ -1893,6 +1943,11 @@ class _DesktopDesignerScreenState extends State<DesktopDesignerScreen> {
             selected: _followTrails,
             onSelected: (v) => setState(() => _followTrails = v),
           ),
+          IconButton(
+            icon: const Icon(Icons.format_size),
+            tooltip: 'Display size',
+            onPressed: _showDisplaySize,
+          ),
           const SizedBox(width: 8),
           IconButton(
             icon: const Icon(Icons.bug_report_outlined),
@@ -2104,6 +2159,57 @@ class _DebugPanelState extends State<_DebugPanel> {
                 );
               },
             ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Slider + "Nx" readout for a plain multiplier setting — used by
+/// [_DesktopDesignerScreenState._showDisplaySize]. Mirrors
+/// `settings_screen.dart`'s `_ScaleSliderControl` (mobile's Settings
+/// screen); kept as its own small copy here rather than shared since the
+/// two live in different screens with no existing shared-widgets file for
+/// this narrow a thing, matching how every other small helper widget in
+/// this file (`_DebugPanel`, etc.) is local to whichever screen uses it.
+class _ScaleSliderRow extends StatelessWidget {
+  const _ScaleSliderRow({
+    required this.label,
+    required this.valueListenable,
+    required this.min,
+    required this.max,
+    required this.onChanged,
+  });
+
+  final String label;
+  final ValueListenable<double> valueListenable;
+  final double min;
+  final double max;
+  final ValueChanged<double> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<double>(
+      valueListenable: valueListenable,
+      builder: (context, value, _) => Row(
+        children: [
+          SizedBox(width: 170, child: Text(label)),
+          Expanded(
+            child: Slider(
+              value: value,
+              min: min,
+              max: max,
+              divisions: ((max - min) / 0.05).round(),
+              label: '${value.toStringAsFixed(2)}x',
+              onChanged: onChanged,
+            ),
+          ),
+          SizedBox(
+            width: 48,
+            child: Text('${value.toStringAsFixed(2)}x',
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontWeight: FontWeight.w600)),
           ),
         ],
       ),
