@@ -1,4 +1,6 @@
-// Platform-conditional barrel — see js_interop_norm_web.dart's doc for why
-// this exists. Native platforms (has dart:io) get the passthrough version;
-// web gets the dartify() conversion.
-export 'js_interop_norm_web.dart' if (dart.library.io) 'js_interop_norm_io.dart';
+// Re-exports the passthrough (non-web) implementation. Used to be a
+// platform-conditional barrel with a dartify()-converting web variant for
+// the Flutter Web trail designer; that target has been fully retired
+// (replaced by a separate TypeScript rewrite), so this is now a plain
+// re-export.
+export 'js_interop_norm_io.dart';

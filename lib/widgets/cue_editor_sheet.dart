@@ -3,7 +3,6 @@ import 'package:maplibre_gl/maplibre_gl.dart';
 
 import '../cue_style.dart';
 import '../models/trail.dart';
-import 'opaque_dialog.dart';
 
 /// Returned by [showCueEditor] when the user deletes the cue being edited,
 /// distinct from `null` (cancelled) or a real [Cue] (saved).
@@ -23,25 +22,7 @@ final Cue addAnotherCueSentinel = Cue(
   order: -2,
 );
 
-/// Shows the cue editor as a modal bottom sheet (mobile) or a full-screen
-/// opaque route with a centred card (desktop, [asDialog]) — a full-window-
-/// width/height bottom sheet on a desktop browser tab is a relic of the
-/// phone layout, but the more important reason for a full *route* rather
-/// than a `Dialog`/`showModalBottomSheet` overlay: on Flutter Web,
-/// MapLibre's map is a real platform view (an actual DOM element), and
-/// confirmed on-device that a translucent overlay route (`showDialog`'s
-/// default barrier, `showModalBottomSheet`) does *not* reliably stop clicks
-/// from reaching it underneath — every click meant for the sheet/dialog
-/// (including Save/Cancel) was also landing on the map, which, with "Add
-/// cue" mode still active, immediately reopened another editor, looking
-/// permanently stuck. A `MaterialPageRoute` is `opaque: true` by default,
-/// which is what actually triggers Flutter's engine-level "hide fully-
-/// obscured platform views" behaviour — a `Dialog`'s barrier is visually
-/// translucent and isn't treated as obscuring for that purpose, so the map
-/// stayed both visible *and* clickable underneath it regardless of which
-/// overlay widget was used. Desktop callers additionally guard their own
-/// click handler while any dialog/route is open
-/// (`DesktopDesignerScreen._modalOpen`) as a second, independent layer.
+/// Shows the cue editor as a modal bottom sheet.
 /// Returns the edited cue, [deletedCueSentinel] if deleted,
 /// [addAnotherCueSentinel] if the user chose to stack another cue here
 /// (both only possible when [existing] is given), or null if cancelled.
@@ -63,7 +44,6 @@ Future<Cue?> showCueEditor(
   required LatLng position,
   Cue? existing,
   int initialOrder = 0,
-  bool asDialog = false,
 }) {
   Widget sheet(BuildContext ctx) => CueEditorSheet(
         position: position,
@@ -74,10 +54,6 @@ Future<Cue?> showCueEditor(
         onAddAnother:
             existing == null ? null : () => Navigator.pop(ctx, addAnotherCueSentinel),
       );
-
-  if (asDialog) {
-    return showOpaqueDialog<Cue>(context, maxHeight: 640, builder: sheet);
-  }
 
   return showModalBottomSheet<Cue>(
     context: context,

@@ -48,7 +48,6 @@ dependencies:
   package_info_plus: ^10.2.0
   connectivity_plus: ^6.1.0
   sqlite3: ^3.5.1
-  web: ^1.1.1
   http: ^1.2.0
 dev_dependencies:
   flutter_test:
@@ -88,7 +87,6 @@ flutter:
     - assets/img/
     - assets/style/style.json
     - assets/data/streets.sqlite
-    - assets/data/streets_web.json
     - assets/data/route_graph.sqlite
     - assets/glyphs/Noto Sans Regular/
     - assets/glyphs/Noto Sans Medium/
